@@ -1,17 +1,24 @@
 //============= variables =============//
-// erase chars: size(1): w=6 h=8, size(2): x3
-// --- fuel: low: 142, high:1266
-#include <SPI.h>
+
 #include <ESP_8_BIT_GFX.h>
-#include <mcp2515.h>
-#include <math.h>
-#include <esp_task_wdt.h>
+#include <SPI.h>
+#include <WiFi.h>
 #include <digitalWriteFast.h>
+#include <esp_task_wdt.h>
+#include <math.h>
+#include <mcp2515.h>
+#include <Wire.h>
+#include <Adafruit_ADS1X15.h>
+#include <esp_bt.h>
 
 ESP_8_BIT_GFX tv(true, 8);
 
-#define fuel_pin 35
+// #define fuel_pin 35
 #define coolant_level_pin 34
+// #define voltage_pin 33
+#define FIELD_PIN 12
+// #define CURRENT_PIN 32
+#define field_relay_pin 14
 
 #define FUEL_X 5
 #define FUEL_Y 100
@@ -67,6 +74,7 @@ char fuel_color = 0x00;
 int t = 11;
 int last_t = 0;
 int fill2 = 0;
+
 volatile int spd = 0;
 volatile uint16_t spd_t = 0;
 uint16_t raw2;
@@ -74,10 +82,10 @@ unsigned long lastPacketTime = 0;
 uint8_t oil_level_t = 0;
 int oil_level = 0;
 int last_clear = 0;
-
+//----------CAN bus variables------------------//
 struct can_frame canMsg;
 static MCP2515 mcp2515(5); // CS pin 5
-
+//------------------- warning variables ------------------//
 unsigned int counter = 0;
 int last_spd = 0;
 bool coolant_level = false;
@@ -96,6 +104,165 @@ bool conn_on = true;
 int overspeed_state = 0;
 uint8_t injector_state = 0;
 bool inj_on = true;
+const int over_speed_on = 500;
+const int over_speed_off = 170;
+
+Adafruit_ADS1115 adc;
+
+//------------------- regulator variables ------------------//
+volatile uint8_t chargeState = 0;
+volatile float voltage = 0.0;
+volatile float voltage_filtered = 13.6f; // Initialize to target
+const float alpha = 0.3;                 // Low-pass filter coefficient — faster response while
+                                         // still smooth (was: 0.2)
+// LiFePO4 charge profile
+const float voltage_target = 13.6f; // BULK/ABSORPTION target (V)
+// const float voltage_float_target = 13.6f; // FLOAT reference (informational)
+const float current_float_entry = 3.0f; // A — taper threshold to enter FLOAT
+// --- FS500E2T Hall Effect Current Sensor ---
+// Supply:      5V single-supply (ratiometric)
+// Output:      2.5V @ 0A  |  0.5V @ -600A  |  4.5V @ +600A
+// Swing:       4000mV over 1200A range  →  4 mV/A
+const float current_sensor_offset_mv = 2501.0f; // 2519
+const float current_sensor_mV_per_A = 4.0F; // 4.0f; // mV per Amp (FS500E2T)
+
+// Current ceiling thresholds for soft current limiting
+const float current_limit_upper = 20.0f; // start pulling back above this
+
+int field_pwm = 300;
+
+volatile float current_A_filtered = 0.0f; // filtered reading used for control
+// Heavy filtering to ignore noise spikes
+const float current_alpha = 0.01f;        // previously 0.02
+TaskHandle_t regulatorTaskHandle;
+
+float integral_error = 0;
+unsigned long last_regulator_time = 0;
+const float Kp = 50.0;
+// Ki slashed to 100.0 to prevent fast ramp-up on noise/glitches
+const float Ki = 100.0;
+const float Kd = 0.0;    // Kd inactive for now to keep it simple
+int voltage_raw = 0;
+volatile float ads_fuel_volts = 0.0f;
+
+void regulatorTask(void *pvParameters)
+{
+
+  TickType_t xLastWakeTime;
+  const TickType_t xFrequency = pdMS_TO_TICKS(8); // 5ms loop time for stability
+  xLastWakeTime = xTaskGetTickCount();
+
+  for (;;)
+  {
+    //-------------------- Voltage measurement
+    voltage_raw = adc.readADC_SingleEnded(0);
+    int16_t current_raw_t = adc.readADC_SingleEnded(1);
+    
+    // Glitch protection: only update if reading is sane
+    if (voltage_raw > 0 && current_raw_t > 0) {
+        voltage = adc.computeVolts(voltage_raw) * 3.565307203471698;
+        voltage_filtered = alpha * voltage + (1.0f - alpha) * voltage_filtered;
+
+        float current_mv = adc.computeVolts(current_raw_t) * 1000;
+        float current_raw = (current_mv - current_sensor_offset_mv) / current_sensor_mV_per_A;
+        current_A_filtered = current_alpha * current_raw + (1.0f - current_alpha) * current_A_filtered;
+    }
+
+    // --- Emergency relay: hard cut on severe overvoltage ---
+    if (voltage_filtered >= 14.5f)
+    {
+      digitalWriteFast(field_relay_pin, LOW);
+    }
+    else if (voltage_filtered < 13.2f)
+    {
+      digitalWriteFast(field_relay_pin, HIGH);
+    }
+
+    // --- Target settings ---
+    float v_target = 13.6f; // Max voltage is 13.6V
+
+    // Calculate dt (time elapsed in seconds) to make PID immune to loop delays
+    uint32_t current_micros = micros();
+    float dt = (current_micros - last_regulator_time) / 1000000.0f;
+    if (last_regulator_time == 0 || dt > 0.1f || dt <= 0.0f)
+    {
+      dt = 0.008f; // Default to 8ms on first run or severe lag
+    }
+    last_regulator_time = current_micros;
+
+    // 1. Seamless CC/CV Error
+    // We increase PWM until we hit EITHER 13.6V or our 20A limit.
+    // The most restrictive target (smallest error) commands the loop seamlessly.
+    float err_v = v_target - voltage_filtered;
+    float err_i = current_limit_upper - current_A_filtered;
+    float err = (err_v < err_i) ? err_v : err_i;
+
+    float p_term = Kp * err;
+    if ((field_pwm < 1023 && field_pwm > 0) || (field_pwm >= 1023 && err < 0) ||
+        (field_pwm <= 0 && err > 0))
+    {
+      integral_error += err * dt;
+    }
+    float i_term = Ki * integral_error;
+    if (i_term > 1023)
+    {
+      i_term = 1023;
+      integral_error = 1023.0f / Ki;
+    }
+    else if (i_term < 0)
+    {
+      i_term = 0;
+      integral_error = 0;
+    }
+    // float d_term = 0; // Kd * (err - last_error);
+    int voltage_pwm = constrain((int)(p_term + i_term), 0, 1023);
+
+    // 2. Absolute Hard Voltage Ceiling (Safety Override)
+    // We already have CC/CV in the PID above. These overrides are just to
+    // provide an extra push if we cross the absolute limits, but they must
+    // not be so aggressive that they cause oscillation.
+    int safety_pwm = voltage_pwm;
+    // Extra pullback if overvoltage occurs (Safety backup for PID)
+    if (voltage_filtered >= 13.65f)
+    {
+      float ov_err = 13.65f - voltage_filtered;
+      safety_pwm = safety_pwm + (int)(200.0f * ov_err);
+    }
+    // Extra pullback if overcurrent occurs (Safety backup for PID)
+    if (current_A_filtered >= current_limit_upper + 2.0f)
+    {
+      float oi_err = (current_limit_upper + 2.0f) - current_A_filtered;
+      safety_pwm = safety_pwm + (int)(20.0f * oi_err); // Mild push-back
+    }
+
+    int next_pwm = constrain(safety_pwm, 0, 1023);
+
+    field_pwm = next_pwm;
+
+    // last_error = err;
+
+    // --- State Updates (For UI Display Only) ---
+    // "FLOAT" is just when it's fully charged and resting at low current
+    // if (voltage_filtered >= 13.5f && current_A_filtered < 3.0f)
+    // {
+    //   chargeState = 1;
+    // }
+    // // "BULK" is whenever it needs to actively charge
+    // else if (voltage_filtered < 13.4f || current_A_filtered > 5.0f)
+    // {
+    //   chargeState = 0;
+    // }
+
+    field_pwm = constrain(field_pwm, 0, 1023);
+    ledcWrite(0, field_pwm);
+
+    // --- Auxiliary Sensors (Not used for regulator control, but read here to avoid I2C contention) ---
+    ads_fuel_volts = adc.computeVolts(adc.readADC_SingleEnded(2));
+
+    // task_duration = micros() - start;
+    vTaskDelayUntil(&xLastWakeTime, xFrequency);
+  }
+}
 
 //================== draw static values once ==============//
 void drawStaticGauge()
@@ -134,8 +301,10 @@ void drawStaticGauge()
   }
   tv.fillCircle(GAUGE_CX, GAUGE_CY, 10, 0xFF);
 }
-void warnings(int percent, int temp_out, int spd, int coolant_level, int oil_level, unsigned long now)
+void warnings(int percent, int temp_out, int spd, int coolant_level,
+              int oil_level, unsigned long now)
 {
+  // injector_state = true;
   buzzer_state = 0;
   //------------------------------------------
   if (percent <= LOW_FUEL_LEVEL && lowBlinkState && fuel_run)
@@ -176,7 +345,8 @@ void warnings(int percent, int temp_out, int spd, int coolant_level, int oil_lev
   }
 
   //--------------------------------------------
-  if (overspeed_state == 0 && spd > 58)
+  if (overspeed_state == 0 &&
+      spd >= 58)
   { // -------- over speed warning --------//
     overspeed_state = 1;
     counter = 0;
@@ -197,7 +367,7 @@ void warnings(int percent, int temp_out, int spd, int coolant_level, int oil_lev
     {
       buzzer_state = 1;
     }
-    if (counter > 4)
+    if (counter > 3)
     {
       overspeed_state = 2;
     }
@@ -210,7 +380,7 @@ void warnings(int percent, int temp_out, int spd, int coolant_level, int oil_lev
       speed_on = true;
       priority = 0;
     }
-    if (spd <= 58)
+    if (spd < 58)
     {
       overspeed_state = 0;
     }
@@ -250,10 +420,12 @@ void warnings(int percent, int temp_out, int spd, int coolant_level, int oil_lev
   }
   else if (!lowBlinkState && hot == true)
   {
-    tv.fillRect(WARNING_X + 30, WARNING_Y + 26, 90, 8, 0x00); // clear old warning
+    tv.fillRect(WARNING_X + 30, WARNING_Y + 26, 90, 8,
+                0x00); // clear old warning
     hot = false;
   }
-  if (now - lastPacketTime > 5000 && conn_on)
+  if (now - lastPacketTime > 5000 &&
+      conn_on)
   { // -----connection check--------------
     tv.setCursor(WARNING_X, WARNING_Y + 34);
     tv.setTextColor(0xFF);
@@ -267,12 +439,12 @@ void warnings(int percent, int temp_out, int spd, int coolant_level, int oil_lev
   }
   if (injector_state == 1 && inj_on == true)
   {
-    tv.fillCircle(20, 30, 4, 0x1C);
+    tv.fillCircle(10, 25, 5, 0x1C);
     inj_on = false;
   }
   else if (inj_on == false && injector_state == 0)
   {
-    tv.fillCircle(20, 30, 4, 0x00);
+    tv.fillCircle(10, 25, 5, 0x00);
     inj_on = true;
   }
   if (buzzer_state == 1)
@@ -288,26 +460,54 @@ void warnings(int percent, int temp_out, int spd, int coolant_level, int oil_lev
 //=================== setup ===============//
 void setup()
 {
-  // WiFi.mode(WIFI_OFF);
+  Wire.begin();
+  Wire.setClock(100000); // Slower clock for better noise immunity in engine bay
+  if (!adc.begin())
+  {
+    Serial.println("Failed to initialize ADS1115!");
+    // We don't block here because the UI might still be useful,
+    // but the regulatorTask will likely fail/crash on ADC reads.
+  }
+  adc.setGain(GAIN_TWOTHIRDS);
+  adc.setDataRate(RATE_ADS1115_860SPS);
+  WiFi.mode(WIFI_OFF);
+  WiFi.disconnect(true);
+  btStop();
   tv.begin();
   tv.copyAfterSwap = true;
-  pinMode(fuel_pin, INPUT);
+  // pinMode(fuel_pin, INPUT);
   pinModeFast(buzzer_pin, OUTPUT);
   pinModeFast(coolant_level_pin, INPUT);
-  // Serial.begin(250000);
+  // pinMode(voltage_pin, INPUT);
+  pinMode(field_relay_pin, OUTPUT);
+  digitalWriteFast(field_relay_pin, HIGH);
+  Serial.begin(250000);
   mcp2515.reset();
   mcp2515.setBitrate(CAN_500KBPS, MCP_8MHZ); // Match transmitter
   mcp2515.setNormalMode();
   esp_task_wdt_deinit();      // De-init default core WDT config
   esp_task_wdt_init(3, true); // 3s timeout with panic=true
   esp_task_wdt_add(NULL);     // Add current loop task
-  analogReadResolution(12);
-  analogSetAttenuation(ADC_11db);
+  // analogReadResolution(12);
+  // analogSetAttenuation(ADC_11db);
+  ledcSetup(0, 400, 10); // channel, freq, resolution
+  ledcAttachPin(FIELD_PIN, 0);
+
+  // Configure FreeRTOS task for regulator loop instead of hardware timer
+  xTaskCreatePinnedToCore(regulatorTask,   // Task function
+                          "RegulatorTask", // Name of task
+                          4096,            // Stack size of task
+                          NULL,            // Parameter of the task
+                          configMAX_PRIORITIES -
+                              1,                // Priority of the task (Highest)
+                          &regulatorTaskHandle, // Task handle
+                          0);                   // Pin to Core 0 (Isolate from UI on Core 1)
 }
 
 // ===================== main loop ======================//
 void loop()
 {
+  uint32_t start = micros();
   unsigned long now = millis();
   tv.waitForFrame();
   if (last_clear < 6)
@@ -329,19 +529,20 @@ void loop()
     }
     lastBlinkTime = now;
   }
-
-  if (now - lastBlinkTime2 >= blinkInterval2)
+  int over_speed_blink_interval =
+      lowBlinkState2 ? over_speed_on : over_speed_off;
+  if (now - lastBlinkTime2 >= over_speed_blink_interval)
   {
     lowBlinkState2 = !lowBlinkState2;
-    if (lowBlinkState2 == true)
+    if (lowBlinkState2 == true && counter < 10)
     {
       counter++;
     }
     lastBlinkTime2 = now;
   }
 
-  fuel_in_temporary = analogReadMilliVolts(fuel_pin); // ----- Read Fuel sensor -----
-  if (fuel_in_temporary < 2000 && fuel_in_temporary > 130)
+  fuel_in_temporary = (int)(ads_fuel_volts * 1000); // Use pre-fetched value from regulatorTask
+  if (fuel_in_temporary < 3030 && fuel_in_temporary > 197)
   {
     raw = fuel_in_temporary;
   }
@@ -376,21 +577,22 @@ void loop()
     lastValue = filtered;
   }
   smoothVal = ((smoothVal * smoother) + filtered) / (smoother + 1);
-  percent = map((int)smoothVal, 142, 1266, 0, 100);
+  percent = map((int)smoothVal, 215, 1918, 0, 100);
   percent = constrain(percent, 0, 100);
 
   //-------------------- Coolant level
   coolant_level = digitalReadFast(coolant_level_pin);
 
-  //================================ Read data from engine MCU  ===============================================//
-  // DRAIN THE CAN BUFFER! The mcp2515 has a 2-message hardware buffer.
-  // We must process all available messages per loop iteration to avoid overruns
-  // since the display drawing can block for up to 16ms due to tv.waitForFrame().
+  //================================ Read data from engine MCU
+  //===============================================//
+
   while (mcp2515.readMessage(&canMsg) == MCP2515::ERROR_OK)
   {
     if (canMsg.can_id == 0x02)
     {
-      raw2 = (uint16_t)((canMsg.data[1] << 8) | canMsg.data[0]); // Reconstruct 16-bit int from data[0-1] (little-endian)
+      raw2 = (uint16_t)((canMsg.data[1] << 8) |
+                        canMsg.data[0]); // Reconstruct 16-bit int from
+                                         // data[0-1] (little-endian)
       spd_t = (uint16_t)(canMsg.data[3] << 8 | canMsg.data[2]);
       oil_level_t = (uint8_t)canMsg.data[6];
       injector_state = canMsg.data[4];
@@ -399,7 +601,7 @@ void loop()
     }
   }
 
-  spd_l = map((int)spd_t, 10, /*1770*/ 880, 0, 220);
+  spd_l = map((int)spd_t, 10, 880, 0, 220);
   spd_l = constrain(spd_l, 0, 220);
   int spd_in = (spd_l == 220) ? 0 : spd_l;
 
@@ -439,7 +641,8 @@ void loop()
     int old_b_y1 = GAUGE_CY - 2 * sin(old_angle - PI / 2.0);
     int old_b_x2 = GAUGE_CX + 2 * cos(old_angle + PI / 2.0);
     int old_b_y2 = GAUGE_CY - 2 * sin(old_angle + PI / 2.0);
-    tv.fillTriangle(old_tip_x, old_tip_y, old_b_x1, old_b_y1, old_b_x2, old_b_y2, 0x00);
+    tv.fillTriangle(old_tip_x, old_tip_y, old_b_x1, old_b_y1, old_b_x2,
+                    old_b_y2, 0x00);
 
     // Draw new needle
     float new_angle = (200.0 - spd) * PI / 180.0;
@@ -449,7 +652,8 @@ void loop()
     int new_b_y1 = GAUGE_CY - 2 * sin(new_angle - PI / 2.0);
     int new_b_x2 = GAUGE_CX + 2 * cos(new_angle + PI / 2.0);
     int new_b_y2 = GAUGE_CY - 2 * sin(new_angle + PI / 2.0);
-    tv.fillTriangle(new_tip_x, new_tip_y, new_b_x1, new_b_y1, new_b_x2, new_b_y2, 0xE0); // Highlight needle
+    tv.fillTriangle(new_tip_x, new_tip_y, new_b_x1, new_b_y1, new_b_x2,
+                    new_b_y2, 0xE0); // Highlight needle
     // Redraw center pin
     tv.fillCircle(GAUGE_CX, GAUGE_CY, 10, 0xFF);
 
@@ -464,11 +668,52 @@ void loop()
     last_spd = spd;
   }
 
-  //----------------------------------------------
+  // --- Display voltage ---
+  static float voltage_disp = 13.6f; // Initialize to target
+  float volts = voltage_filtered;
+  voltage_disp = 0.2f * volts + (1.0f - 0.2f) * voltage_disp;
+  tv.setCursor(5, 40);
+  tv.setTextColor(0xFF, 0x00);
+  char bufV[10];
+  sprintf(bufV, "%5.1fV", voltage_filtered);
+  tv.print(bufV);
+
+  // --- Display signed current (+ charge / - discharge) ---
+  static float current_disp = 0.0f;
+  // Display the filtered current, not the raw ADC value, for a steadier
+  // readout.
+  float current_d = current_A_filtered;
+  current_disp = 0.1f * current_d + (1.0f - 0.1f) * current_disp;
+  tv.setCursor(5, 55);
+  tv.setTextColor(0xFF, 0x00);
+  char bufI[10];
+  sprintf(bufI, "%5.1fA", current_d);
+  tv.print(bufI);
+
+  // // --- Display charge state ---
+  // tv.setCursor(5, 70);
+  // tv.setTextColor(0xFF, 0x00);
+  // if (chargeState == 0)
+  // {
+  //   if (current_d > (current_float_entry + 1.0f))
+  //   {
+  //     tv.print("BULK  "); // Heavy charging
+  //   }
+  //   else
+  //   {
+  //     tv.print("ABSORB"); // Tapering current
+  //   }
+  // }
+  // else
+  // {
+  //   tv.print("FLOAT "); // Rest / self-discharge
+  // }
+
   temp_out = map((int)raw2, 250, 950, 40, 120);
   temp_out = constrain(temp_out, 40, 120);
 
-  // =========================== Send Dynamic data to display ============================
+  // =========================== Send Dynamic data to display
+  // ============================
   if (now - lastTime >= 1000)
   {
     fill = map(percent, 0, 100, 0, FUEL_HEIGHT - 4); // ----------for fuel gauge
@@ -484,11 +729,13 @@ void loop()
     }
     if (last_v != v || lastTime == 0)
     {
-      // tv.fillRect(FUEL_X + 2, FUEL_Y + 2, FUEL_WIDTH - 4, FUEL_HEIGHT - 4, 0x00);
-      tv.fillRect(FUEL_X + 2, FUEL_Y + 2, FUEL_WIDTH - 4, v - (FUEL_Y + 2), 0x00);
+      tv.fillRect(FUEL_X + 2, FUEL_Y + 2, FUEL_WIDTH - 4, v - (FUEL_Y + 2),
+                  0x00);
       tv.fillRect(FUEL_X + 2, v, FUEL_WIDTH - 4, fill, fuel_color);
       tv.setCursor(FUEL_X, FUEL_Y - 10);
-      tv.setTextColor(0xFF, 0x00); // White text on black background to erase old digits cleanly
+      tv.setTextColor(
+          0xFF,
+          0x00); // White text on black background to erase old digits cleanly
       char buf[4];
       sprintf(buf, "%3d", percent);
       tv.print(buf);
@@ -501,14 +748,17 @@ void loop()
     if (last_t != t || lastTime == 0)
     {
       // Erase previous needle only
-      tv.fillRect(TEMP_X - 5, last_t - 2, TEMP_VALUE_TICK_WIDTH, TEMP_VALUE_TICK_HEIGHT, 0x00);
+      tv.fillRect(TEMP_X - 5, last_t - 2, TEMP_VALUE_TICK_WIDTH,
+                  TEMP_VALUE_TICK_HEIGHT, 0x00);
       tv.drawFastVLine(TEMP_X, TEMP_Y, TEMP_HEIGHT, 0xFF);
       for (int i = 0; i <= 100; i += 25) //---------- draw ticks
       {
-        tv.fillRect(TEMP_X - 2, TEMP_Y + i, TEMP_TICKS_WIDTH, TEMP_TICKS_HEIGHT, 0xFF);
+        tv.fillRect(TEMP_X - 2, TEMP_Y + i, TEMP_TICKS_WIDTH, TEMP_TICKS_HEIGHT,
+                    0xFF);
       }
       // draw temp_value tick
-      tv.fillRect(TEMP_X - 5, t - 2, TEMP_VALUE_TICK_WIDTH, TEMP_VALUE_TICK_HEIGHT, 0xE0);
+      tv.fillRect(TEMP_X - 5, t - 2, TEMP_VALUE_TICK_WIDTH,
+                  TEMP_VALUE_TICK_HEIGHT, 0xE0);
       tv.setCursor(TEMP_X - 10, TEMP_Y - 10);
       tv.setTextColor(0xFF, 0x00); // Erase text automatically
       char buf[4];
@@ -521,10 +771,15 @@ void loop()
     last_t = t;
   }
   oil_level = (int)oil_level_t;
-
   warnings(percent, temp_out, spd, coolant_level, oil_level, now);
 
-  // debug
-  // Serial.println();
+  // ---------------- debug -----------------------------
+
+  Serial.print(voltage_filtered);
+  Serial.print("V   ");
+  Serial.print(current_A_filtered);
+  Serial.println("A");
+  // Serial.println(task_duration);
+
   esp_task_wdt_reset();
 }
