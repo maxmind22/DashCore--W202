@@ -8,3 +8,5 @@
 *.elf
 *.bin
 *.hex
+# IDE settings
+.vscode/
