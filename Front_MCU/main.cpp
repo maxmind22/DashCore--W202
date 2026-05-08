@@ -8,12 +8,13 @@
 #define spd_pin 3
 #define th_pin 4
 #define inj_pin 8
+#define regulator_pin 9
 
 const int tempPin = A0; 
 const int fan = 5; 
 const int ac = A1;
-
 uint8_t oil_level = 0;
+unsigned long last_check = 0;
 
 // Variables shared with ISR MUST be volatile
 volatile uint32_t lastTime = 0;
@@ -31,11 +32,9 @@ int acState_avg = 0;  // Integer for EMA AC
 bool injDisable = false;
 
 // Timers
-unsigned long lastRpmCalculationTime = 0;
 unsigned long lastSpdCalculationTime = 0;
 unsigned long lastCanSendTime = 0;
 unsigned long lastSensorTime = 0;
-unsigned long last_oil_time = 0;
 
 struct can_frame canMsg;
 MCP2515 mcp2515(10, 8000000); 
@@ -59,6 +58,25 @@ void spdISR() {
   }
 }
 
+//=================== CAN Diagnostics ==================//
+// void checkCanErrors() {
+//   uint8_t errFlags = mcp2515.getErrorFlags();
+//   if (errFlags != 0) {
+//     if (errFlags & (MCP2515::EFLG_RX0OVR | MCP2515::EFLG_RX1OVR)) {
+//       mcp2515.clearRXnOVR();
+//     }
+//     // Only completely reset the chip if it goes into Bus-Off (fatal state).
+//     // Do NOT interfere if it's just in Error Passive (TXEP/RXEP); it will self-recover.
+//     // Continuously calling setNormalMode() during Error Passive aborts transmissions 
+//     // and blocks natural recovery.
+//     if (errFlags & MCP2515::EFLG_TXBO) {
+//       mcp2515.reset();
+//       mcp2515.setBitrate(CAN_500KBPS, MCP_8MHZ);
+//       mcp2515.setNormalOneShotMode();
+//     }
+//   }
+// }
+
 void setup() {
   pinMode(fan, OUTPUT);
   pinMode(tempPin, INPUT);
@@ -68,6 +86,8 @@ void setup() {
   pinModeFast(inj_pin, OUTPUT);
   pinMode(ac, INPUT);
   pinModeFast(oil_level_pin, INPUT);
+  pinModeFast(regulator_pin, OUTPUT);
+  digitalWrite(regulator_pin, HIGH);
   // Serial.begin(115200);
   wdt_disable();
   wdt_enable(WDTO_2S);
@@ -78,14 +98,14 @@ void setup() {
 
   mcp2515.reset();
   mcp2515.setBitrate(CAN_500KBPS, MCP_8MHZ);
-  mcp2515.setNormalMode();
+  mcp2515.setNormalOneShotMode(); //mcp2515.setNormalMode();
 }
 
 void loop() {
   unsigned long currentMillis = millis();
   unsigned long currentMicros = micros();
 
-  //=================== Read Sensors & Control Fan (Every 50ms) ======================//
+  //=================== Read Sensors & Control Fan (Every 1s) ======================//
   if (currentMillis - lastSensorTime >= 1000) {
     int temp_t = analogRead(tempPin);
     
@@ -111,23 +131,29 @@ void loop() {
     lastSensorTime = currentMillis;
   }
 
-  //=================== Calculate RPM (Every 50ms) ======================//
-  if (currentMillis - lastRpmCalculationTime >= 50) {
-    noInterrupts();
-    uint32_t p = period;
-    interrupts();
-
-    if (p > 0) {
-      rpm = 60000000UL / p;
-    }
-    lastRpmCalculationTime = currentMillis;
+  //=================== Calculate RPM (Every loop) ======================//
+  noInterrupts();
+  uint32_t p = period;
+  interrupts();
+  if (p > 0) {
+    rpm = 60000000UL / p;
   }
 
   //=================== Control Injectors =====================//
   int th_Pos = digitalReadFast(th_pin);
+  static unsigned long last_inj_check = 0;
+
   if (rpm > 3000 && th_Pos == 1 && temp_avg > 440) {
-    injDisable = true; 
-  } else if (th_Pos == 0 || rpm < 2100) {
+    if (last_inj_check == 0) last_inj_check = currentMillis; // Start 1000ms timer
+    if (currentMillis - last_inj_check >= 1000) {
+      injDisable = true;
+    }
+  } else {
+    last_inj_check = 0; // Reset timer if condition no longer met
+  }
+
+  // Deactivation is instant when throttle is released or RPM drops below hysteresis limit
+  if (th_Pos == 0 || rpm < 2200) {
     injDisable = false;
   }
   digitalWriteFast(inj_pin, injDisable ? HIGH : LOW);
@@ -150,7 +176,27 @@ void loop() {
     
     lastSpdCalculationTime = currentMillis;
   }
+
+static int alive = 0;
+static unsigned long last_can = 0; 
+  // Process CAN and auto-recover errors
+  // checkCanErrors();
+  if(mcp2515.readMessage(&canMsg) == MCP2515::ERROR_OK)
+  {
+    if (canMsg.can_id == 0x03)
+    {
+      alive = canMsg.data[0];
+      last_check = currentMillis;
+    }
+  }
+  
+  // Failsafe timeout: if no message in 1000ms, assume dead
+  if (currentMillis - last_check > 1000) {
+    alive = 0; 
+  }
+
 uint8_t injDisable_s = (uint8_t)injDisable;
+uint8_t rpm_s = rpm / 100;
   //================= Send to Display MCU (Every 200ms) ===============//
   if (currentMillis - lastCanSendTime >= 200) {
     uint16_t temp_s = (uint16_t)temp_avg;
@@ -161,13 +207,19 @@ uint8_t injDisable_s = (uint8_t)injDisable;
     canMsg.data[2] = spd_s & 0xFF;
     canMsg.data[3] = spd_s >> 8;
     canMsg.data[4] = injDisable_s;                 
-    canMsg.data[5] = 0;
+    canMsg.data[5] = rpm_s;
     canMsg.data[6] = oil_level;
     canMsg.data[7] = 0;
     mcp2515.sendMessage(&canMsg);
     
     lastCanSendTime = currentMillis;
   }
-// Serial.println(rpm);
+  
+  //================= Regulator Failsafe ===============//
+  if (alive != 100) {
+    digitalWriteFast(regulator_pin, LOW);
+  } else {
+    digitalWriteFast(regulator_pin, HIGH);
+  }
   wdt_reset();
 }
