@@ -51,7 +51,6 @@ int filtered = 0;
 const int smoother = 3000;
 const int blinkInterval = 400; // ms
 const int blinkInterval2 = 120;
-int priority = 0;
 float smoothVal = 0;
 int lastValue = 0;
 int raw = 0;
@@ -62,6 +61,43 @@ int badSamples2 = 0;
 unsigned long last_fuel_correction = 0;
 int temp_out = 0;
 int percent = 0;
+
+struct CalibrationPoint {
+  int rawValue;
+  float percent;
+};
+
+const int NUM_CALIBRATION_POINTS = 11;
+const CalibrationPoint calibrationTable[NUM_CALIBRATION_POINTS] = {
+  {  1326,   0.0f }, // Height 0.0:   0.0% volume (empty)
+  {  3383,   4.9f }, // Height 0.1:   4.9% volume
+  {  5440,  10.5f }, // Height 0.2:  10.5% volume
+  {  7498,  16.8f }, // Height 0.3:  16.8% volume
+  {  9555,  23.9f }, // Height 0.4:  23.9% volume
+  { 11613,  35.4f }, // Height 0.5:  35.4% volume
+  { 13670,  50.2f }, // Height 0.6:  50.2% volume (middle bridge)
+  { 15727,  64.4f }, // Height 0.7:  64.4% volume
+  { 17785,  78.0f }, // Height 0.8:  78.0% volume
+  { 19842,  90.5f }, // Height 0.9:  90.5% volume
+  { 21900, 100.0f }, // Height 1.0: 100.0% volume (full)
+};
+
+float getFuelPercent(float rawValue) {
+  if (rawValue <= calibrationTable[0].rawValue) return calibrationTable[0].percent;
+  if (rawValue >= calibrationTable[NUM_CALIBRATION_POINTS - 1].rawValue) return calibrationTable[NUM_CALIBRATION_POINTS - 1].percent;
+
+  for (int i = 0; i < NUM_CALIBRATION_POINTS - 1; i++) {
+    if (rawValue >= calibrationTable[i].rawValue && rawValue <= calibrationTable[i + 1].rawValue) {
+      float x0 = calibrationTable[i].rawValue;
+      float x1 = calibrationTable[i + 1].rawValue;
+      float y0 = calibrationTable[i].percent;
+      float y1 = calibrationTable[i + 1].percent;
+      return y0 + (rawValue - x0) * (y1 - y0) / (x1 - x0);
+    }
+  }
+  return 0.0f;
+}
+
 //---------- display variables------------------//
 //-----------fuel
 int v = 11;
@@ -87,7 +123,7 @@ MCP2515 mcp2515(5, 8000000); // CS pin 5
 // SemaphoreHandle_t spiMutex;         // Protects MCP2515 (SPI) access across cores
 //------------------- warning variables ------------------//
 unsigned int counter = 0;
-int last_spd = 0;
+int last_spd = -1;
 bool coolant_level = false;
 int buzzer_state = 0;
 volatile int spd_l = 0;
@@ -194,9 +230,10 @@ void regulatorTask(void *pvParameters)
 
     // --- Evaluate charging system state ---
     bool severe_failure = false;
+    bool sensor_error = (consecutive_failures > 5);
 
-    // 1. Emergency hard cut on severe overvoltage or overcurrent
-    if (voltage_filtered >= v_target + 0.6f || current_A_filtered > 40.0f)
+    // 1. Emergency hard cut on severe overvoltage, overcurrent, or sensor failure
+    if (voltage_filtered >= v_target + 0.6f || current_A_filtered > 40.0f || sensor_error)
     {
       digitalWriteFast(field_relay_pin, HIGH);
       severe_failure = true;
@@ -244,13 +281,14 @@ void regulatorTask(void *pvParameters)
     float dt = (current_micros - last_regulator_time) / 1000000.0f;
     if (last_regulator_time == 0 || dt > 0.1f || dt <= 0.0f)
     {
-      dt = 0.008f; // Default to 8ms on first run or severe lag
+      dt = 0.020f; // Default to 20ms on first run or severe lag (typical loop time)
     }
     last_regulator_time = current_micros;
 
     // 1. Seamless CC/CV Error
     // We increase PWM until we hit EITHER 13.6V or our 20A limit.
     // The most restrictive target (smallest error) commands the loop seamlessly.
+    // bool over_target = false;
     float err_v = (v_target - voltage_filtered) * 100;
     float err_i = (current_limit_upper - current_A_filtered) * 10;
     float err = (err_v < err_i) ? err_v : err_i;
@@ -266,6 +304,8 @@ void regulatorTask(void *pvParameters)
       integral_error = 0.0f;
     if (integral_error > 1023.0f)
       integral_error = 1023.0f;
+    if (integral_error < 0.0f)
+      integral_error = 0.0f;
 
     float i_term = base_Ki * integral_error;
     last_error = err;
@@ -290,7 +330,16 @@ void regulatorTask(void *pvParameters)
       safety_pwm = safety_pwm + (int)(200.0f * oi_err); // Mild push-back
     }
 
-    field_pwm = constrain(safety_pwm, 0, 1023);
+    // Force field coil off if engine is not running or sensor error occurs
+    if (local_rpm == 0 || sensor_error)
+    {
+      field_pwm = 0;
+      integral_error = 0.0f; // Reset integrator
+    }
+    else
+    {
+      field_pwm = constrain(safety_pwm, 0, 1023);
+    }
 
     ledcWrite(0, field_pwm);
 
@@ -314,6 +363,7 @@ void regulatorTask(void *pvParameters)
     // task_duration = micros() - start;
     // task_duration = micros() - start;
     vTaskDelay(pdMS_TO_TICKS(20)); // Use vTaskDelay instead of vTaskDelayUntil to always yield
+    esp_task_wdt_reset();
   }
 }
 
@@ -354,6 +404,7 @@ void warnings(int percent, int temp_out, int spd, int coolant_level,
               int oil_level, unsigned long now)
 {
   buzzer_state = 0;
+  static int priority = 0;
   //------------------------------------------
   if (percent <= LOW_FUEL_LEVEL && lowBlinkState && fuel_run)
   {
@@ -500,7 +551,7 @@ void warnings(int percent, int temp_out, int spd, int coolant_level,
   uint32_t local_last_charge = last_charge;
   portEXIT_CRITICAL(&dataMux);
 
-  if (local_charge_state == 1 && lowBlinkState && now - local_last_charge > 20000)
+  if (local_charge_state == 1 && lowBlinkState && now - local_last_charge > 20000 && priority == 0)
   {
     if (chg == 0)
     {
@@ -516,7 +567,7 @@ void warnings(int percent, int temp_out, int spd, int coolant_level,
     tv.fillRect(WARNING_X + 10, WARNING_Y + 10, 140, 8, 0x00);
     chg = 0;
   }
-  if (local_charge_state == 2 && lowBlinkState && now - local_last_charge > 10000)
+  if (local_charge_state == 2 && lowBlinkState && now - local_last_charge > 10000 && priority == 0)
   {
     if (chg2 == 0)
     {
@@ -747,7 +798,7 @@ void loop()
     // tv.print(field_pwm);
   }
   smoothVal = 0.001 * filtered + (1 - 0.001) * smoothVal; // Exponential moving average for smoothing
-  percent = map((int)smoothVal, 1326, 21900, 0, 100);
+  percent = (int)getFuelPercent(smoothVal);
   percent = constrain(percent, 0, 100);
 
   //-------------------- Coolant level
@@ -768,6 +819,10 @@ void loop()
       new_rpm = canMsg.data[5];
       lastPacketTime = now;
     }
+  }
+  if (now - lastPacketTime > 2000)
+  {
+    new_rpm = 0;
   }
   portENTER_CRITICAL(&dataMux);
   rpm = new_rpm;
@@ -821,7 +876,7 @@ void loop()
     last_spd_correction = now;
   }
 
-  if (spd != last_spd || spd == 0)
+  if (spd != last_spd)
   {
     // Erase old needle
     float old_angle = (200.0 - last_spd) * PI / 180.0;

@@ -27,8 +27,8 @@ uint32_t rpm = 0;
 uint32_t spd = 0;
 uint16_t spd_s = 0;
 
-int temp_avg = 0;     // Integer for EMA temp
-int acState_avg = 0;  // Integer for EMA AC
+float temp_avg = 0.0f;     // Float for EMA temp
+float acState_avg = 0.0f;  // Float for EMA AC
 bool injDisable = false;
 
 // Timers
@@ -52,7 +52,7 @@ void rpmISR() {
 void spdISR() {
   uint32_t now2 = micros();
   uint32_t p = now2 - lastTime2;
-  if (p > 100) { // Software debounce: 2ms (max 500Hz)
+  if (p > 1000) { // Software debounce: 1ms (max 1000Hz)
     period2 = p;
     lastTime2 = now2;
   }
@@ -107,20 +107,20 @@ void loop() {
 
   //=================== Read Sensors & Control Fan (Every 1s) ======================//
   if (currentMillis - lastSensorTime >= 1000) {
-    int temp_t = analogRead(tempPin);
+    float temp_t = analogRead(tempPin);
     
-    // Initialize averages on first run or use integer-based exponential moving average
-    if (temp_avg == 0) temp_avg = temp_t;
-    else temp_avg = temp_avg + (temp_t - temp_avg) / 16; 
+    // Initialize averages on first run or use float-based exponential moving average
+    if (temp_avg == 0.0f) temp_avg = temp_t;
+    else temp_avg = temp_avg + (temp_t - temp_avg) * 0.0625f; // 1/16 = 0.0625
     
-    int dutyCycle_temp = map(temp_avg, 690, 730, 20, 255);
+    int dutyCycle_temp = map((int)temp_avg, 690, 730, 20, 255);
     dutyCycle_temp = constrain(dutyCycle_temp, 0, 255);
 
-    int acState_t = analogRead(ac);
-    if (acState_avg == 0) acState_avg = acState_t;
-    else acState_avg = acState_avg + (acState_t - acState_avg) / 8;
+    float acState_t = analogRead(ac);
+    if (acState_avg == 0.0f) acState_avg = acState_t;
+    else acState_avg = acState_avg + (acState_t - acState_avg) * 0.125f; // 1/8 = 0.125
     
-    int dutyCycle_ac = map(acState_avg, 50, 500, 20, 255);
+    int dutyCycle_ac = map((int)acState_avg, 50, 500, 20, 255);
     dutyCycle_ac = constrain(dutyCycle_ac, 0, 255);
     
     int dutyCycle = max(dutyCycle_temp, dutyCycle_ac);
@@ -134,8 +134,11 @@ void loop() {
   //=================== Calculate RPM (Every loop) ======================//
   noInterrupts();
   uint32_t p = period;
+  uint32_t lt = lastTime;
   interrupts();
-  if (p > 0) {
+  if (currentMicros - lt > 1000000UL) {
+    rpm = 0;
+  } else if (p > 0) {
     rpm = 60000000UL / p;
   }
 
