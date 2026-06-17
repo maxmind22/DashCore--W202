@@ -62,32 +62,38 @@ unsigned long last_fuel_correction = 0;
 int temp_out = 0;
 int percent = 0;
 
-struct CalibrationPoint {
+struct CalibrationPoint
+{
   int rawValue;
   float percent;
 };
 
 const int NUM_CALIBRATION_POINTS = 11;
 const CalibrationPoint calibrationTable[NUM_CALIBRATION_POINTS] = {
-  {  1326,   0.0f }, // Height 0.0:   0.0% volume (empty)
-  {  3383,   4.9f }, // Height 0.1:   4.9% volume
-  {  5440,  10.5f }, // Height 0.2:  10.5% volume
-  {  7498,  16.8f }, // Height 0.3:  16.8% volume
-  {  9555,  23.9f }, // Height 0.4:  23.9% volume
-  { 11613,  35.4f }, // Height 0.5:  35.4% volume
-  { 13670,  50.2f }, // Height 0.6:  50.2% volume (middle bridge)
-  { 15727,  64.4f }, // Height 0.7:  64.4% volume
-  { 17785,  78.0f }, // Height 0.8:  78.0% volume
-  { 19842,  90.5f }, // Height 0.9:  90.5% volume
-  { 21900, 100.0f }, // Height 1.0: 100.0% volume (full)
+    {1326, 0.0f},    // Height 0.0:   0.0% volume (empty)
+    {3383, 4.9f},    // Height 0.1:   4.9% volume
+    {5440, 10.5f},   // Height 0.2:  10.5% volume
+    {7498, 16.8f},   // Height 0.3:  16.8% volume
+    {9555, 23.9f},   // Height 0.4:  23.9% volume
+    {11613, 35.4f},  // Height 0.5:  35.4% volume
+    {13670, 50.2f},  // Height 0.6:  50.2% volume (middle bridge)
+    {15727, 64.4f},  // Height 0.7:  64.4% volume
+    {17785, 78.0f},  // Height 0.8:  78.0% volume
+    {19842, 90.5f},  // Height 0.9:  90.5% volume
+    {21900, 100.0f}, // Height 1.0: 100.0% volume (full)
 };
 
-float getFuelPercent(float rawValue) {
-  if (rawValue <= calibrationTable[0].rawValue) return calibrationTable[0].percent;
-  if (rawValue >= calibrationTable[NUM_CALIBRATION_POINTS - 1].rawValue) return calibrationTable[NUM_CALIBRATION_POINTS - 1].percent;
+float getFuelPercent(float rawValue)
+{
+  if (rawValue <= calibrationTable[0].rawValue)
+    return calibrationTable[0].percent;
+  if (rawValue >= calibrationTable[NUM_CALIBRATION_POINTS - 1].rawValue)
+    return calibrationTable[NUM_CALIBRATION_POINTS - 1].percent;
 
-  for (int i = 0; i < NUM_CALIBRATION_POINTS - 1; i++) {
-    if (rawValue >= calibrationTable[i].rawValue && rawValue <= calibrationTable[i + 1].rawValue) {
+  for (int i = 0; i < NUM_CALIBRATION_POINTS - 1; i++)
+  {
+    if (rawValue >= calibrationTable[i].rawValue && rawValue <= calibrationTable[i + 1].rawValue)
+    {
       float x0 = calibrationTable[i].rawValue;
       float x1 = calibrationTable[i + 1].rawValue;
       float y0 = calibrationTable[i].percent;
@@ -876,7 +882,7 @@ void loop()
     last_spd_correction = now;
   }
 
-  if (spd != last_spd)
+  if (spd != last_spd || lastTime == 0)
   {
     // Erase old needle
     float old_angle = (200.0 - last_spd) * PI / 180.0;
@@ -912,13 +918,13 @@ void loop()
     // Redraw center pin
     tv.fillCircle(GAUGE_CX, GAUGE_CY, 10, 0xFF);
 
-    tv.setCursor(100, 190);
-    tv.setTextColor(0xFF, 0x00);
-    tv.setTextSize(2);
-    char spdStr[4];
-    snprintf(spdStr, sizeof(spdStr), "%3d", spd);
-    tv.print(spdStr);
-    tv.setTextSize(1);
+    // tv.setCursor(100, 190);
+    // tv.setTextColor(0xFF, 0x00);
+    // tv.setTextSize(2);
+    // char spdStr[4];
+    // snprintf(spdStr, sizeof(spdStr), "%3d", spd);
+    // tv.print(spdStr);
+    // tv.setTextSize(1);
 
     last_spd = spd;
   }
@@ -943,6 +949,15 @@ void loop()
   snprintf(bufI, sizeof(bufI), "%5.0fA", current_disp);
   // tv.fillRect(5, 55, 60, 8, 0x00); // Clear old current value
   tv.print(bufI);
+
+  // display rpm
+  tv.setCursor(100, 190);
+  tv.setTextColor(0xFF, 0x00);
+  tv.setTextSize(2);
+  char spdStr[4];
+  snprintf(spdStr, sizeof(spdStr), "%3d", rpm / 2);
+  tv.print(spdStr);
+  tv.setTextSize(1);
 
   temp_out = map((int)raw2, 250, 950, 40, 120);
   temp_out = constrain(temp_out, 40, 120);
