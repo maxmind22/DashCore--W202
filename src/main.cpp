@@ -17,19 +17,20 @@
 #include <esp_sleep.h>
 
 // --- PUSH START PIN DEFINITIONS ---
-#define PIN_RELAY_ACC   16  // Terminal 15R (Accessory)
-#define PIN_RELAY_IGN   26  // Terminal 15 (POS2/Ignition)
-#define PIN_RELAY_START 13  // Terminal 50 (Starter)
-#define PIN_BTN_START   33  // Push Button (Active Low, Pull-Up, RTC-capable)
-#define PIN_INPUT_BRAKE 36  // Brake Light Sensor (Active High, Opto-isolated, Input-only)
-#define PIN_WAKE_UNLOCK 35  // Unlock Pulse Input (Active Low, Opto-isolated, RTC Input-only)
+#define PIN_RELAY_ACC 16   // Terminal 15R (Accessory)
+#define PIN_RELAY_IGN 26   // Terminal 15 (POS2/Ignition)
+#define PIN_RELAY_START 13 // Terminal 50 (Starter)
+#define PIN_BTN_START 33   // Push Button (Active Low, Pull-Up, RTC-capable)
+#define PIN_INPUT_BRAKE 36 // Brake Light Sensor (Active High, Opto-isolated, Input-only)
+#define PIN_WAKE_UNLOCK 35 // Unlock Pulse Input (Active Low, Opto-isolated, RTC Input-only)
 
 // --- SYSTEM STATES ---
-enum SystemState {
+enum SystemState
+{
   STATE_SLEEP,
   STATE_STANDBY,
-  STATE_ACC,       // POS1 (ACC ON, IGN OFF)
-  STATE_IGNITION,  // POS2 (ACC ON, IGN ON)
+  STATE_ACC,      // POS1 (ACC ON, IGN OFF)
+  STATE_IGNITION, // POS2 (ACC ON, IGN ON)
   STATE_CRANKING,
   STATE_RUNNING
 };
@@ -37,10 +38,12 @@ enum SystemState {
 RTC_DATA_ATTR SystemState currentState = STATE_SLEEP;
 unsigned long standbyStartTime = 0;
 unsigned long lastButtonPressTime = 0;
+bool stoppedToAcc = false;
+volatile bool regulatorTaskRunning = true;
 
-const unsigned long STANDBY_TIMEOUT_MS = 120000; // 2 Minutes
-const unsigned long BUTTON_COOLDOWN_MS = 5000;   // 5 Seconds button lockout
-const unsigned long MAX_CRANK_TIME_MS = 5000;    // 5 Seconds limit
+const unsigned long STANDBY_TIMEOUT_MS = 60000; // 1 Minutes (Production sleep timeout)
+const unsigned long BUTTON_COOLDOWN_MS = 3000;  // 3 Seconds button lockout
+const unsigned long MAX_CRANK_TIME_MS = 5000;   // 5 Seconds limit
 
 ESP_8_BIT_GFX tv(true, 8);
 
@@ -220,6 +223,12 @@ void regulatorTask(void *pvParameters)
 
   for (;;)
   {
+    if (!regulatorTaskRunning)
+    {
+      esp_task_wdt_delete(NULL);
+      regulatorTaskHandle = NULL;
+      vTaskDelete(NULL); // Delete self safely
+    }
     // uint32_t start = micros();
 
     //-------------------- Voltage measurement
@@ -665,52 +674,109 @@ void warnings(int percent, int temp_out, int spd, int coolant_level,
 // }
 
 // --- PUSH START HELPER FUNCTIONS ---
-void setRelays(bool acc, bool ign, bool start) {
+void setRelays(bool acc, bool ign, bool start)
+{
   digitalWrite(PIN_RELAY_ACC, acc ? HIGH : LOW);
   digitalWrite(PIN_RELAY_IGN, ign ? HIGH : LOW);
   digitalWrite(PIN_RELAY_START, start ? HIGH : LOW);
 }
 
-void startTVDisplay() {
+void startTVDisplay()
+{
   dac_output_enable(DAC_CHANNEL_1);
   dac_i2s_enable();
   I2S0.conf.tx_start = 1;
   I2S0.out_link.start = 1;
 }
 
-void stopTVDisplay() {
-  I2S0.conf.tx_start = 0;
-  I2S0.out_link.start = 0;
+void stopTVDisplay()
+{
+  tv.waitForFrame();       // Let any in-flight DMA frame complete first
+  I2S0.out_link.start = 0; // Stop DMA linked list (must stop before tx)
+  delay(1);
+  I2S0.conf.tx_start = 0; // Stop I2S TX
+  delay(1);
   dac_output_disable(DAC_CHANNEL_1);
   dac_i2s_disable();
 }
 
-void sleepCANController() {
+void sleepCANController()
+{
   mcp2515.setSleepMode();
 }
 
-void wakeupCANController() {
+void wakeupCANController()
+{
   mcp2515.reset();
   mcp2515.setBitrate(CAN_500KBPS, MCP_8MHZ);
   mcp2515.setNormalOneShotMode();
 }
 
-void enterPowerDownSleep() {
-  // 1. Turn off all relays and set to INPUT to prevent floating triggers
+void enterPowerDownSleep()
+{
+  // --- ORDERED SHUTDOWN: Stop everything safely before deep sleep ---
+
+  // 1. Disarm Watchdog FIRST — the shutdown sequence below may take >1s
+  esp_task_wdt_delete(NULL); // Remove loop() task from WDT
+  esp_task_wdt_deinit();     // Fully disable WDT hardware
+
+  // 2. Safely stop the regulator FreeRTOS task (running on Core 0, does I2C + SPI)
+  if (regulatorTaskHandle != NULL)
+  {
+    regulatorTaskRunning = false;
+    int timeout = 0;
+    while (regulatorTaskHandle != NULL && timeout < 100)
+    {
+      delay(5);
+      timeout++;
+    }
+    if (regulatorTaskHandle != NULL)
+    {
+      vTaskDelete(regulatorTaskHandle);
+      regulatorTaskHandle = NULL;
+    }
+  }
+
+  // 3. Turn off field coil PWM and detach LEDC
+  ledcWrite(0, 0);
+  ledcDetachPin(FIELD_PIN);
+
+  // 4. Stop TV display (I2S DMA) — must stop before deep sleep or DMA crash
+  stopTVDisplay();
+  delay(10); // Let DMA finish any in-flight transfer
+
+  // 5. Put MCP2515 CAN controller to sleep (SPI device)
+  sleepCANController();
+
+  // 6. Disconnect I2C bus
+  Wire.end();
+
+  // 7. Turn off all relays and float the pins
   setRelays(false, false, false);
-  pinMode(PIN_RELAY_ACC, INPUT); 
+  digitalWrite(PIN_RELAY_ACC, LOW);
+  digitalWrite(PIN_RELAY_IGN, LOW);
+  digitalWrite(PIN_RELAY_START, LOW);
+  pinMode(PIN_RELAY_ACC, INPUT);
   pinMode(PIN_RELAY_IGN, INPUT);
   pinMode(PIN_RELAY_START, INPUT);
 
-  // 2. Configure RTC wakeup pin using ext1: Wake on HIGH because unlock pulses to 0V (pin goes HIGH)
+  // 8. Turn off buzzer
+  digitalWrite(buzzer_pin, LOW);
+
+  // 9. Float the field relay pin
+  digitalWrite(field_relay_pin, LOW);
+  pinMode(field_relay_pin, INPUT);
+
+  // 10. Configure RTC wakeup: Wake on HIGH because unlock pulses to 0V (opto output goes HIGH)
   esp_sleep_enable_ext1_wakeup(1ULL << PIN_WAKE_UNLOCK, ESP_EXT1_WAKEUP_ANY_HIGH);
-  
-  // 3. Start Deep Sleep (automatically halts CPU, DMA, I2S, and powers down periphs)
+
+  // 11. Enter deep sleep — CPU halts here, wakes up via reset
   currentState = STATE_SLEEP;
   esp_deep_sleep_start();
 }
 
-void setupPushStartPins() {
+void setupPushStartPins()
+{
   pinMode(PIN_RELAY_ACC, OUTPUT);
   pinMode(PIN_RELAY_IGN, OUTPUT);
   pinMode(PIN_RELAY_START, OUTPUT);
@@ -721,9 +787,10 @@ void setupPushStartPins() {
   pinMode(PIN_WAKE_UNLOCK, INPUT);
 }
 
-void processPushStart() {
+void processPushStart()
+{
   unsigned long now = millis();
-  
+
   // Edge detection for push button
   static bool lastBtnState = HIGH;
   bool currentBtnState = digitalRead(PIN_BTN_START);
@@ -734,130 +801,191 @@ void processPushStart() {
   int currentRpm = rpm;
 
   // Handle sleep timeouts when engine is not running (standby/ACC/ignition)
-  if (currentState == STATE_STANDBY || currentState == STATE_ACC || currentState == STATE_IGNITION) {
-    if (now - standbyStartTime > STANDBY_TIMEOUT_MS) {
+  if (currentState == STATE_STANDBY || currentState == STATE_ACC || currentState == STATE_IGNITION)
+  {
+    if (now - standbyStartTime > STANDBY_TIMEOUT_MS)
+    {
       enterPowerDownSleep();
       return;
     }
   }
 
   // Handle state transitions
-  switch (currentState) {
-    case STATE_SLEEP:
-      // Woken up by deep sleep reset (unlock pulse) -> Authenticated
-      currentState = STATE_STANDBY;
-      standbyStartTime = now;
-      lastButtonPressTime = 0; // Clear cooldown on first boot
-      
-      wakeupCANController();
-      startTVDisplay();
-      if (regulatorTaskHandle != NULL) {
-        vTaskResume(regulatorTaskHandle);
+  switch (currentState)
+  {
+  case STATE_SLEEP:
+    // Woken up by deep sleep reset (unlock pulse) -> Authenticated
+    currentState = STATE_STANDBY;
+    standbyStartTime = now;
+    lastButtonPressTime = 0; // Clear cooldown on first boot
+
+    wakeupCANController();
+    startTVDisplay();
+    if (regulatorTaskHandle != NULL)
+    {
+      vTaskResume(regulatorTaskHandle);
+    }
+    break;
+
+  case STATE_STANDBY:
+    // Relays: ACC OFF, IGN OFF, START OFF
+    setRelays(false, false, false);
+
+    if (btnPressed && (now - lastButtonPressTime >= BUTTON_COOLDOWN_MS))
+    {
+      lastButtonPressTime = now;
+      if (brakeHeld)
+      {
+        currentState = STATE_CRANKING;
       }
-      break;
+      else
+      {
+        currentState = STATE_ACC; // Circle to POS1
+        standbyStartTime = now;   // Reset 2-min timeout
+      }
+    }
+    break;
 
-    case STATE_STANDBY:
-      // Relays: ACC OFF, IGN OFF, START OFF
-      setRelays(false, false, false);
+  case STATE_ACC:
+    // Relays: ACC ON, IGN OFF, START OFF (POS1)
+    setRelays(true, false, false);
 
-      if (btnPressed && (now - lastButtonPressTime >= BUTTON_COOLDOWN_MS)) {
-        lastButtonPressTime = now;
-        if (brakeHeld) {
-          currentState = STATE_CRANKING;
-        } else {
-          currentState = STATE_ACC; // Circle to POS1
-          standbyStartTime = now;   // Reset 2-min timeout
+    if (btnPressed && (now - lastButtonPressTime >= BUTTON_COOLDOWN_MS))
+    {
+      lastButtonPressTime = now;
+      if (brakeHeld)
+      {
+        currentState = STATE_CRANKING;
+        stoppedToAcc = false;
+      }
+      else
+      {
+        if (stoppedToAcc)
+        {
+          currentState = STATE_STANDBY; // Go to OFF
+          stoppedToAcc = false;
         }
-      }
-      break;
-
-    case STATE_ACC:
-      // Relays: ACC ON, IGN OFF, START OFF (POS1)
-      setRelays(true, false, false);
-
-      if (btnPressed && (now - lastButtonPressTime >= BUTTON_COOLDOWN_MS)) {
-        lastButtonPressTime = now;
-        if (brakeHeld) {
-          currentState = STATE_CRANKING;
-        } else {
+        else
+        {
           currentState = STATE_IGNITION; // Circle to POS2
-          standbyStartTime = now;        // Reset 2-min timeout
         }
+        standbyStartTime = now; // Reset 2-min timeout
       }
-      break;
+    }
+    break;
 
-    case STATE_IGNITION:
-      // Relays: ACC ON, IGN ON, START OFF (POS2)
+  case STATE_IGNITION:
+    // Relays: ACC ON, IGN ON, START OFF (POS2)
+    setRelays(true, true, false);
+
+    if (btnPressed && (now - lastButtonPressTime >= BUTTON_COOLDOWN_MS))
+    {
+      lastButtonPressTime = now;
+      if (brakeHeld)
+      {
+        currentState = STATE_CRANKING;
+      }
+      else
+      {
+        currentState = STATE_STANDBY; // Circle to OFF
+        standbyStartTime = now;       // Reset 2-min timeout
+      }
+    }
+    break;
+
+  case STATE_CRANKING:
+    // Non-blocking stage machine for cranking sequence
+    static enum { CRANK_PRIME,
+                  CRANK_SOLENOID } crankStage = CRANK_PRIME;
+    static unsigned long crankStageTime = 0;
+
+    if (crankStage == CRANK_PRIME)
+    {
+      // Step 1: Go to POS2 (ACC & IGN ON) for fuel pump prime (500ms)
       setRelays(true, true, false);
+      if (crankStageTime == 0)
+      {
+        crankStageTime = now;
+      }
+      if (now - crankStageTime >= 500)
+      {
+        crankStage = CRANK_SOLENOID;
+        crankStageTime = now; // Reset timer for max crank limit
+      }
+    }
+    else if (crankStage == CRANK_SOLENOID)
+    {
+      // Step 2: Engage starter solenoid (ACC ON, IGN ON, START ON)
+      setRelays(true, true, true);
 
-      if (btnPressed && (now - lastButtonPressTime >= BUTTON_COOLDOWN_MS)) {
+      if (currentRpm > 800)
+      {
+        // Engine started successfully
+        currentState = STATE_RUNNING;
+        setRelays(true, true, false); // Disengage starter, keep ACC/IGN on
+        crankStage = CRANK_PRIME;     // Reset stages
+        crankStageTime = 0;
+      }
+      else if (now - crankStageTime > MAX_CRANK_TIME_MS)
+      {
+        // Cranking failed or timed out (5s safety cutoff)
+        setRelays(true, false, false); // Disengage starter to ACC for another try (w202 prevent double starting)
+        currentState = STATE_ACC;
+        standbyStartTime = now; // Reset 2-min timeout
+        crankStage = CRANK_PRIME;
+        crankStageTime = 0;
+      }
+    }
+    break;
+
+  case STATE_RUNNING:
+    // Relays: ACC ON, IGN ON, START OFF (Engine running)
+    setRelays(true, true, false);
+
+    // Handle Engine Stall Safety
+    if (currentRpm == 0)
+    {
+      currentState = STATE_IGNITION;
+      standbyStartTime = now; // Start 2-minute sleep timeout
+    }
+
+    // Handle Engine Stop Button Press (Only if vehicle is stationary)
+    if (btnPressed && (now - lastButtonPressTime >= BUTTON_COOLDOWN_MS))
+    {
+      if (spd == 0)
+      { // Safety check: speed must be zero
         lastButtonPressTime = now;
-        if (brakeHeld) {
-          currentState = STATE_CRANKING;
-        } else {
-          currentState = STATE_STANDBY; // Circle to OFF
-          standbyStartTime = now;       // Reset 2-min timeout
-        }
+        setRelays(true, false, false); // Keep ACC ON, kill IGN and START
+        currentState = STATE_ACC;      // Go to ACC position
+        stoppedToAcc = true;           // Mark that we just stopped the engine
+        standbyStartTime = now;        // Start 2-minute sleep timeout
       }
-      break;
+    }
+    break;
+  }
+}
 
-    case STATE_CRANKING:
-      // Non-blocking stage machine for cranking sequence
-      static enum { CRANK_PRIME, CRANK_SOLENOID } crankStage = CRANK_PRIME;
-      static unsigned long crankStageTime = 0;
+void recoverI2CBus(int sdaPin, int sclPin)
+{
+  pinMode(sdaPin, INPUT_PULLUP);
+  pinMode(sclPin, OUTPUT);
+  digitalWrite(sclPin, HIGH);
+  delay(1);
 
-      if (crankStage == CRANK_PRIME) {
-        // Step 1: Go to POS2 (ACC & IGN ON) for fuel pump prime (500ms)
-        setRelays(true, true, false);
-        if (crankStageTime == 0) {
-          crankStageTime = now;
-        }
-        if (now - crankStageTime >= 500) {
-          crankStage = CRANK_SOLENOID;
-          crankStageTime = now; // Reset timer for max crank limit
-        }
-      } 
-      else if (crankStage == CRANK_SOLENOID) {
-        // Step 2: Engage starter solenoid (ACC ON, IGN ON, START ON)
-        setRelays(true, true, true);
-
-        if (currentRpm > 800) {
-          // Engine started successfully
-          currentState = STATE_RUNNING;
-          setRelays(true, true, false); // Disengage starter, keep ACC/IGN on
-          crankStage = CRANK_PRIME;     // Reset stages
-          crankStageTime = 0;
-        } 
-        else if (now - crankStageTime > MAX_CRANK_TIME_MS) {
-          // Cranking failed or timed out (5s safety cutoff)
-          setRelays(true, true, false); // Disengage starter
-          currentState = STATE_IGNITION;
-          standbyStartTime = now;       // Reset 2-min timeout
-          crankStage = CRANK_PRIME;
-          crankStageTime = 0;
-        }
+  // Toggle SCL if SDA is held low by a stuck slave device
+  if (digitalRead(sdaPin) == LOW)
+  {
+    for (int i = 0; i < 9; i++)
+    {
+      digitalWrite(sclPin, LOW);
+      delayMicroseconds(5);
+      digitalWrite(sclPin, HIGH);
+      delayMicroseconds(5);
+      if (digitalRead(sdaPin) == HIGH)
+      {
+        break; // Device released the bus
       }
-      break;
-
-    case STATE_RUNNING:
-      // Relays: ACC ON, IGN ON, START OFF (Engine running)
-      setRelays(true, true, false);
-
-      // Handle Engine Stall Safety
-      if (currentRpm == 0) {
-        currentState = STATE_IGNITION;
-        standbyStartTime = now; // Start 2-minute sleep timeout
-      }
-
-      // Handle Engine Stop Button Press (Only if vehicle is stationary)
-      if (btnPressed && (now - lastButtonPressTime >= BUTTON_COOLDOWN_MS)) {
-        if (spd == 0) { // Safety check: speed must be zero
-          lastButtonPressTime = now;
-          currentState = STATE_ACC; // Go straight to POS1 (ACC ON, IGN OFF)
-          standbyStartTime = now;   // Start 2-minute sleep timeout
-        }
-      }
-      break;
+    }
   }
 }
 
@@ -869,7 +997,9 @@ void setup()
   // Initialize system state to Standby with 2-minute sleep timeout on all boots/resets
   currentState = STATE_STANDBY;
   standbyStartTime = millis();
+  regulatorTaskRunning = true;
 
+  recoverI2CBus(21, 22);
   Wire.begin();
   Wire.setClock(100000); // Slower clock for better noise immunity in engine bay
   Wire.setTimeOut(20);   // Abort I2C transaction if it takes > 20ms
@@ -892,7 +1022,7 @@ void setup()
   tv.copyAfterSwap = true;
   //========  track reset reason: debug purpose   ======//
   esp_reset_reason_t reason = esp_reset_reason();
-  if (reason != ESP_RST_POWERON && reason != ESP_RST_UNKNOWN && reason != ESP_RST_EXT)
+  if (reason != ESP_RST_POWERON && reason != ESP_RST_UNKNOWN && reason != ESP_RST_EXT && reason != ESP_RST_DEEPSLEEP)
   {
     esp_task_wdt_deinit(); // Disable WDT before long delay to prevent reboot loops
     tv.fillScreen(0x00);
@@ -928,6 +1058,10 @@ void setup()
   pinMode(field_relay_pin, OUTPUT);
   digitalWriteFast(field_relay_pin, LOW); // Start with field relay off
   Serial.begin(250000);
+  delay(50); // Let UART stabilize
+  Serial.print("\n--- ESP32 BOOTED ---\nReset Reason ID: ");
+  Serial.println(reason);
+
   mcp2515.reset();
   mcp2515.setBitrate(CAN_500KBPS, MCP_8MHZ); // Match transmitter
   mcp2515.setNormalOneShotMode();            // mcp2515.setNormalMode();
@@ -1173,7 +1307,7 @@ void loop()
   snprintf(bufV, sizeof(bufV), "%5.1fV", voltage_disp);
   tv.print(bufV);
 
-  // --- Display signed current (+ charge / - discharge) ---
+  // --- Display current (+ charge / - discharge) ---
   static float current_disp = 0.0f;
   float current_d = local_current_A_filtered;
   current_disp = 0.009f * current_d + (1.0f - 0.009f) * current_disp;
@@ -1185,7 +1319,6 @@ void loop()
   tv.print(bufI);
 
   // display rpm
-
   tv.setCursor(95, 190);
   tv.setTextColor(0xFF, 0x00);
   tv.setTextSize(2);
