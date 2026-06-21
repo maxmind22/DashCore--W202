@@ -696,29 +696,24 @@ void wakeupCANController() {
 }
 
 void enterPowerDownSleep() {
-  // 1. Turn off all relays
+  // 1. Turn off all relays and set to INPUT to prevent floating triggers
   setRelays(false, false, false);
-  pinMode(PIN_RELAY_ACC, INPUT); // prevent floating relay triggers
+  pinMode(PIN_RELAY_ACC, INPUT); 
   pinMode(PIN_RELAY_IGN, INPUT);
   pinMode(PIN_RELAY_START, INPUT);
 
-  // 2. Shut down peripherals
-  stopTVDisplay();
-  if (regulatorTaskHandle != NULL) {
-    vTaskSuspend(regulatorTaskHandle);
-  }
-  sleepCANController();
-
-  // 3. Configure RTC wakeup pin: Wake on HIGH (1) because unlock pulses to 0V (pin goes HIGH)
-  rtc_gpio_deinit((gpio_num_t)PIN_WAKE_UNLOCK);
+  // 2. Configure RTC wakeup pin: Wake on HIGH (1) because unlock pulses to 0V (pin goes HIGH)
   esp_sleep_enable_ext0_wakeup((gpio_num_t)PIN_WAKE_UNLOCK, 1); // 1 = Wakeup when pin goes HIGH
   
-  // 4. Start Deep Sleep
+  // 3. Start Deep Sleep (automatically halts CPU, DMA, I2S, and powers down periphs)
   currentState = STATE_SLEEP;
   esp_deep_sleep_start();
 }
 
 void setupPushStartPins() {
+  // De-initialize the RTC wakeup pin immediately to route it back to standard digital IO
+  rtc_gpio_deinit((gpio_num_t)PIN_WAKE_UNLOCK);
+
   pinMode(PIN_RELAY_ACC, OUTPUT);
   pinMode(PIN_RELAY_IGN, OUTPUT);
   pinMode(PIN_RELAY_START, OUTPUT);
