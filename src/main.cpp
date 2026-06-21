@@ -702,8 +702,8 @@ void enterPowerDownSleep() {
   pinMode(PIN_RELAY_IGN, INPUT);
   pinMode(PIN_RELAY_START, INPUT);
 
-  // 2. Configure RTC wakeup pin: Wake on HIGH (1) because unlock pulses to 0V (pin goes HIGH)
-  esp_sleep_enable_ext0_wakeup((gpio_num_t)PIN_WAKE_UNLOCK, 1); // 1 = Wakeup when pin goes HIGH
+  // 2. Configure RTC wakeup pin using ext1: Wake on HIGH because unlock pulses to 0V (pin goes HIGH)
+  esp_sleep_enable_ext1_wakeup(1ULL << PIN_WAKE_UNLOCK, ESP_EXT1_WAKEUP_ANY_HIGH);
   
   // 3. Start Deep Sleep (automatically halts CPU, DMA, I2S, and powers down periphs)
   currentState = STATE_SLEEP;
@@ -711,9 +711,6 @@ void enterPowerDownSleep() {
 }
 
 void setupPushStartPins() {
-  // De-initialize the RTC wakeup pin immediately to route it back to standard digital IO
-  rtc_gpio_deinit((gpio_num_t)PIN_WAKE_UNLOCK);
-
   pinMode(PIN_RELAY_ACC, OUTPUT);
   pinMode(PIN_RELAY_IGN, OUTPUT);
   pinMode(PIN_RELAY_START, OUTPUT);
