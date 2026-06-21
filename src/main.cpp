@@ -31,14 +31,12 @@ enum SystemState {
   STATE_ACC,       // POS1 (ACC ON, IGN OFF)
   STATE_IGNITION,  // POS2 (ACC ON, IGN ON)
   STATE_CRANKING,
-  STATE_RUNNING,
-  STATE_LP_STANDBY // Active Low-power Standby (unlocked but idle)
+  STATE_RUNNING
 };
 
 RTC_DATA_ATTR SystemState currentState = STATE_SLEEP;
 unsigned long standbyStartTime = 0;
 unsigned long lastButtonPressTime = 0;
-bool isSystemActive = true; // Starts active on boot
 
 const unsigned long STANDBY_TIMEOUT_MS = 120000; // 2 Minutes
 const unsigned long BUTTON_COOLDOWN_MS = 5000;   // 5 Seconds button lockout
@@ -697,29 +695,6 @@ void wakeupCANController() {
   mcp2515.setNormalOneShotMode();
 }
 
-void activatePeripherals() {
-  if (!isSystemActive) {
-    setCpuFrequencyMhz(240); // Restore normal CPU clock
-    wakeupCANController();
-    startTVDisplay();
-    if (regulatorTaskHandle != NULL) {
-      vTaskResume(regulatorTaskHandle);
-    }
-    isSystemActive = true;
-  }
-}
-
-void deactivatePeripherals() {
-  if (isSystemActive) {
-    stopTVDisplay();
-    if (regulatorTaskHandle != NULL) {
-      vTaskSuspend(regulatorTaskHandle);
-    }
-    sleepCANController();
-    isSystemActive = false;
-  }
-}
-
 void enterPowerDownSleep() {
   // 1. Turn off all relays
   setRelays(false, false, false);
@@ -728,21 +703,17 @@ void enterPowerDownSleep() {
   pinMode(PIN_RELAY_START, INPUT);
 
   // 2. Shut down peripherals
-  deactivatePeripherals();
-
-  // 3. Determine power state based on central lock status
-  if (digitalRead(PIN_WAKE_UNLOCK) == LOW) {
-    // Vehicle is unlocked (wire sits at 13.3V).
-    // Go to active low-power standby instead of deep sleep to prevent reboot loop.
-    currentState = STATE_LP_STANDBY;
-    setCpuFrequencyMhz(80); // Scale down CPU clock to save power
-    return;
+  stopTVDisplay();
+  if (regulatorTaskHandle != NULL) {
+    vTaskSuspend(regulatorTaskHandle);
   }
+  sleepCANController();
 
-  // 4. Vehicle is locked. Enter true Deep Sleep.
+  // 3. Configure RTC wakeup pin: Wake on HIGH (1) because unlock pulses to 0V (pin goes HIGH)
   rtc_gpio_deinit((gpio_num_t)PIN_WAKE_UNLOCK);
-  esp_sleep_enable_ext0_wakeup((gpio_num_t)PIN_WAKE_UNLOCK, 0); // Wake when pulled LOW (unlocked)
+  esp_sleep_enable_ext0_wakeup((gpio_num_t)PIN_WAKE_UNLOCK, 1); // 1 = Wakeup when pin goes HIGH
   
+  // 4. Start Deep Sleep
   currentState = STATE_SLEEP;
   esp_deep_sleep_start();
 }
@@ -768,33 +739,14 @@ void processPushStart() {
   lastBtnState = currentBtnState;
 
   bool brakeHeld = (digitalRead(PIN_INPUT_BRAKE) == HIGH);
-  
-  // Access the global variable 'rpm' declared in main.cpp
   int currentRpm = rpm;
 
-  // Handle timeouts when engine is not running (standby/ACC/ignition)
+  // Handle sleep timeouts when engine is not running (standby/ACC/ignition)
   if (currentState == STATE_STANDBY || currentState == STATE_ACC || currentState == STATE_IGNITION) {
     if (now - standbyStartTime > STANDBY_TIMEOUT_MS) {
       enterPowerDownSleep();
       return;
     }
-  }
-
-  // Handle active low-power standby status
-  if (currentState == STATE_LP_STANDBY) {
-    // If we detect the vehicle is locked, transition to true deep sleep
-    if (digitalRead(PIN_WAKE_UNLOCK) == HIGH) {
-      enterPowerDownSleep();
-      return;
-    }
-    // If the button is pressed, wake up immediately
-    if (btnPressed) {
-      activatePeripherals();
-      currentState = STATE_STANDBY;
-      standbyStartTime = now;
-      lastButtonPressTime = now;
-    }
-    return;
   }
 
   // Handle state transitions
@@ -805,7 +757,11 @@ void processPushStart() {
       standbyStartTime = now;
       lastButtonPressTime = 0; // Clear cooldown on first boot
       
-      activatePeripherals();
+      wakeupCANController();
+      startTVDisplay();
+      if (regulatorTaskHandle != NULL) {
+        vTaskResume(regulatorTaskHandle);
+      }
       break;
 
     case STATE_STANDBY:
@@ -921,7 +877,6 @@ void setup()
   // Initialize system state to Standby with 2-minute sleep timeout on all boots/resets
   currentState = STATE_STANDBY;
   standbyStartTime = millis();
-  isSystemActive = true;
 
   Wire.begin();
   Wire.setClock(100000); // Slower clock for better noise immunity in engine bay
