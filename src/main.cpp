@@ -150,7 +150,7 @@ const int over_speed_on = 500;
 const int over_speed_off = 170;
 volatile uint8_t health_state = 0; // 0 =  charging malfunction, 100 = working fine
 int boot_chime = 0;
-uint8_t new_rpm = 0;
+uint16_t new_rpm = 0;
 
 Adafruit_ADS1115 adc;
 
@@ -164,9 +164,9 @@ volatile int charge_state = 0;
 int chg = 0;
 int chg2 = 0;
 volatile uint32_t last_charge = 0;
-volatile uint8_t rpm = 0;
+volatile uint16_t rpm = 0;
 int field_pwm = 0;
-uint8_t local_rpm = 0;
+uint16_t local_rpm = 0;
 
 void regulatorTask(void *pvParameters)
 {
@@ -256,7 +256,7 @@ void regulatorTask(void *pvParameters)
     portEXIT_CRITICAL(&dataMux);
 
     bool logical_failure = ((voltage_filtered >= v_target + 0.4f || current_A_filtered >= 30.0f) ||
-                            (voltage_filtered <= v_target - 0.1f && current_A_filtered <= 0.0f && local_rpm > 5));
+                            (voltage_filtered <= v_target - 0.1f && current_A_filtered <= 0.0f && local_rpm > 100));
 
     // Consolidate state hierarchy
     int next_charge_state = 0;
@@ -573,7 +573,7 @@ void warnings(int percent, int temp_out, int spd, int coolant_level,
     tv.fillRect(WARNING_X + 10, WARNING_Y + 10, 140, 8, 0x00);
     chg = 0;
   }
-  if (local_charge_state == 2 && lowBlinkState && now - local_last_charge > 10000 && priority == 0)
+  if (local_charge_state == 2 && lowBlinkState && now - local_last_charge > 10000 && priority == 0 && rpm > 50)
   {
     if (chg2 == 0)
     {
@@ -822,7 +822,7 @@ void loop()
       spd_t = (uint16_t)(canMsg.data[3] << 8 | canMsg.data[2]);
       oil_level_t = (uint8_t)canMsg.data[6];
       injector_state = canMsg.data[4];
-      new_rpm = canMsg.data[5];
+      new_rpm = ((uint16_t)canMsg.data[5] * 100) / 2;
       lastPacketTime = now;
     }
   }
@@ -830,6 +830,7 @@ void loop()
   {
     new_rpm = 0;
   }
+
   portENTER_CRITICAL(&dataMux);
   rpm = new_rpm;
   portEXIT_CRITICAL(&dataMux);
@@ -951,12 +952,13 @@ void loop()
   tv.print(bufI);
 
   // display rpm
-  tv.setCursor(100, 190);
+
+  tv.setCursor(95, 190);
   tv.setTextColor(0xFF, 0x00);
   tv.setTextSize(2);
-  char spdStr[4];
-  snprintf(spdStr, sizeof(spdStr), "%3d", rpm / 2);
-  tv.print(spdStr);
+  char rpmStr[6];
+  snprintf(rpmStr, sizeof(rpmStr), "%5d", (int)rpm);
+  tv.print(rpmStr);
   tv.setTextSize(1);
 
   temp_out = map((int)raw2, 250, 950, 40, 120);
@@ -1044,7 +1046,7 @@ void loop()
   // Serial.print(local_rpm);
   // Serial.print(voltage_filtered);
   // Serial.print("V   current: ");
-  // Serial.println(current_A_filtered);
+  // Serial.println(rpm);
 
   esp_task_wdt_reset();
 }
