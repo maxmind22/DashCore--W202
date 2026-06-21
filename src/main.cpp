@@ -11,6 +11,38 @@
 #include <Wire.h>
 #include <Adafruit_ADS1X15.h>
 #include <esp_bt.h>
+#include <driver/dac.h>
+#include <soc/i2s_struct.h>
+#include <driver/rtc_io.h>
+#include <esp_sleep.h>
+
+// --- PUSH START PIN DEFINITIONS ---
+#define PIN_RELAY_ACC   16  // Terminal 15R (Accessory)
+#define PIN_RELAY_IGN   26  // Terminal 15 (POS2/Ignition)
+#define PIN_RELAY_START 13  // Terminal 50 (Starter)
+#define PIN_BTN_START   33  // Push Button (Active Low, Pull-Up, RTC-capable)
+#define PIN_INPUT_BRAKE 36  // Brake Light Sensor (Active High, Opto-isolated, Input-only)
+#define PIN_WAKE_UNLOCK 35  // Unlock Pulse Input (Active Low, Opto-isolated, RTC Input-only)
+
+// --- SYSTEM STATES ---
+enum SystemState {
+  STATE_SLEEP,
+  STATE_STANDBY,
+  STATE_ACC,       // POS1 (ACC ON, IGN OFF)
+  STATE_IGNITION,  // POS2 (ACC ON, IGN ON)
+  STATE_CRANKING,
+  STATE_RUNNING,
+  STATE_LP_STANDBY // Active Low-power Standby (unlocked but idle)
+};
+
+RTC_DATA_ATTR SystemState currentState = STATE_SLEEP;
+unsigned long standbyStartTime = 0;
+unsigned long lastButtonPressTime = 0;
+bool isSystemActive = true; // Starts active on boot
+
+const unsigned long STANDBY_TIMEOUT_MS = 120000; // 2 Minutes
+const unsigned long BUTTON_COOLDOWN_MS = 5000;   // 5 Seconds button lockout
+const unsigned long MAX_CRANK_TIME_MS = 5000;    // 5 Seconds limit
 
 ESP_8_BIT_GFX tv(true, 8);
 
@@ -634,9 +666,263 @@ void warnings(int percent, int temp_out, int spd, int coolant_level,
 //   }
 // }
 
+// --- PUSH START HELPER FUNCTIONS ---
+void setRelays(bool acc, bool ign, bool start) {
+  digitalWrite(PIN_RELAY_ACC, acc ? HIGH : LOW);
+  digitalWrite(PIN_RELAY_IGN, ign ? HIGH : LOW);
+  digitalWrite(PIN_RELAY_START, start ? HIGH : LOW);
+}
+
+void startTVDisplay() {
+  dac_output_enable(DAC_CHANNEL_1);
+  dac_i2s_enable();
+  I2S0.conf.tx_start = 1;
+  I2S0.out_link.start = 1;
+}
+
+void stopTVDisplay() {
+  I2S0.conf.tx_start = 0;
+  I2S0.out_link.start = 0;
+  dac_output_disable(DAC_CHANNEL_1);
+  dac_i2s_disable();
+}
+
+void sleepCANController() {
+  mcp2515.setSleepMode();
+}
+
+void wakeupCANController() {
+  mcp2515.reset();
+  mcp2515.setBitrate(CAN_500KBPS, MCP_8MHZ);
+  mcp2515.setNormalOneShotMode();
+}
+
+void activatePeripherals() {
+  if (!isSystemActive) {
+    setCpuFrequencyMhz(240); // Restore normal CPU clock
+    wakeupCANController();
+    startTVDisplay();
+    if (regulatorTaskHandle != NULL) {
+      vTaskResume(regulatorTaskHandle);
+    }
+    isSystemActive = true;
+  }
+}
+
+void deactivatePeripherals() {
+  if (isSystemActive) {
+    stopTVDisplay();
+    if (regulatorTaskHandle != NULL) {
+      vTaskSuspend(regulatorTaskHandle);
+    }
+    sleepCANController();
+    isSystemActive = false;
+  }
+}
+
+void enterPowerDownSleep() {
+  // 1. Turn off all relays
+  setRelays(false, false, false);
+  pinMode(PIN_RELAY_ACC, INPUT); // prevent floating relay triggers
+  pinMode(PIN_RELAY_IGN, INPUT);
+  pinMode(PIN_RELAY_START, INPUT);
+
+  // 2. Shut down peripherals
+  deactivatePeripherals();
+
+  // 3. Determine power state based on central lock status
+  if (digitalRead(PIN_WAKE_UNLOCK) == LOW) {
+    // Vehicle is unlocked (wire sits at 13.3V).
+    // Go to active low-power standby instead of deep sleep to prevent reboot loop.
+    currentState = STATE_LP_STANDBY;
+    setCpuFrequencyMhz(80); // Scale down CPU clock to save power
+    return;
+  }
+
+  // 4. Vehicle is locked. Enter true Deep Sleep.
+  rtc_gpio_deinit((gpio_num_t)PIN_WAKE_UNLOCK);
+  esp_sleep_enable_ext0_wakeup((gpio_num_t)PIN_WAKE_UNLOCK, 0); // Wake when pulled LOW (unlocked)
+  
+  currentState = STATE_SLEEP;
+  esp_deep_sleep_start();
+}
+
+void setupPushStartPins() {
+  pinMode(PIN_RELAY_ACC, OUTPUT);
+  pinMode(PIN_RELAY_IGN, OUTPUT);
+  pinMode(PIN_RELAY_START, OUTPUT);
+  setRelays(false, false, false);
+
+  pinMode(PIN_BTN_START, INPUT_PULLUP);
+  pinMode(PIN_INPUT_BRAKE, INPUT);
+  pinMode(PIN_WAKE_UNLOCK, INPUT);
+}
+
+void processPushStart() {
+  unsigned long now = millis();
+  
+  // Edge detection for push button
+  static bool lastBtnState = HIGH;
+  bool currentBtnState = digitalRead(PIN_BTN_START);
+  bool btnPressed = (currentBtnState == LOW && lastBtnState == HIGH);
+  lastBtnState = currentBtnState;
+
+  bool brakeHeld = (digitalRead(PIN_INPUT_BRAKE) == HIGH);
+  
+  // Access the global variable 'rpm' declared in main.cpp
+  int currentRpm = rpm;
+
+  // Handle timeouts when engine is not running (standby/ACC/ignition)
+  if (currentState == STATE_STANDBY || currentState == STATE_ACC || currentState == STATE_IGNITION) {
+    if (now - standbyStartTime > STANDBY_TIMEOUT_MS) {
+      enterPowerDownSleep();
+      return;
+    }
+  }
+
+  // Handle active low-power standby status
+  if (currentState == STATE_LP_STANDBY) {
+    // If we detect the vehicle is locked, transition to true deep sleep
+    if (digitalRead(PIN_WAKE_UNLOCK) == HIGH) {
+      enterPowerDownSleep();
+      return;
+    }
+    // If the button is pressed, wake up immediately
+    if (btnPressed) {
+      activatePeripherals();
+      currentState = STATE_STANDBY;
+      standbyStartTime = now;
+      lastButtonPressTime = now;
+    }
+    return;
+  }
+
+  // Handle state transitions
+  switch (currentState) {
+    case STATE_SLEEP:
+      // Woken up by deep sleep reset (unlock pulse) -> Authenticated
+      currentState = STATE_STANDBY;
+      standbyStartTime = now;
+      lastButtonPressTime = 0; // Clear cooldown on first boot
+      
+      activatePeripherals();
+      break;
+
+    case STATE_STANDBY:
+      // Relays: ACC OFF, IGN OFF, START OFF
+      setRelays(false, false, false);
+
+      if (btnPressed && (now - lastButtonPressTime >= BUTTON_COOLDOWN_MS)) {
+        lastButtonPressTime = now;
+        if (brakeHeld) {
+          currentState = STATE_CRANKING;
+        } else {
+          currentState = STATE_ACC; // Circle to POS1
+          standbyStartTime = now;   // Reset 2-min timeout
+        }
+      }
+      break;
+
+    case STATE_ACC:
+      // Relays: ACC ON, IGN OFF, START OFF (POS1)
+      setRelays(true, false, false);
+
+      if (btnPressed && (now - lastButtonPressTime >= BUTTON_COOLDOWN_MS)) {
+        lastButtonPressTime = now;
+        if (brakeHeld) {
+          currentState = STATE_CRANKING;
+        } else {
+          currentState = STATE_IGNITION; // Circle to POS2
+          standbyStartTime = now;        // Reset 2-min timeout
+        }
+      }
+      break;
+
+    case STATE_IGNITION:
+      // Relays: ACC ON, IGN ON, START OFF (POS2)
+      setRelays(true, true, false);
+
+      if (btnPressed && (now - lastButtonPressTime >= BUTTON_COOLDOWN_MS)) {
+        lastButtonPressTime = now;
+        if (brakeHeld) {
+          currentState = STATE_CRANKING;
+        } else {
+          currentState = STATE_STANDBY; // Circle to OFF
+          standbyStartTime = now;       // Reset 2-min timeout
+        }
+      }
+      break;
+
+    case STATE_CRANKING:
+      // Non-blocking stage machine for cranking sequence
+      static enum { CRANK_PRIME, CRANK_SOLENOID } crankStage = CRANK_PRIME;
+      static unsigned long crankStageTime = 0;
+
+      if (crankStage == CRANK_PRIME) {
+        // Step 1: Go to POS2 (ACC & IGN ON) for fuel pump prime (500ms)
+        setRelays(true, true, false);
+        if (crankStageTime == 0) {
+          crankStageTime = now;
+        }
+        if (now - crankStageTime >= 500) {
+          crankStage = CRANK_SOLENOID;
+          crankStageTime = now; // Reset timer for max crank limit
+        }
+      } 
+      else if (crankStage == CRANK_SOLENOID) {
+        // Step 2: Engage starter solenoid (ACC ON, IGN ON, START ON)
+        setRelays(true, true, true);
+
+        if (currentRpm > 800) {
+          // Engine started successfully
+          currentState = STATE_RUNNING;
+          setRelays(true, true, false); // Disengage starter, keep ACC/IGN on
+          crankStage = CRANK_PRIME;     // Reset stages
+          crankStageTime = 0;
+        } 
+        else if (now - crankStageTime > MAX_CRANK_TIME_MS) {
+          // Cranking failed or timed out (5s safety cutoff)
+          setRelays(true, true, false); // Disengage starter
+          currentState = STATE_IGNITION;
+          standbyStartTime = now;       // Reset 2-min timeout
+          crankStage = CRANK_PRIME;
+          crankStageTime = 0;
+        }
+      }
+      break;
+
+    case STATE_RUNNING:
+      // Relays: ACC ON, IGN ON, START OFF (Engine running)
+      setRelays(true, true, false);
+
+      // Handle Engine Stall Safety
+      if (currentRpm == 0) {
+        currentState = STATE_IGNITION;
+        standbyStartTime = now; // Start 2-minute sleep timeout
+      }
+
+      // Handle Engine Stop Button Press (Only if vehicle is stationary)
+      if (btnPressed && (now - lastButtonPressTime >= BUTTON_COOLDOWN_MS)) {
+        if (spd == 0) { // Safety check: speed must be zero
+          lastButtonPressTime = now;
+          currentState = STATE_ACC; // Go straight to POS1 (ACC ON, IGN OFF)
+          standbyStartTime = now;   // Start 2-minute sleep timeout
+        }
+      }
+      break;
+  }
+}
+
 //=================== setup ===============//
 void setup()
 {
+  setupPushStartPins();
+
+  // Initialize system state to Standby with 2-minute sleep timeout on all boots/resets
+  currentState = STATE_STANDBY;
+  standbyStartTime = millis();
+  isSystemActive = true;
+
   Wire.begin();
   Wire.setClock(100000); // Slower clock for better noise immunity in engine bay
   Wire.setTimeOut(20);   // Abort I2C transaction if it takes > 20ms
@@ -1048,5 +1334,6 @@ void loop()
   // Serial.print("V   current: ");
   // Serial.println(rpm);
 
+  processPushStart();
   esp_task_wdt_reset();
 }
