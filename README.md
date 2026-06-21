@@ -17,15 +17,35 @@ Located in the engine bay, this controller handles raw engine sensor acquisition
 * **CAN Broadcast:** Packages engine telemetry (speed, RPM, oil level, temperatures) and broadcasts it over a 500kbps CAN Bus every 200ms.
 
 ### 2. Display & Regulator MCU (Cabin Controller - ESP32)
-Located in the vehicle cabin, this ESP32 runs a real-time OS (FreeRTOS) to manage the display and alternator regulation tasks on separate cores:
+Located in the vehicle cabin, this ESP32 runs a real-time OS (FreeRTOS) to manage the display, alternator regulation, and ignition keyless entry on separate cores:
 * **Composite Video Dash UI:** Renders a high-performance analog-style speedometer needle, digital speed readout, battery charge/discharge telemetry, fuel levels, and warning systems directly to PAL/NTSC composite video outputs using the `ESP_8_BIT` composite library (leveraging the ESP32’s hardware DACs).
 * **Software-Defined Alternator Regulator (Core 0):** A high-priority FreeRTOS task running a closed-loop PID control loop. It samples alternator voltage and current through a high-precision ADS1115 ADC to dynamically drive the alternator field coil via 10-bit PWM. Implements seamless CV/CC regulation (targeting 13.6V max and a 20A current ceiling specifically to protect and optimize charging for a LiFePO4 start battery) with secondary physical relay emergency overrides for overcurrent/overvoltage protection.
+* **Smart Keyless Push-to-Start:** Manages the ignition and engine start sequence via a non-blocking state machine driving 3 physical relays (ACC, IGN, Starter).
 * **Cabin Alerts & Warnings:** Controls a physical chime buzzer and on-screen HUD flashes for:
   * Low Fuel Level (with noise-rejecting calibration tables)
   * Low Engine Oil / Coolant Levels
   * Engine Overheating (Temp > 96°C)
   * Battery Low / Charging System Malfunction
   * Front MCU Connection Timeout
+
+---
+
+## 🔑 Keyless Push-to-Start System
+
+The ESP32 manages a smart, keyless push-to-start system designed to replicate and modernize the ignition sequence of the Mercedes W202 chassis:
+
+* **Triple-Relay Control System:** Controls Terminal 15R (ACC), Terminal 15 (IGN), and Terminal 50 (Starter Solenoid) via physical relays.
+* **Low-Power Deep Sleep (~15µA):** 
+  To prevent battery drain while parked, the cabin ESP32 automatically shuts down all peripherals (regulator task, I2S/DMA video, CAN, I2C, and Watchdogs) and enters deep sleep after 2 minutes of inactivity.
+  * *Wake-up Mechanism:* Uses an active-high `ext1` wake trigger tied to the vehicle's central locking unlock line. Since the line normally rests at 13.3V (holding the optocoupler ON, pin LOW) and pulses to 0V (optocoupler OFF, pin HIGH) on unlock, the ESP32 wakes up instantly and boots when the car is unlocked.
+* **Non-Blocking Crank Sequence:** 
+  When the brake is held and the start button is tapped:
+  1. ACC & IGN activate.
+  2. The system pauses for **500ms** to prime the fuel pump.
+  3. The starter solenoid engages.
+  4. The starter automatically disengages once the engine RPM exceeds **800 RPM**, or cuts out after a **5-second safety limit** if starting fails.
+* **Double Starting Prevention:** If cranking times out, the system automatically falls back to the ACC position (`STATE_ACC`) and cuts the starter/ignition to prevent the user from accidentally grinding the starter gear on a running engine.
+* **Engine Stop Flow:** Pressing the button while running (and stationary, speed = 0) shuts off the engine and ignition, placing the vehicle in the ACC (POS1) state. A second tap turns ACC off (OFF position) and starts the 2-minute sleep timer.
 
 ---
 
