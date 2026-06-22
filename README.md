@@ -36,7 +36,9 @@ The ESP32 manages a smart, keyless push-to-start system designed to replicate an
 
 * **Triple-Relay Control System:** Controls Terminal 15R (ACC), Terminal 15 (IGN), and Terminal 50 (Starter Solenoid) via physical relays.
 * **Low-Power Deep Sleep (~15µA):** 
-  To prevent battery drain while parked, the cabin ESP32 automatically shuts down all peripherals (regulator task, I2S/DMA video, CAN, I2C, and Watchdogs) and enters deep sleep after 2 minutes of inactivity *only when left in the Standby (OFF) state*. If the vehicle is left in ACC (POS1) or IGNITION (POS2) states, the system will remain awake indefinitely to support cabin accessories (e.g. listening to music).
+  To prevent battery drain while parked, the cabin ESP32 automatically shuts down all peripherals (regulator task, I2S/DMA video, CAN, I2C, and Watchdogs) and enters deep sleep:
+  * *In Standby (OFF) State:* After 2 minutes of inactivity.
+  * *In ACC (POS1) or IGNITION (POS2) States:* After **2 hours** of inactivity (preventing battery drain if left on accidentally).
   * *Wake-up Mechanism:* Uses an active-high `ext1` wake trigger tied to the vehicle's central locking unlock line. Since the line normally rests at 13.3V (holding the optocoupler ON, pin LOW) and pulses to 0V (optocoupler OFF, pin HIGH) on unlock, the ESP32 wakes up instantly and boots when the car is unlocked.
 * **Non-Blocking Crank Sequence:** 
   Due to the brake switch only receiving power in Position 2 (Ignition ON), the system check flow is:
