@@ -801,8 +801,8 @@ void processPushStart()
   bool brakeHeld = (digitalRead(PIN_INPUT_BRAKE) == LOW);
   int currentRpm = rpm;
 
-  // Handle sleep timeouts when engine is not running (standby/ACC/ignition)
-  if (currentState == STATE_STANDBY || currentState == STATE_ACC || currentState == STATE_IGNITION)
+  // Handle sleep timeouts when system is in Standby (OFF position)
+  if (currentState == STATE_STANDBY)
   {
     if (now - standbyStartTime > STANDBY_TIMEOUT_MS)
     {
