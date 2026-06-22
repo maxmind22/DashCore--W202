@@ -40,6 +40,7 @@ unsigned long standbyStartTime = 0;
 unsigned long lastButtonPressTime = 0;
 bool stoppedToAcc = false;
 volatile bool regulatorTaskRunning = true;
+unsigned long ignitionEntryTime = 0;
 
 const unsigned long STANDBY_TIMEOUT_MS = 60000; // 1 Minutes (Production sleep timeout)
 const unsigned long BUTTON_COOLDOWN_MS = 3000;  // 3 Seconds button lockout
@@ -835,6 +836,7 @@ void processPushStart()
     {
       lastButtonPressTime = now;
       currentState = STATE_IGNITION; // Go directly to POS2 so brake switch gets power
+      ignitionEntryTime = now;       // Capture entry time for immediate brake check
       standbyStartTime = now;        // Reset 2-min timeout
     }
     break;
@@ -846,22 +848,24 @@ void processPushStart()
     if (btnPressed && (now - lastButtonPressTime >= BUTTON_COOLDOWN_MS))
     {
       lastButtonPressTime = now;
-      if (stoppedToAcc)
-      {
-        currentState = STATE_STANDBY; // Go to OFF
-        stoppedToAcc = false;
-      }
-      else
-      {
-        currentState = STATE_IGNITION; // Go to POS2 to power the brake switch
-      }
-      standbyStartTime = now; // Reset 2-min timeout
+      currentState = STATE_STANDBY; // ACC -> OFF (STANDBY)
+      standbyStartTime = now;       // Reset 2-min timeout
     }
     break;
 
   case STATE_IGNITION:
     // Relays: ACC ON, IGN ON, START OFF (POS2)
     setRelays(true, true, false);
+
+    // Check if brake is held immediately on entering POS2 (or within first 500ms)
+    if (now - ignitionEntryTime < 500)
+    {
+      if (brakeHeld)
+      {
+        currentState = STATE_CRANKING;
+        break;
+      }
+    }
 
     if (btnPressed && (now - lastButtonPressTime >= BUTTON_COOLDOWN_MS))
     {
@@ -872,8 +876,8 @@ void processPushStart()
       }
       else
       {
-        currentState = STATE_STANDBY; // Circle to OFF
-        standbyStartTime = now;       // Reset 2-min timeout
+        currentState = STATE_ACC; // 2nd press (without brake) goes to ACC (POS1)
+        standbyStartTime = now;   // Reset 2-min timeout
       }
     }
     break;
