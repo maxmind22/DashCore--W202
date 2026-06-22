@@ -39,12 +39,14 @@ The ESP32 manages a smart, keyless push-to-start system designed to replicate an
   To prevent battery drain while parked, the cabin ESP32 automatically shuts down all peripherals (regulator task, I2S/DMA video, CAN, I2C, and Watchdogs) and enters deep sleep after 2 minutes of inactivity.
   * *Wake-up Mechanism:* Uses an active-high `ext1` wake trigger tied to the vehicle's central locking unlock line. Since the line normally rests at 13.3V (holding the optocoupler ON, pin LOW) and pulses to 0V (optocoupler OFF, pin HIGH) on unlock, the ESP32 wakes up instantly and boots when the car is unlocked.
 * **Non-Blocking Crank Sequence:** 
-  Due to the brake switch only receiving power in Position 2 (Ignition ON), the startup flow is:
+  Due to the brake switch only receiving power in Position 2 (Ignition ON), the system check flow is:
   1. **First Press:** Activates ACC & IGN (Position 2 / `STATE_IGNITION`), powering the brake switch.
-  2. **Second Press (Brake Held):** Initiates cranking. The system pauses for **1000ms** to prime the fuel pump, then engages the starter solenoid.
+  2. **Brake Detection:** Once in Position 2, the ESP32 checks for the brake signal. If the brake is held (either immediately during the transition or pressed later), the fuel pump primes for **1000ms**, and the starter automatically engages—no second button press required.
   3. **Auto-Disengage:** The starter automatically disengages once the engine RPM exceeds **800 RPM**, or cuts out after a **5-second safety limit** if starting fails.
 * **Double Starting Prevention:** If cranking times out, the system automatically falls back to the ACC position (`STATE_ACC`) and cuts the starter/ignition to prevent the user from accidentally grinding the starter gear on a running engine.
-* **Engine Stop Flow:** Pressing the button while running (and stationary, speed = 0) shuts off the engine and ignition, placing the vehicle in the ACC (POS1) state. A second tap turns ACC off (OFF position) and starts the 2-minute sleep timer.
+* **Rotary Cycle & Stop Flow:** 
+  * *When Off:* Tapping the button cycles: OFF (`STATE_STANDBY`) $\rightarrow$ IGNITION (`STATE_IGNITION`) $\rightarrow$ ACC (`STATE_ACC`) $\rightarrow$ OFF.
+  * *When Running:* Tapping the button shuts off the engine and ignition, placing the vehicle in ACC (`STATE_ACC`). The next tap turns the system completely OFF.
 
 ---
 
