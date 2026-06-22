@@ -43,6 +43,7 @@ volatile bool regulatorTaskRunning = true;
 unsigned long ignitionEntryTime = 0;
 
 const unsigned long STANDBY_TIMEOUT_MS = 60000; // 1 Minutes (Production sleep timeout)
+const unsigned long ACCESSORY_TIMEOUT_MS = 7200000; // 2 Hours (7200000 ms)
 const unsigned long BUTTON_COOLDOWN_MS = 3000;  // 3 Seconds button lockout
 const unsigned long MAX_CRANK_TIME_MS = 5000;   // 5 Seconds limit
 
@@ -801,10 +802,18 @@ void processPushStart()
   bool brakeHeld = (digitalRead(PIN_INPUT_BRAKE) == LOW);
   int currentRpm = rpm;
 
-  // Handle sleep timeouts when system is in Standby (OFF position)
+  // Handle sleep timeouts when system is in Standby (OFF) or ACC/Ignition
   if (currentState == STATE_STANDBY)
   {
     if (now - standbyStartTime > STANDBY_TIMEOUT_MS)
+    {
+      enterPowerDownSleep();
+      return;
+    }
+  }
+  else if (currentState == STATE_ACC || currentState == STATE_IGNITION)
+  {
+    if (now - standbyStartTime > ACCESSORY_TIMEOUT_MS)
     {
       enterPowerDownSleep();
       return;
