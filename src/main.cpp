@@ -797,7 +797,7 @@ void processPushStart()
   bool btnPressed = (currentBtnState == LOW && lastBtnState == HIGH);
   lastBtnState = currentBtnState;
 
-  bool brakeHeld = (digitalRead(PIN_INPUT_BRAKE) == HIGH);
+  bool brakeHeld = (digitalRead(PIN_INPUT_BRAKE) == LOW);
   int currentRpm = rpm;
 
   // Handle sleep timeouts when engine is not running (standby/ACC/ignition)
@@ -834,15 +834,8 @@ void processPushStart()
     if (btnPressed && (now - lastButtonPressTime >= BUTTON_COOLDOWN_MS))
     {
       lastButtonPressTime = now;
-      if (brakeHeld)
-      {
-        currentState = STATE_CRANKING;
-      }
-      else
-      {
-        currentState = STATE_ACC; // Circle to POS1
-        standbyStartTime = now;   // Reset 2-min timeout
-      }
+      currentState = STATE_IGNITION; // Go directly to POS2 so brake switch gets power
+      standbyStartTime = now;        // Reset 2-min timeout
     }
     break;
 
@@ -853,24 +846,16 @@ void processPushStart()
     if (btnPressed && (now - lastButtonPressTime >= BUTTON_COOLDOWN_MS))
     {
       lastButtonPressTime = now;
-      if (brakeHeld)
+      if (stoppedToAcc)
       {
-        currentState = STATE_CRANKING;
+        currentState = STATE_STANDBY; // Go to OFF
         stoppedToAcc = false;
       }
       else
       {
-        if (stoppedToAcc)
-        {
-          currentState = STATE_STANDBY; // Go to OFF
-          stoppedToAcc = false;
-        }
-        else
-        {
-          currentState = STATE_IGNITION; // Circle to POS2
-        }
-        standbyStartTime = now; // Reset 2-min timeout
+        currentState = STATE_IGNITION; // Go to POS2 to power the brake switch
       }
+      standbyStartTime = now; // Reset 2-min timeout
     }
     break;
 
@@ -907,7 +892,7 @@ void processPushStart()
       {
         crankStageTime = now;
       }
-      if (now - crankStageTime >= 500)
+      if (now - crankStageTime >= 1000)
       {
         crankStage = CRANK_SOLENOID;
         crankStageTime = now; // Reset timer for max crank limit
