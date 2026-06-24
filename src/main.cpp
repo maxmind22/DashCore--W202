@@ -42,10 +42,10 @@ bool stoppedToAcc = false;
 volatile bool regulatorTaskRunning = true;
 unsigned long ignitionEntryTime = 0;
 
-const unsigned long STANDBY_TIMEOUT_MS = 60000; // 1 Minutes (Production sleep timeout)
+const unsigned long STANDBY_TIMEOUT_MS = 60000;     // 1 Minutes (Production sleep timeout)
 const unsigned long ACCESSORY_TIMEOUT_MS = 7200000; // 2 Hours (7200000 ms)
-const unsigned long BUTTON_COOLDOWN_MS = 3000;  // 3 Seconds button lockout
-const unsigned long MAX_CRANK_TIME_MS = 5000;   // 5 Seconds limit
+const unsigned long BUTTON_COOLDOWN_MS = 1000;      // 3 Seconds button lockout
+const unsigned long MAX_CRANK_TIME_MS = 5000;       // 5 Seconds limit
 
 ESP_8_BIT_GFX tv(true, 8);
 
@@ -857,8 +857,20 @@ void processPushStart()
     if (btnPressed && (now - lastButtonPressTime >= BUTTON_COOLDOWN_MS))
     {
       lastButtonPressTime = now;
-      currentState = STATE_STANDBY; // ACC -> OFF (STANDBY)
-      standbyStartTime = now;       // Reset 2-min timeout
+      // Temporarily turn on IGN to power the brake switch circuit
+      setRelays(true, true, false);
+      delay(50); // wait 50ms for relay contacts to settle and optocoupler signal to stabilize
+      bool brakeIsHeldNow = (digitalRead(PIN_INPUT_BRAKE) == LOW);
+
+      if (brakeIsHeldNow)
+      {
+        currentState = STATE_CRANKING;
+      }
+      else
+      {
+        currentState = STATE_STANDBY; // No brake -> ACC to OFF (STANDBY)
+        standbyStartTime = now;       // Reset 2-min timeout
+      }
     }
     break;
 
@@ -899,7 +911,7 @@ void processPushStart()
 
     if (crankStage == CRANK_PRIME)
     {
-      // Step 1: Go to POS2 (ACC & IGN ON) for fuel pump prime (500ms)
+      // Step 1: Go to POS2 (ACC & IGN ON) for fuel pump prime (1000ms)
       setRelays(true, true, false);
       if (crankStageTime == 0)
       {
@@ -916,7 +928,7 @@ void processPushStart()
       // Step 2: Engage starter solenoid (ACC ON, IGN ON, START ON)
       setRelays(true, true, true);
 
-      if (currentRpm > 800)
+      if (currentRpm > 400)
       {
         // Engine started successfully
         currentState = STATE_RUNNING;
