@@ -274,7 +274,7 @@ void regulatorTask(void *pvParameters)
         vTaskDelay(pdMS_TO_TICKS(10)); // Yield CPU properly instead of blocking delay()
         Wire.begin();
         Wire.setClock(100000);
-        Wire.setTimeOut(20);           // Ensure I2C transaction timeout is set in recovery
+        Wire.setTimeOut(20); // Ensure I2C transaction timeout is set in recovery
         adc.begin();
         adc.setGain(GAIN_ONE);
         adc.setDataRate(RATE_ADS1115_250SPS);
@@ -749,7 +749,8 @@ void enterPowerDownSleep()
     {
       taskYIELD();
       delay(5);
-      if (regulatorTaskHandle == NULL) break;
+      if (regulatorTaskHandle == NULL)
+        break;
     }
     // Use critical section to safely check-and-delete (prevents race with self-deleting task)
     portENTER_CRITICAL(&dataMux);
@@ -864,17 +865,44 @@ void processPushStart()
     break;
 
   case STATE_STANDBY:
+  {
     // Relays: ACC OFF, IGN OFF, START OFF
-    setRelays(false, false, false);
+    static bool standbyBrakeCheckPending = false;
+    static unsigned long standbyBrakeCheckTime = 0;
 
-    if (btnPressed && (now - lastButtonPressTime >= BUTTON_COOLDOWN_MS))
+    if (standbyBrakeCheckPending)
     {
-      lastButtonPressTime = now;
-      currentState = STATE_IGNITION; // Go directly to POS2 so brake switch gets power
-      ignitionEntryTime = now;       // Capture entry time for immediate brake check
-      standbyStartTime = now;        // Reset 2-min timeout
+      setRelays(true, true, false); // Turn on ACC & IGN to power brake circuit
+      if (now - standbyBrakeCheckTime >= 50)
+      {
+        standbyBrakeCheckPending = false;
+        bool brakeIsHeldNow = (digitalRead(PIN_INPUT_BRAKE) == LOW);
+        if (brakeIsHeldNow)
+        {
+          currentState = STATE_CRANKING;
+        }
+        else
+        {
+          currentState = STATE_ACC; // 1st press (without brake) goes to ACC (POS1)
+          standbyStartTime = now;   // Reset 2-min timeout
+        }
+      }
+    }
+    else
+    {
+      setRelays(false, false, false);
+
+      if (btnPressed && (now - lastButtonPressTime >= BUTTON_COOLDOWN_MS))
+      {
+        lastButtonPressTime = now;
+        // Temporarily turn on ACC & IGN to power the brake switch circuit
+        setRelays(true, true, false);
+        standbyBrakeCheckPending = true;
+        standbyBrakeCheckTime = now;
+      }
     }
     break;
+  }
 
   case STATE_ACC:
   {
@@ -897,8 +925,9 @@ void processPushStart()
         }
         else
         {
-          currentState = STATE_STANDBY; // No brake -> ACC to OFF (STANDBY)
-          standbyStartTime = now;       // Reset 2-min timeout
+          currentState = STATE_IGNITION; // 2nd press (without brake) goes to POS2 (IGNITION)
+          ignitionEntryTime = now;       // Capture entry time for ignition state
+          standbyStartTime = now;        // Reset 2-min timeout
         }
       }
     }
@@ -922,16 +951,6 @@ void processPushStart()
     // Relays: ACC ON, IGN ON, START OFF (POS2)
     setRelays(true, true, false);
 
-    // Check if brake is held immediately on entering POS2 (or within first 500ms)
-    if (now - ignitionEntryTime < 500)
-    {
-      if (brakeHeld)
-      {
-        currentState = STATE_CRANKING;
-        break;
-      }
-    }
-
     if (btnPressed && (now - lastButtonPressTime >= BUTTON_COOLDOWN_MS))
     {
       lastButtonPressTime = now;
@@ -941,8 +960,8 @@ void processPushStart()
       }
       else
       {
-        currentState = STATE_ACC; // 2nd press (without brake) goes to ACC (POS1)
-        standbyStartTime = now;   // Reset 2-min timeout
+        currentState = STATE_STANDBY; // 3rd press (without brake) goes to OFF (STANDBY)
+        standbyStartTime = now;       // Reset 2-min timeout
       }
     }
     break;
@@ -955,13 +974,13 @@ void processPushStart()
 
     if (crankStage == CRANK_PRIME)
     {
-      // Step 1: Go to POS2 (ACC & IGN ON) for fuel pump prime (1000ms)
+      // Step 1: Go to POS2 (ACC & IGN ON) for fuel pump prime (500ms)
       setRelays(true, true, false);
       if (crankStageTime == 0)
       {
         crankStageTime = now;
       }
-      if (now - crankStageTime >= 1000)
+      if (now - crankStageTime >= 500)
       {
         crankStage = CRANK_SOLENOID;
         crankStageTime = now; // Reset timer for max crank limit
@@ -1316,7 +1335,8 @@ void loop()
     int old_b_y2 = GAUGE_CY - 2 * sin(old_angle + PI / 2.0);
     tv.fillTriangle(old_tip_x, old_tip_y, old_b_x1, old_b_y1, old_b_x2,
                     old_b_y2, 0x00);
-    struct GaugeNumber {
+    struct GaugeNumber
+    {
       int16_t x, y;
       int16_t val;
     };
@@ -1333,7 +1353,7 @@ void loop()
         int tx = GAUGE_CX + tr * cos(angle);
         int ty = GAUGE_CY - tr * sin(angle);
         int tw = (i < 10) ? 6 : ((i < 100) ? 12 : 18);
-        numCoords[idx++] = { (int16_t)(tx - tw / 2), (int16_t)(ty - 4), (int16_t)i };
+        numCoords[idx++] = {(int16_t)(tx - tw / 2), (int16_t)(ty - 4), (int16_t)i};
       }
       coordsInitialized = true;
     }
