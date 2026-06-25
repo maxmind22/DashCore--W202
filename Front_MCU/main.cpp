@@ -36,17 +36,18 @@ unsigned long lastSpdCalculationTime = 0;
 unsigned long lastCanSendTime = 0;
 unsigned long lastSensorTime = 0;
 
-struct can_frame canMsg;
+struct can_frame canMsgRx;
+struct can_frame canMsgTx;
 MCP2515 mcp2515(10, 8000000); 
 
 //=============Interrupt Service Routine ===============//
 void rpmISR() {
   uint32_t now = micros();
-  period = now - lastTime;
-  // if (p > 1000) { // Software debounce: 1ms (max 1000Hz)
-  //   period = p;
-  lastTime = now;
-  // // }
+  uint32_t p = now - lastTime;
+  if (p > 500) { // Software debounce: 0.5ms (allows up to ~60k pulse RPM)
+    period = p;
+    lastTime = now;
+  }
 }
 
 void spdISR() {
@@ -108,14 +109,16 @@ void loop() {
     float temp_t = analogRead(tempPin);
     
     // Initialize averages on first run or use float-based exponential moving average
-    if (temp_avg == 0.0f) temp_avg = temp_t;
+    static bool temp_initialized = false;
+    if (!temp_initialized) { temp_avg = temp_t; temp_initialized = true; }
     else temp_avg = temp_avg + (temp_t - temp_avg) * 0.0625f; // 1/16 = 0.0625
     
     int dutyCycle_temp = map((int)temp_avg, 690, 730, 20, 255);
     dutyCycle_temp = constrain(dutyCycle_temp, 0, 255);
 
     float acState_t = analogRead(ac);
-    if (acState_avg == 0.0f) acState_avg = acState_t;
+    static bool ac_initialized = false;
+    if (!ac_initialized) { acState_avg = acState_t; ac_initialized = true; }
     else acState_avg = acState_avg + (acState_t - acState_avg) * 0.125f; // 1/8 = 0.125
     
     int dutyCycle_ac = map((int)acState_avg, 50, 500, 20, 255);
@@ -138,6 +141,7 @@ void loop() {
     rpm = 0;
   } else if (p > 0) {
     rpm = 60000000UL / p;
+    if (rpm > 15000) rpm = 0; // Reject noise: max real RPM ~7500 (2 pulses/rev)
   }
 
   //=================== Control Injectors =====================//
@@ -182,11 +186,11 @@ static int alive = 0;
 static unsigned long last_can = 0; 
   // Process CAN and auto-recover errors
   checkCanErrors();
-  if(mcp2515.readMessage(&canMsg) == MCP2515::ERROR_OK)
+  if(mcp2515.readMessage(&canMsgRx) == MCP2515::ERROR_OK)
   {
-    if (canMsg.can_id == 0x03)
+    if (canMsgRx.can_id == 0x03)
     {
-      alive = canMsg.data[0];
+      alive = canMsgRx.data[0];
       last_check = currentMillis;
     }
   }
@@ -197,21 +201,21 @@ static unsigned long last_can = 0;
   }
 
 uint8_t injDisable_s = (uint8_t)injDisable;
-uint8_t rpm_s = rpm / 100;
+uint16_t rpm_s = (uint16_t)(rpm / 2); // Real engine RPM (2 pulses per rev)
   //================= Send to Display MCU (Every 200ms) ===============//
   if (currentMillis - lastCanSendTime >= 200) {
     uint16_t temp_s = (uint16_t)temp_avg;
-    canMsg.can_id = 0x02;
-    canMsg.can_dlc = 8;
-    canMsg.data[0] = temp_s & 0xFF;  // lowByte(temp_s);
-    canMsg.data[1] = temp_s >> 8;    // highByte(temp_s);
-    canMsg.data[2] = spd_s & 0xFF;
-    canMsg.data[3] = spd_s >> 8;
-    canMsg.data[4] = injDisable_s;                 
-    canMsg.data[5] = rpm_s;
-    canMsg.data[6] = oil_level;
-    canMsg.data[7] = 0;
-    mcp2515.sendMessage(&canMsg);
+    canMsgTx.can_id = 0x02;
+    canMsgTx.can_dlc = 8;
+    canMsgTx.data[0] = temp_s & 0xFF;  // lowByte(temp_s);
+    canMsgTx.data[1] = temp_s >> 8;    // highByte(temp_s);
+    canMsgTx.data[2] = spd_s & 0xFF;
+    canMsgTx.data[3] = spd_s >> 8;
+    canMsgTx.data[4] = injDisable_s;
+    canMsgTx.data[5] = rpm_s & 0xFF;
+    canMsgTx.data[6] = rpm_s >> 8;
+    canMsgTx.data[7] = oil_level;
+    mcp2515.sendMessage(&canMsgTx);
     
     lastCanSendTime = currentMillis;
   }

@@ -44,7 +44,7 @@ unsigned long ignitionEntryTime = 0;
 
 const unsigned long STANDBY_TIMEOUT_MS = 60000;     // 1 Minutes (Production sleep timeout)
 const unsigned long ACCESSORY_TIMEOUT_MS = 7200000; // 2 Hours (7200000 ms)
-const unsigned long BUTTON_COOLDOWN_MS = 1000;      // 3 Seconds button lockout
+const unsigned long BUTTON_COOLDOWN_MS = 1000;      // 1 Second button lockout
 const unsigned long MAX_CRANK_TIME_MS = 5000;       // 5 Seconds limit
 
 ESP_8_BIT_GFX tv(true, 8);
@@ -231,7 +231,10 @@ void regulatorTask(void *pvParameters)
     if (!regulatorTaskRunning)
     {
       esp_task_wdt_delete(NULL);
+      ledcWrite(0, 0); // Ensure field coil off before deleting
+      portENTER_CRITICAL(&dataMux);
       regulatorTaskHandle = NULL;
+      portEXIT_CRITICAL(&dataMux);
       vTaskDelete(NULL); // Delete self safely
     }
     // uint32_t start = micros();
@@ -411,9 +414,12 @@ void regulatorTask(void *pvParameters)
     if (current_micros - last_fuel_time >= 100000)
     {
       int new_fuel = adc.readADC_SingleEnded(2);
-      portENTER_CRITICAL(&dataMux);
-      ads_fuel = new_fuel;
-      portEXIT_CRITICAL(&dataMux);
+      if (new_fuel >= 0) // Only update on valid I2C read
+      {
+        portENTER_CRITICAL(&dataMux);
+        ads_fuel = new_fuel;
+        portEXIT_CRITICAL(&dataMux);
+      }
       last_fuel_time = current_micros;
     }
 
@@ -729,26 +735,33 @@ void enterPowerDownSleep()
 {
   // --- ORDERED SHUTDOWN: Stop everything safely before deep sleep ---
 
-  // 1. Disarm Watchdog FIRST — the shutdown sequence below may take >1s
-  esp_task_wdt_delete(NULL); // Remove loop() task from WDT
-  esp_task_wdt_deinit();     // Fully disable WDT hardware
+  // 1. Extend WDT to 5s for shutdown (prevents hang if peripheral is unresponsive)
+  esp_task_wdt_delete(NULL);
+  esp_task_wdt_deinit();
+  esp_task_wdt_init(5, true); // 5s timeout with panic=true
+  esp_task_wdt_add(NULL);
 
   // 2. Safely stop the regulator FreeRTOS task (running on Core 0, does I2C + SPI)
   if (regulatorTaskHandle != NULL)
   {
     regulatorTaskRunning = false;
-    int timeout = 0;
-    while (regulatorTaskHandle != NULL && timeout < 100)
+    for (int timeout = 0; timeout < 100; timeout++)
     {
+      taskYIELD();
       delay(5);
-      timeout++;
+      if (regulatorTaskHandle == NULL) break;
     }
-    if (regulatorTaskHandle != NULL)
+    // Use critical section to safely check-and-delete (prevents race with self-deleting task)
+    portENTER_CRITICAL(&dataMux);
+    TaskHandle_t h = regulatorTaskHandle;
+    regulatorTaskHandle = NULL;
+    portEXIT_CRITICAL(&dataMux);
+    if (h != NULL)
     {
-      vTaskDelete(regulatorTaskHandle);
-      regulatorTaskHandle = NULL;
+      vTaskDelete(h);
     }
   }
+  esp_task_wdt_reset();
 
   // 3. Turn off field coil PWM and detach LEDC
   ledcWrite(0, 0);
@@ -763,12 +776,10 @@ void enterPowerDownSleep()
 
   // 6. Disconnect I2C bus
   Wire.end();
+  esp_task_wdt_reset();
 
   // 7. Turn off all relays and float the pins
   setRelays(false, false, false);
-  digitalWrite(PIN_RELAY_ACC, LOW);
-  digitalWrite(PIN_RELAY_IGN, LOW);
-  digitalWrite(PIN_RELAY_START, LOW);
   pinMode(PIN_RELAY_ACC, INPUT);
   pinMode(PIN_RELAY_IGN, INPUT);
   pinMode(PIN_RELAY_START, INPUT);
@@ -780,10 +791,14 @@ void enterPowerDownSleep()
   digitalWrite(field_relay_pin, LOW);
   pinMode(field_relay_pin, INPUT);
 
-  // 10. Configure RTC wakeup: Wake on HIGH because unlock pulses to 0V (opto output goes HIGH)
+  // 10. Disarm WDT before deep sleep
+  esp_task_wdt_delete(NULL);
+  esp_task_wdt_deinit();
+
+  // 11. Configure RTC wakeup: Wake on HIGH because unlock pulses to 0V (opto output goes HIGH)
   esp_sleep_enable_ext1_wakeup(1ULL << PIN_WAKE_UNLOCK, ESP_EXT1_WAKEUP_ANY_HIGH);
 
-  // 11. Enter deep sleep — CPU halts here, wakes up via reset
+  // 12. Enter deep sleep — CPU halts here, wakes up via reset
   currentState = STATE_SLEEP;
   esp_deep_sleep_start();
 }
@@ -862,28 +877,46 @@ void processPushStart()
     break;
 
   case STATE_ACC:
+  {
     // Relays: ACC ON, IGN OFF, START OFF (POS1)
-    setRelays(true, false, false);
+    // Non-blocking brake check: after button press, IGN turns on for 50ms
+    // to let relay/optocoupler settle, then brake is read without blocking the main loop
+    static bool accBrakeCheckPending = false;
+    static unsigned long accBrakeCheckTime = 0;
 
-    if (btnPressed && (now - lastButtonPressTime >= BUTTON_COOLDOWN_MS))
+    if (accBrakeCheckPending)
     {
-      lastButtonPressTime = now;
-      // Temporarily turn on IGN to power the brake switch circuit
-      setRelays(true, true, false);
-      delay(50); // wait 50ms for relay contacts to settle and optocoupler signal to stabilize
-      bool brakeIsHeldNow = (digitalRead(PIN_INPUT_BRAKE) == LOW);
-
-      if (brakeIsHeldNow)
+      setRelays(true, true, false); // Keep IGN on during settle wait
+      if (now - accBrakeCheckTime >= 50)
       {
-        currentState = STATE_CRANKING;
+        accBrakeCheckPending = false;
+        bool brakeIsHeldNow = (digitalRead(PIN_INPUT_BRAKE) == LOW);
+        if (brakeIsHeldNow)
+        {
+          currentState = STATE_CRANKING;
+        }
+        else
+        {
+          currentState = STATE_STANDBY; // No brake -> ACC to OFF (STANDBY)
+          standbyStartTime = now;       // Reset 2-min timeout
+        }
       }
-      else
+    }
+    else
+    {
+      setRelays(true, false, false);
+
+      if (btnPressed && (now - lastButtonPressTime >= BUTTON_COOLDOWN_MS))
       {
-        currentState = STATE_STANDBY; // No brake -> ACC to OFF (STANDBY)
-        standbyStartTime = now;       // Reset 2-min timeout
+        lastButtonPressTime = now;
+        // Temporarily turn on IGN to power the brake switch circuit
+        setRelays(true, true, false);
+        accBrakeCheckPending = true;
+        accBrakeCheckTime = now;
       }
     }
     break;
+  }
 
   case STATE_IGNITION:
     // Relays: ACC ON, IGN ON, START OFF (POS2)
@@ -1191,7 +1224,7 @@ void loop()
     // tv.setTextColor(0xff, 0x00);
     // tv.print(field_pwm);
   }
-  smoothVal = 0.001 * filtered + (1 - 0.001) * smoothVal; // Exponential moving average for smoothing
+  smoothVal = 0.001f * filtered + (1.0f - 0.001f) * smoothVal; // Exponential moving average for smoothing
   percent = (int)getFuelPercent(smoothVal);
   percent = constrain(percent, 0, 100);
 
@@ -1208,9 +1241,9 @@ void loop()
     {
       raw2 = (uint16_t)((canMsg.data[1] << 8) | canMsg.data[0]);
       spd_t = (uint16_t)(canMsg.data[3] << 8 | canMsg.data[2]);
-      oil_level_t = (uint8_t)canMsg.data[6];
       injector_state = canMsg.data[4];
-      new_rpm = ((uint16_t)canMsg.data[5] * 100) / 2;
+      new_rpm = (uint16_t)((canMsg.data[6] << 8) | canMsg.data[5]);
+      oil_level_t = (uint8_t)canMsg.data[7];
       lastPacketTime = now;
     }
   }
