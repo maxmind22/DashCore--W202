@@ -222,6 +222,9 @@ void regulatorTask(void *pvParameters)
   static uint32_t last_fuel_time = 0;
   static float last_error = 0.0f;
   const float v_target = 13.6000f; // Max voltage is 13.6V
+  SystemState local_state = STATE_SLEEP;
+  unsigned long runningStartTime = 0;
+  const unsigned long CHARGE_DELAY_MS = 2000; // 2 seconds delay before charging starts
 
   for (;;)
   {
@@ -268,6 +271,7 @@ void regulatorTask(void *pvParameters)
         vTaskDelay(pdMS_TO_TICKS(10)); // Yield CPU properly instead of blocking delay()
         Wire.begin();
         Wire.setClock(100000);
+        Wire.setTimeOut(20);           // Ensure I2C transaction timeout is set in recovery
         adc.begin();
         adc.setGain(GAIN_ONE);
         adc.setDataRate(RATE_ADS1115_250SPS);
@@ -294,6 +298,7 @@ void regulatorTask(void *pvParameters)
     // We use <= 0.5A instead of 0.0A to account for small ADC noise around zero
     portENTER_CRITICAL(&dataMux);
     local_rpm = rpm;
+    local_state = currentState;
     portEXIT_CRITICAL(&dataMux);
 
     bool logical_failure = ((voltage_filtered >= v_target + 0.4f || current_A_filtered >= 30.0f) ||
@@ -377,8 +382,20 @@ void regulatorTask(void *pvParameters)
       safety_pwm = safety_pwm + (int)(200.0f * oi_err); // Mild push-back
     }
 
-    // Force field coil off if engine is not running or sensor error occurs
-    if (local_rpm == 0 || sensor_error)
+    // Reset running start time if engine is not running or not in RUNNING state
+    if (local_rpm == 0 || local_state != STATE_RUNNING)
+    {
+      runningStartTime = 0;
+    }
+    else if (runningStartTime == 0)
+    {
+      runningStartTime = millis();
+    }
+
+    bool delay_active = (runningStartTime != 0 && (millis() - runningStartTime < CHARGE_DELAY_MS));
+
+    // Force field coil off if engine is not running, during cranking, during start delay, or sensor error occurs
+    if (local_rpm == 0 || local_state == STATE_CRANKING || delay_active || sensor_error)
     {
       field_pwm = 0;
       integral_error = 0.0f; // Reset integrator
@@ -647,33 +664,27 @@ void warnings(int percent, int temp_out, int spd, int coolant_level,
 }
 
 //=================== CAN Diagnostics ==================//
-// void checkCanErrors()
-// {
-//   uint8_t errFlags = mcp2515.getErrorFlags();
-//   if (errFlags != 0)
-//   {
-//     Serial.print("CAN Error Flags: 0x");
-//     Serial.println(errFlags, HEX);
+void checkCanErrors()
+{
+  uint8_t errFlags = mcp2515.getErrorFlags();
+  if (errFlags != 0)
+  {
+    // Clear overflow flags to resume reception
+    if (errFlags & (MCP2515::EFLG_RX0OVR | MCP2515::EFLG_RX1OVR))
+    {
+      mcp2515.clearRXnOVR();
+    }
 
-//     // Clear overflow flags to resume reception
-//     if (errFlags & (MCP2515::EFLG_RX0OVR | MCP2515::EFLG_RX1OVR))
-//     {
-//       mcp2515.clearRXnOVR();
-//     }
-
-//     // Only completely reset the chip if it goes into Bus-Off (fatal state).
-//     // Do NOT interfere if it's just in Error Passive (TXEP/RXEP); it will self-recover.
-//     // Continuously calling setNormalMode() during Error Passive aborts transmissions
-//     // and blocks natural recovery.
-//     if (errFlags & MCP2515::EFLG_TXBO)
-//     {
-//       Serial.println(" - Bus State Critical! Re-initializing...");
-//       mcp2515.reset();
-//       mcp2515.setBitrate(CAN_500KBPS, MCP_8MHZ);
-//       mcp2515.setNormalMode();
-//     }
-//   }
-// }
+    // Only completely reset the chip if it goes into Bus-Off (fatal state).
+    // Do NOT interfere if it's just in Error Passive (TXEP/RXEP); it will self-recover.
+    if (errFlags & MCP2515::EFLG_TXBO)
+    {
+      mcp2515.reset();
+      mcp2515.setBitrate(CAN_500KBPS, MCP_8MHZ);
+      mcp2515.setNormalOneShotMode();
+    }
+  }
+}
 
 // --- PUSH START HELPER FUNCTIONS ---
 void setRelays(bool acc, bool ign, bool start)
@@ -1189,7 +1200,7 @@ void loop()
 
   //================================ Read data from engine MCU ==============================================//
 
-  // checkCanErrors();
+  checkCanErrors();
   MCP2515::ERROR readStatus = mcp2515.readMessage(&canMsg);
   if (readStatus == MCP2515::ERROR_OK)
   {
@@ -1272,16 +1283,32 @@ void loop()
     int old_b_y2 = GAUGE_CY - 2 * sin(old_angle + PI / 2.0);
     tv.fillTriangle(old_tip_x, old_tip_y, old_b_x1, old_b_y1, old_b_x2,
                     old_b_y2, 0x00);
-    for (int i = 0; i <= 220; i += 20)
+    struct GaugeNumber {
+      int16_t x, y;
+      int16_t val;
+    };
+    static GaugeNumber numCoords[12];
+    static bool coordsInitialized = false;
+
+    if (!coordsInitialized)
     {
-      float angle = (200.0 - i) * PI / 180.0;
-      // Draw numbers just inside the gauge
-      int tr = GAUGE_R - 16;
-      int tx = GAUGE_CX + tr * cos(angle);
-      int ty = GAUGE_CY - tr * sin(angle);
-      int tw = (i < 10) ? 6 : ((i < 100) ? 12 : 18);
-      tv.setCursor(tx - tw / 2, ty - 4);
-      tv.print(i);
+      int idx = 0;
+      for (int i = 0; i <= 220; i += 20)
+      {
+        float angle = (200.0 - i) * PI / 180.0;
+        int tr = GAUGE_R - 16;
+        int tx = GAUGE_CX + tr * cos(angle);
+        int ty = GAUGE_CY - tr * sin(angle);
+        int tw = (i < 10) ? 6 : ((i < 100) ? 12 : 18);
+        numCoords[idx++] = { (int16_t)(tx - tw / 2), (int16_t)(ty - 4), (int16_t)i };
+      }
+      coordsInitialized = true;
+    }
+
+    for (int idx = 0; idx < 12; idx++)
+    {
+      tv.setCursor(numCoords[idx].x, numCoords[idx].y);
+      tv.print(numCoords[idx].val);
     }
     // Draw new needle
     float new_angle = (200.0 - spd) * PI / 180.0;
@@ -1311,31 +1338,93 @@ void loop()
   static float voltage_disp = 13.6f;
   float volts = local_voltage_filtered;
   voltage_disp = 0.02f * volts + (1.0f - 0.02f) * voltage_disp;
-  tv.setCursor(5, 40);
-  tv.setTextColor(0xFF, 0x00);
   char bufV[10];
   snprintf(bufV, sizeof(bufV), "%5.1fV", voltage_disp);
-  tv.print(bufV);
+  static char last_bufV[10] = "";
+  if (strcmp(bufV, last_bufV) != 0)
+  {
+    tv.setCursor(5, 40);
+    tv.setTextColor(0xFF, 0x00);
+    tv.print(bufV);
+    strcpy(last_bufV, bufV);
+  }
 
   // --- Display current (+ charge / - discharge) ---
   static float current_disp = 0.0f;
   float current_d = local_current_A_filtered;
   current_disp = 0.009f * current_d + (1.0f - 0.009f) * current_disp;
-  tv.setCursor(5, 55);
-  tv.setTextColor(0xFF, 0x00);
   char bufI[10];
   snprintf(bufI, sizeof(bufI), "%5.0fA", current_disp);
-  // tv.fillRect(5, 55, 60, 8, 0x00); // Clear old current value
-  tv.print(bufI);
+  static char last_bufI[10] = "";
+  if (strcmp(bufI, last_bufI) != 0)
+  {
+    tv.setCursor(5, 55);
+    tv.setTextColor(0xFF, 0x00);
+    tv.print(bufI);
+    strcpy(last_bufI, bufI);
+  }
+
+  // --- Display cranking amps briefly after starting ---
+  static float peak_crank_current = 0.0f;
+  static SystemState lastStateDisplay = STATE_SLEEP;
+  static unsigned long startedRunningTime = 0;
+  static bool was_cranking_amps_drawn = false;
+
+  if (currentState == STATE_CRANKING && lastStateDisplay != STATE_CRANKING)
+  {
+    peak_crank_current = 0.0f;
+  }
+  if (currentState == STATE_CRANKING)
+  {
+    if (local_current_A_filtered < peak_crank_current)
+    {
+      peak_crank_current = local_current_A_filtered;
+    }
+  }
+  if (currentState == STATE_RUNNING && lastStateDisplay == STATE_CRANKING)
+  {
+    startedRunningTime = now;
+  }
+
+  bool show_crank_amps = (currentState == STATE_RUNNING && startedRunningTime != 0 && (now - startedRunningTime < 5000));
+
+  if (show_crank_amps)
+  {
+    if (!was_cranking_amps_drawn)
+    {
+      tv.setCursor(5, 70);
+      tv.setTextColor(0xFF, 0x00);
+      char bufCA[15];
+      float ca_val = (peak_crank_current < 0.0f) ? -peak_crank_current : 0.0f;
+      snprintf(bufCA, sizeof(bufCA), "CRK %4.0fA", ca_val);
+      tv.print(bufCA);
+      was_cranking_amps_drawn = true;
+    }
+  }
+  else if (was_cranking_amps_drawn)
+  {
+    tv.setCursor(5, 70);
+    tv.setTextColor(0xFF, 0x00);
+    tv.print("         "); // Erase with spaces
+    was_cranking_amps_drawn = false;
+  }
+
+  lastStateDisplay = currentState;
 
   // display rpm
-  tv.setCursor(95, 190);
-  tv.setTextColor(0xFF, 0x00);
-  tv.setTextSize(2);
-  char rpmStr[6];
-  snprintf(rpmStr, sizeof(rpmStr), "%5d", (int)rpm);
-  tv.print(rpmStr);
-  tv.setTextSize(1);
+  int current_rpm = (int)rpm;
+  static int last_drawn_rpm = -1;
+  if (current_rpm != last_drawn_rpm)
+  {
+    tv.setCursor(95, 190);
+    tv.setTextColor(0xFF, 0x00);
+    tv.setTextSize(2);
+    char rpmStr[6];
+    snprintf(rpmStr, sizeof(rpmStr), "%5d", current_rpm);
+    tv.print(rpmStr);
+    tv.setTextSize(1);
+    last_drawn_rpm = current_rpm;
+  }
 
   temp_out = map((int)raw2, 250, 950, 40, 120);
   temp_out = constrain(temp_out, 40, 120);

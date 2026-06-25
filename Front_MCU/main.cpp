@@ -59,23 +59,21 @@ void spdISR() {
 }
 
 //=================== CAN Diagnostics ==================//
-// void checkCanErrors() {
-//   uint8_t errFlags = mcp2515.getErrorFlags();
-//   if (errFlags != 0) {
-//     if (errFlags & (MCP2515::EFLG_RX0OVR | MCP2515::EFLG_RX1OVR)) {
-//       mcp2515.clearRXnOVR();
-//     }
-//     // Only completely reset the chip if it goes into Bus-Off (fatal state).
-//     // Do NOT interfere if it's just in Error Passive (TXEP/RXEP); it will self-recover.
-//     // Continuously calling setNormalMode() during Error Passive aborts transmissions 
-//     // and blocks natural recovery.
-//     if (errFlags & MCP2515::EFLG_TXBO) {
-//       mcp2515.reset();
-//       mcp2515.setBitrate(CAN_500KBPS, MCP_8MHZ);
-//       mcp2515.setNormalOneShotMode();
-//     }
-//   }
-// }
+void checkCanErrors() {
+  uint8_t errFlags = mcp2515.getErrorFlags();
+  if (errFlags != 0) {
+    if (errFlags & (MCP2515::EFLG_RX0OVR | MCP2515::EFLG_RX1OVR)) {
+      mcp2515.clearRXnOVR();
+    }
+    // Only completely reset the chip if it goes into Bus-Off (fatal state).
+    // Do NOT interfere if it's just in Error Passive (TXEP/RXEP); it will self-recover.
+    if (errFlags & MCP2515::EFLG_TXBO) {
+      mcp2515.reset();
+      mcp2515.setBitrate(CAN_500KBPS, MCP_8MHZ);
+      mcp2515.setNormalOneShotMode();
+    }
+  }
+}
 
 void setup() {
   pinMode(fan, OUTPUT);
@@ -183,7 +181,7 @@ void loop() {
 static int alive = 0;
 static unsigned long last_can = 0; 
   // Process CAN and auto-recover errors
-  // checkCanErrors();
+  checkCanErrors();
   if(mcp2515.readMessage(&canMsg) == MCP2515::ERROR_OK)
   {
     if (canMsg.can_id == 0x03)
