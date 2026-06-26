@@ -48,7 +48,9 @@ The ESP32 manages a smart, keyless push-to-start system designed to replicate an
 * **Double Starting Prevention:** If cranking times out, the system automatically falls back to the ACC position (`STATE_ACC`) and cuts the starter/ignition to prevent the user from accidentally grinding the starter gear on a running engine.
 * **Rotary Cycle & Stop Flow:** 
   * *When Off:* Tapping the button cycles: OFF (`STATE_STANDBY`) $\rightarrow$ IGNITION (`STATE_IGNITION`) $\rightarrow$ ACC (`STATE_ACC`) $\rightarrow$ OFF.
-  * *When Running:* Tapping the button shuts off the engine and ignition, placing the vehicle in ACC (`STATE_ACC`). The next tap turns the system completely OFF.
+  * *When Running:* Tapping the button stops the engine:
+    * **With Brake Held:** Stops the engine but keeps ACC active (system goes to `STATE_ACC` so you can listen to music).
+    * **Without Brake:** Stops the engine and shuts down all accessories immediately (system goes to `STATE_STANDBY`).
 
 ---
 
