@@ -212,7 +212,8 @@ void regulatorTask(void *pvParameters)
   const float current_sensor_offset_mv = 2500.0f; // 2519
   const float current_sensor_mV_per_A = 4.0f;     // 4.0f; // mV per Amp (FS500E2T)
   const float current_limit_upper = 20.000f;      // start pulling back above this
-  const float current_alpha = 0.2f;               // previously 0.01
+  // const float current_alpha = 0.2f;
+  const float current_alpha = 0.1f; // previously 0.2
   const float base_Kp = 30.000f;
   const float base_Ki = 5.0f;
   const float Kd = 0.0f;
@@ -1028,10 +1029,19 @@ void processPushStart()
       if (spd == 0)
       { // Safety check: speed must be zero
         lastButtonPressTime = now;
-        setRelays(true, false, false); // Keep ACC ON, kill IGN and START
-        currentState = STATE_ACC;      // Go to ACC position
-        stoppedToAcc = true;           // Mark that we just stopped the engine
-        standbyStartTime = now;        // Start 2-minute sleep timeout
+        bool brakeHeld = (digitalRead(PIN_INPUT_BRAKE) == LOW);
+        if (brakeHeld)
+        {
+          setRelays(true, false, false); // Keep ACC ON, kill IGN and START
+          currentState = STATE_ACC;      // Go to ACC position
+          stoppedToAcc = true;           // Mark that we just stopped the engine to ACC
+        }
+        else
+        {
+          setRelays(false, false, false); // Kill ACC, IGN, and START
+          currentState = STATE_STANDBY;   // Go to Standby (OFF)
+        }
+        standbyStartTime = now;        // Start sleep timeout timer
       }
     }
     break;
@@ -1564,7 +1574,7 @@ void loop()
   // Serial.print(local_rpm);
   // Serial.print(voltage_filtered);
   // Serial.print("V   current: ");
-  // Serial.println(rpm);
+  // Serial.println(current_A_filtered);
 
   processPushStart();
   esp_task_wdt_reset();
