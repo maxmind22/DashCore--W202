@@ -42,9 +42,9 @@ bool stoppedToAcc = false;
 volatile bool regulatorTaskRunning = true;
 unsigned long ignitionEntryTime = 0;
 
-const unsigned long STANDBY_TIMEOUT_MS = 60000;     // 1 Minutes (Production sleep timeout)
+const unsigned long STANDBY_TIMEOUT_MS = 120000;    // 2 Minutes (Production sleep timeout)
 const unsigned long ACCESSORY_TIMEOUT_MS = 7200000; // 2 Hours (7200000 ms)
-const unsigned long BUTTON_COOLDOWN_MS = 1000;      // 1 Second button lockout
+const unsigned long BUTTON_COOLDOWN_MS = 500;       // 500 millisecond button lockout
 const unsigned long MAX_CRANK_TIME_MS = 5000;       // 5 Seconds limit
 
 ESP_8_BIT_GFX tv(true, 8);
@@ -202,6 +202,7 @@ volatile uint32_t last_charge = 0;
 volatile uint16_t rpm = 0;
 int field_pwm = 0;
 uint16_t local_rpm = 0;
+// volatile UBaseType_t free_stack = 0;
 
 void regulatorTask(void *pvParameters)
 {
@@ -212,8 +213,8 @@ void regulatorTask(void *pvParameters)
   const float current_sensor_offset_mv = 2500.0f; // 2519
   const float current_sensor_mV_per_A = 4.0f;     // 4.0f; // mV per Amp (FS500E2T)
   const float current_limit_upper = 20.000f;      // start pulling back above this
-  // const float current_alpha = 0.2f;
-  const float current_alpha = 0.1f; // previously 0.2
+  const float current_alpha = 0.2f;
+  // const float current_alpha = 0.3f; // previously 0.2
   const float base_Kp = 30.000f;
   const float base_Ki = 5.0f;
   const float Kd = 0.0f;
@@ -221,6 +222,8 @@ void regulatorTask(void *pvParameters)
   static float integral_error = 0.0f;
   static unsigned long last_regulator_time = 0;
   static uint32_t last_fuel_time = 0;
+  static uint32_t last_stack_check = 0;
+
   static float last_error = 0.0f;
   const float v_target = 13.6000f; // Max voltage is 13.6V
   SystemState local_state = STATE_SLEEP;
@@ -306,7 +309,7 @@ void regulatorTask(void *pvParameters)
     portEXIT_CRITICAL(&dataMux);
 
     bool logical_failure = ((voltage_filtered >= v_target + 0.4f || current_A_filtered >= 30.0f) ||
-                            (voltage_filtered <= v_target - 0.1f && current_A_filtered <= 0.0f && local_rpm > 100));
+                            (voltage_filtered <= v_target - 0.2f && current_A_filtered <= 0.0f && local_state == STATE_RUNNING));
 
     // Consolidate state hierarchy
     int next_charge_state = 0;
@@ -387,7 +390,7 @@ void regulatorTask(void *pvParameters)
     }
 
     // Reset running start time if engine is not running or not in RUNNING state
-    if (local_rpm == 0 || local_state != STATE_RUNNING)
+    if (local_state != STATE_RUNNING)
     {
       runningStartTime = 0;
     }
@@ -399,7 +402,7 @@ void regulatorTask(void *pvParameters)
     bool delay_active = (runningStartTime != 0 && (millis() - runningStartTime < CHARGE_DELAY_MS));
 
     // Force field coil off if engine is not running, during cranking, during start delay, or sensor error occurs
-    if (local_rpm == 0 || local_state == STATE_CRANKING || delay_active || sensor_error)
+    if (local_state != STATE_RUNNING || delay_active || sensor_error)
     {
       field_pwm = 0;
       integral_error = 0.0f; // Reset integrator
@@ -430,8 +433,6 @@ void regulatorTask(void *pvParameters)
     //   free_stack = uxTaskGetStackHighWaterMark(NULL);
     //   last_stack_check = current_micros;
     // }
-
-    // task_duration = micros() - start;
     // task_duration = micros() - start;
     vTaskDelay(pdMS_TO_TICKS(20)); // Use vTaskDelay instead of vTaskDelayUntil to always yield
     esp_task_wdt_reset();
@@ -867,6 +868,7 @@ void processPushStart()
 
   case STATE_STANDBY:
   {
+    // Serial.println("OFF");
     // Relays: ACC OFF, IGN OFF, START OFF
     static bool standbyBrakeCheckPending = false;
     static unsigned long standbyBrakeCheckTime = 0;
@@ -886,6 +888,7 @@ void processPushStart()
         {
           currentState = STATE_ACC; // 1st press (without brake) goes to ACC (POS1)
           standbyStartTime = now;   // Reset 2-min timeout
+          stoppedToAcc = false;     // Reset flag as we didn't stop from a running engine to ACC
         }
       }
     }
@@ -907,6 +910,7 @@ void processPushStart()
 
   case STATE_ACC:
   {
+    // Serial.println("ACC");
     // Relays: ACC ON, IGN OFF, START OFF (POS1)
     // Non-blocking brake check: after button press, IGN turns on for 50ms
     // to let relay/optocoupler settle, then brake is read without blocking the main loop
@@ -923,12 +927,21 @@ void processPushStart()
         if (brakeIsHeldNow)
         {
           currentState = STATE_CRANKING;
+          stoppedToAcc = false;
         }
         else
         {
-          currentState = STATE_IGNITION; // 2nd press (without brake) goes to POS2 (IGNITION)
-          ignitionEntryTime = now;       // Capture entry time for ignition state
-          standbyStartTime = now;        // Reset 2-min timeout
+          if (stoppedToAcc)
+          {
+            currentState = STATE_STANDBY; // Go to OFF (standby)
+            stoppedToAcc = false;
+          }
+          else
+          {
+            currentState = STATE_IGNITION; // 2nd press (without brake) goes to POS2 (IGNITION)
+            ignitionEntryTime = now;       // Capture entry time for ignition state
+          }
+          standbyStartTime = now; // Reset 2-min timeout
         }
       }
     }
@@ -950,6 +963,7 @@ void processPushStart()
 
   case STATE_IGNITION:
     // Relays: ACC ON, IGN ON, START OFF (POS2)
+    // Serial.println("POS2");
     setRelays(true, true, false);
 
     if (btnPressed && (now - lastButtonPressTime >= BUTTON_COOLDOWN_MS))
@@ -957,6 +971,7 @@ void processPushStart()
       lastButtonPressTime = now;
       if (brakeHeld)
       {
+        // Serial.println("brake singal works");
         currentState = STATE_CRANKING;
       }
       else
@@ -975,6 +990,7 @@ void processPushStart()
 
     if (crankStage == CRANK_PRIME)
     {
+      // Serial.println("prime");
       // Step 1: Go to POS2 (ACC & IGN ON) for fuel pump prime (500ms)
       setRelays(true, true, false);
       if (crankStageTime == 0)
@@ -989,6 +1005,7 @@ void processPushStart()
     }
     else if (crankStage == CRANK_SOLENOID)
     {
+      // Serial.println("cranking");
       // Step 2: Engage starter solenoid (ACC ON, IGN ON, START ON)
       setRelays(true, true, true);
 
@@ -1008,6 +1025,7 @@ void processPushStart()
         standbyStartTime = now; // Reset 2-min timeout
         crankStage = CRANK_PRIME;
         crankStageTime = 0;
+        stoppedToAcc = false; // Reset flag on crank timeout
       }
     }
     break;
@@ -1019,8 +1037,9 @@ void processPushStart()
     // Handle Engine Stall Safety
     if (currentRpm == 0)
     {
-      currentState = STATE_IGNITION;
+      currentState = STATE_ACC;
       standbyStartTime = now; // Start 2-minute sleep timeout
+      stoppedToAcc = false;   // Reset flag on engine stall
     }
 
     // Handle Engine Stop Button Press (Only if vehicle is stationary)
@@ -1040,8 +1059,9 @@ void processPushStart()
         {
           setRelays(false, false, false); // Kill ACC, IGN, and START
           currentState = STATE_STANDBY;   // Go to Standby (OFF)
+          stoppedToAcc = false;           // Reset flag on stop to standby
         }
-        standbyStartTime = now;        // Start sleep timeout timer
+        standbyStartTime = now; // Start sleep timeout timer
       }
     }
     break;
@@ -1081,6 +1101,7 @@ void setup()
   currentState = STATE_STANDBY;
   standbyStartTime = millis();
   regulatorTaskRunning = true;
+  stoppedToAcc = false;
 
   recoverI2CBus(21, 22);
   Wire.begin();
@@ -1397,34 +1418,37 @@ void loop()
     last_spd = spd;
   }
 
-  // --- Display voltage ---
-  static float voltage_disp = 13.6f;
-  float volts = local_voltage_filtered;
-  voltage_disp = 0.02f * volts + (1.0f - 0.02f) * voltage_disp;
-  char bufV[10];
-  snprintf(bufV, sizeof(bufV), "%5.1fV", voltage_disp);
-  static char last_bufV[10] = "";
-  if (strcmp(bufV, last_bufV) != 0)
+  // --- Display voltage & current ---
+  static unsigned long lastMetricsUpdateTime = 0;
+  if (now - lastMetricsUpdateTime >= 250)
   {
-    tv.setCursor(5, 40);
-    tv.setTextColor(0xFF, 0x00);
-    tv.print(bufV);
-    strcpy(last_bufV, bufV);
-  }
+    // Voltage
+    float volts = local_voltage_filtered;
+    char bufV[10];
+    snprintf(bufV, sizeof(bufV), "%5.1fV", volts);
+    static char last_bufV[10] = "";
+    if (strcmp(bufV, last_bufV) != 0)
+    {
+      tv.setCursor(5, 40);
+      tv.setTextColor(0xFF, 0x00);
+      tv.print(bufV);
+      strcpy(last_bufV, bufV);
+    }
 
-  // --- Display current (+ charge / - discharge) ---
-  static float current_disp = 0.0f;
-  float current_d = local_current_A_filtered;
-  current_disp = 0.009f * current_d + (1.0f - 0.009f) * current_disp;
-  char bufI[10];
-  snprintf(bufI, sizeof(bufI), "%5.0fA", current_disp);
-  static char last_bufI[10] = "";
-  if (strcmp(bufI, last_bufI) != 0)
-  {
-    tv.setCursor(5, 55);
-    tv.setTextColor(0xFF, 0x00);
-    tv.print(bufI);
-    strcpy(last_bufI, bufI);
+    // Current
+    float current_d = local_current_A_filtered;
+    char bufI[10];
+    snprintf(bufI, sizeof(bufI), "%5.0fA", current_d);
+    static char last_bufI[10] = "";
+    if (strcmp(bufI, last_bufI) != 0)
+    {
+      tv.setCursor(5, 55);
+      tv.setTextColor(0xFF, 0x00);
+      tv.print(bufI);
+      strcpy(last_bufI, bufI);
+    }
+
+    lastMetricsUpdateTime = now;
   }
 
   // --- Display cranking amps briefly after starting ---
@@ -1477,16 +1501,21 @@ void loop()
   // display rpm
   int current_rpm = (int)rpm;
   static int last_drawn_rpm = -1;
-  if (current_rpm != last_drawn_rpm)
+  static unsigned long lastRpmUpdateTime = 0;
+  if (now - lastRpmUpdateTime >= 250)
   {
-    tv.setCursor(95, 190);
-    tv.setTextColor(0xFF, 0x00);
-    tv.setTextSize(2);
-    char rpmStr[6];
-    snprintf(rpmStr, sizeof(rpmStr), "%5d", current_rpm);
-    tv.print(rpmStr);
-    tv.setTextSize(1);
-    last_drawn_rpm = current_rpm;
+    if (current_rpm != last_drawn_rpm)
+    {
+      tv.setCursor(95, 190);
+      tv.setTextColor(0xFF, 0x00);
+      tv.setTextSize(2);
+      char rpmStr[6];
+      snprintf(rpmStr, sizeof(rpmStr), "%5d", current_rpm);
+      tv.print(rpmStr);
+      tv.setTextSize(1);
+      last_drawn_rpm = current_rpm;
+    }
+    lastRpmUpdateTime = now;
   }
 
   temp_out = map((int)raw2, 250, 950, 40, 120);
@@ -1574,7 +1603,7 @@ void loop()
   // Serial.print(local_rpm);
   // Serial.print(voltage_filtered);
   // Serial.print("V   current: ");
-  // Serial.println(current_A_filtered);
+  Serial.println(rpm);
 
   processPushStart();
   esp_task_wdt_reset();
