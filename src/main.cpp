@@ -17,12 +17,14 @@
 #include <esp_sleep.h>
 
 // --- PUSH START PIN DEFINITIONS ---
-#define PIN_RELAY_ACC 16   // Terminal 15R (Accessory)
-#define PIN_RELAY_IGN 26   // Terminal 15 (POS2/Ignition)
-#define PIN_RELAY_START 13 // Terminal 50 (Starter)
-#define PIN_BTN_START 33   // Push Button (Active Low, Pull-Up, RTC-capable)
-#define PIN_INPUT_BRAKE 36 // Brake Light Sensor (Active High, Opto-isolated, Input-only)
-#define PIN_WAKE_UNLOCK 35 // Unlock Pulse Input (Active Low, Opto-isolated, RTC Input-only)
+#define PIN_RELAY_ACC 16        // Terminal 15R (Accessory)
+#define PIN_RELAY_IGN 26        // Terminal 15 (POS2/Ignition)
+#define PIN_RELAY_START 13      // Terminal 50 (Starter)
+#define PIN_BTN_START 33        // Push Button (Active Low, Pull-Up, RTC-capable)
+#define PIN_INPUT_BRAKE 36      // Brake Light Sensor (Active High, Opto-isolated, Input-only)
+#define PIN_WAKE_UNLOCK 35      // Unlock Pulse Input (Active Low, Opto-isolated, RTC Input-only)
+#define PIN_5V_GATE 27          // Controls the 5V Relay (via ULN2003)
+#define PIN_3V3_DIGITAL_GATE 17 // Powers the Level Shifter LV and digital 3.3V pull-ups
 
 // --- SYSTEM STATES ---
 enum SystemState
@@ -777,9 +779,26 @@ void enterPowerDownSleep()
   // 5. Put MCP2515 CAN controller to sleep (SPI device)
   sleepCANController();
 
-  // 6. Disconnect I2C bus
+  // 6. Close communication buses
   Wire.end();
+  SPI.end(); // Stop SPI bus to release SCK, MOSI, MISO
   esp_task_wdt_reset();
+
+  // 6.1 Put communication pins into high-impedance (floating) mode
+  // This prevents leakage through level-shifter pull-ups
+  pinMode(21, INPUT); // SDA
+  pinMode(22, INPUT); // SCL
+  pinMode(5, INPUT);  // CS (CAN)
+  pinMode(18, INPUT); // SCK
+  pinMode(19, INPUT); // MISO
+  pinMode(23, INPUT); // MOSI
+
+  // 6.2 Turn off the power gates to cut supply voltage to all modules
+  digitalWrite(PIN_5V_GATE, LOW); // Disable 5V Relay
+  pinMode(PIN_5V_GATE, INPUT);    // Float pin
+
+  digitalWrite(PIN_3V3_DIGITAL_GATE, LOW); // Cut 3.3V pull-ups/shifter
+  pinMode(PIN_3V3_DIGITAL_GATE, INPUT);    // Float pin
 
   // 7. Turn off all relays and float the pins
   setRelays(false, false, false);
@@ -1095,6 +1114,15 @@ void recoverI2CBus(int sdaPin, int sclPin)
 //=================== setup ===============//
 void setup()
 {
+  // 1. Immediately turn on the switched rails
+  pinMode(PIN_5V_GATE, OUTPUT);
+  digitalWrite(PIN_5V_GATE, HIGH); // Enable Relay
+
+  pinMode(PIN_3V3_DIGITAL_GATE, OUTPUT);
+  digitalWrite(PIN_3V3_DIGITAL_GATE, HIGH); // Power 3.3V pull-ups/level shifter
+
+  delay(30); // Allow voltage rails to stabilize
+
   setupPushStartPins();
 
   // Initialize system state to Standby with 2-minute sleep timeout on all boots/resets
