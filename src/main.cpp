@@ -16,6 +16,9 @@
 #include <driver/rtc_io.h>
 #include <esp_sleep.h>
 
+// Forward declarations
+void recoverI2CBus(int sdaPin, int sclPin);
+
 // --- PUSH START PIN DEFINITIONS ---
 #define PIN_RELAY_ACC 16        // Terminal 15R (Accessory)
 #define PIN_RELAY_IGN 26        // Terminal 15 (POS2/Ignition)
@@ -25,6 +28,7 @@
 #define PIN_WAKE_UNLOCK 35      // Unlock Pulse Input (Active Low, Opto-isolated, RTC Input-only)
 #define PIN_5V_GATE 27          // Controls the 5V Relay (via ULN2003)
 #define PIN_3V3_DIGITAL_GATE 17 // Powers the Level Shifter LV and digital 3.3V pull-ups
+#define PIN_RELAY_LOCK 32       // Controls the vehicle lock relay (Active High)
 
 // --- SYSTEM STATES ---
 enum SystemState
@@ -42,10 +46,11 @@ unsigned long standbyStartTime = 0;
 unsigned long lastButtonPressTime = 0;
 bool stoppedToAcc = false;
 volatile bool regulatorTaskRunning = true;
-unsigned long ignitionEntryTime = 0;
+bool vehicleLocked = false;                         // Tracks if vehicle auto-locked in current state
 
 const unsigned long STANDBY_TIMEOUT_MS = 120000;    // 2 Minutes (Production sleep timeout)
 const unsigned long ACCESSORY_TIMEOUT_MS = 7200000; // 2 Hours (7200000 ms)
+const unsigned long VEHICLE_LOCK_TIMEOUT_MS = 120000; // 2 Minutes auto-lock timeout
 const unsigned long BUTTON_COOLDOWN_MS = 500;       // 500 millisecond button lockout
 const unsigned long MAX_CRANK_TIME_MS = 5000;       // 5 Seconds limit
 
@@ -161,7 +166,7 @@ int oil_level = 0;
 int last_clear = 0;
 //----------CAN bus variables------------------//
 struct can_frame canMsg;     // Used by loop() for RX only
-struct can_frame canMsgTx;   // Used by regulatorTask for TX only
+struct can_frame canMsgTx;   // Used by loop() for health heartbeat TX
 MCP2515 mcp2515(5, 8000000); // CS pin 5
 // SemaphoreHandle_t spiMutex;         // Protects MCP2515 (SPI) access across cores
 //------------------- warning variables ------------------//
@@ -169,7 +174,7 @@ unsigned int counter = 0;
 int last_spd = -1;
 bool coolant_level = false;
 int buzzer_state = 0;
-volatile int spd_l = 0;
+int spd_l = 0;
 bool fuel = false;
 bool cool = false;
 bool cool_run = true;
@@ -201,6 +206,7 @@ volatile int charge_state = 0;
 int chg = 0;
 int chg2 = 0;
 volatile uint32_t last_charge = 0;
+volatile uint32_t last_regulator_heartbeat = 0; // Updated by regulatorTask each iteration
 volatile uint16_t rpm = 0;
 int field_pwm = 0;
 uint16_t local_rpm = 0;
@@ -278,6 +284,7 @@ void regulatorTask(void *pvParameters)
         // I2C Bus Recovery
         Wire.end();
         vTaskDelay(pdMS_TO_TICKS(10)); // Yield CPU properly instead of blocking delay()
+        recoverI2CBus(21, 22);         // Toggle SCL to release any stuck I2C slave
         Wire.begin();
         Wire.setClock(100000);
         Wire.setTimeOut(20); // Ensure I2C transaction timeout is set in recovery
@@ -311,7 +318,7 @@ void regulatorTask(void *pvParameters)
     portEXIT_CRITICAL(&dataMux);
 
     bool logical_failure = ((voltage_filtered >= v_target + 0.4f || current_A_filtered >= 30.0f) ||
-                            (voltage_filtered <= v_target - 0.2f && current_A_filtered <= 0.0f && local_state == STATE_RUNNING));
+                            (voltage_filtered <= v_target - 0.2f && current_A_filtered <= 0.0f && (local_state == STATE_RUNNING || local_rpm > 200)));
 
     // Consolidate state hierarchy
     int next_charge_state = 0;
@@ -403,8 +410,8 @@ void regulatorTask(void *pvParameters)
 
     bool delay_active = (runningStartTime != 0 && (millis() - runningStartTime < CHARGE_DELAY_MS));
 
-    // Force field coil off if engine is not running, during cranking, during start delay, or sensor error occurs
-    if (local_state != STATE_RUNNING || delay_active || sensor_error)
+    // Force field coil off if engine is not running (neither STATE_RUNNING nor rpm > 200), during start delay, or sensor error occurs
+    if (!(local_state == STATE_RUNNING || local_rpm > 200) || delay_active || sensor_error)
     {
       field_pwm = 0;
       integral_error = 0.0f; // Reset integrator
@@ -436,7 +443,8 @@ void regulatorTask(void *pvParameters)
     //   last_stack_check = current_micros;
     // }
     // task_duration = micros() - start;
-    vTaskDelay(pdMS_TO_TICKS(20)); // Use vTaskDelay instead of vTaskDelayUntil to always yield
+    vTaskDelay(pdMS_TO_TICKS(20));       // Use vTaskDelay instead of vTaskDelayUntil to always yield
+    last_regulator_heartbeat = millis(); // Signal Core 1 that regulator is alive
     esp_task_wdt_reset();
   }
 }
@@ -739,18 +747,14 @@ void enterPowerDownSleep()
 {
   // --- ORDERED SHUTDOWN: Stop everything safely before deep sleep ---
 
-  // 1. Extend WDT to 5s for shutdown (prevents hang if peripheral is unresponsive)
-  esp_task_wdt_delete(NULL);
-  esp_task_wdt_deinit();
-  esp_task_wdt_init(5, true); // 5s timeout with panic=true
-  esp_task_wdt_add(NULL);
-
-  // 2. Safely stop the regulator FreeRTOS task (running on Core 0, does I2C + SPI)
+  // 1. Safely stop the regulator FreeRTOS task first (running on Core 0, does I2C)
+  //    Keep the original 1s WDT alive by resetting it in the wait loop.
   if (regulatorTaskHandle != NULL)
   {
     regulatorTaskRunning = false;
     for (int timeout = 0; timeout < 100; timeout++)
     {
+      esp_task_wdt_reset(); // Keep current WDT alive while waiting for task exit
       taskYIELD();
       delay(5);
       if (regulatorTaskHandle == NULL)
@@ -766,7 +770,12 @@ void enterPowerDownSleep()
       vTaskDelete(h);
     }
   }
-  esp_task_wdt_reset();
+
+  // 2. Now that regulatorTask is stopped, extend WDT to 5s for remaining shutdown
+  esp_task_wdt_delete(NULL);
+  esp_task_wdt_deinit();
+  esp_task_wdt_init(5, true); // 5s timeout with panic=true
+  esp_task_wdt_add(NULL);
 
   // 3. Turn off field coil PWM and detach LEDC
   ledcWrite(0, 0);
@@ -793,18 +802,28 @@ void enterPowerDownSleep()
   pinMode(19, INPUT); // MISO
   pinMode(23, INPUT); // MOSI
 
-  // 6.2 Turn off the power gates to cut supply voltage to all modules
+  // 7. Turn off all relays
+  setRelays(false, false, false);
+  delay(500); // Allow relay switching and vehicle state to settle (cutting ACC might trigger factory unlock)
+
+  // 7.1 Activate vehicle locking relay briefly to ensure it remains locked after sleep
+  pinMode(PIN_RELAY_LOCK, OUTPUT);
+  digitalWrite(PIN_RELAY_LOCK, HIGH); // Ground the lock wire via relay
+  delay(200);                         // Ground pulse duration of 200ms
+  digitalWrite(PIN_RELAY_LOCK, LOW);
+  pinMode(PIN_RELAY_LOCK, INPUT);     // Float pin to prevent sleep leakage
+
+  // 7.2 Float the relay control pins
+  pinMode(PIN_RELAY_ACC, INPUT);
+  pinMode(PIN_RELAY_IGN, INPUT);
+  pinMode(PIN_RELAY_START, INPUT);
+
+  // 8. Turn off the power gates to cut supply voltage to all modules (must happen after relay transitions)
   digitalWrite(PIN_5V_GATE, LOW); // Disable 5V Relay
   pinMode(PIN_5V_GATE, INPUT);    // Float pin
 
   digitalWrite(PIN_3V3_DIGITAL_GATE, LOW); // Cut 3.3V pull-ups/shifter
   pinMode(PIN_3V3_DIGITAL_GATE, INPUT);    // Float pin
-
-  // 7. Turn off all relays and float the pins
-  setRelays(false, false, false);
-  pinMode(PIN_RELAY_ACC, INPUT);
-  pinMode(PIN_RELAY_IGN, INPUT);
-  pinMode(PIN_RELAY_START, INPUT);
 
   // 8. Turn off buzzer
   digitalWrite(buzzer_pin, LOW);
@@ -832,7 +851,10 @@ void setupPushStartPins()
   pinMode(PIN_RELAY_START, OUTPUT);
   setRelays(false, false, false);
 
-  pinMode(PIN_BTN_START, INPUT_PULLUP);
+  pinMode(PIN_RELAY_LOCK, OUTPUT);
+  digitalWrite(PIN_RELAY_LOCK, LOW);
+
+  pinMode(PIN_BTN_START, INPUT);
   pinMode(PIN_INPUT_BRAKE, INPUT);
   pinMode(PIN_WAKE_UNLOCK, INPUT);
 }
@@ -849,6 +871,26 @@ void processPushStart()
 
   bool brakeHeld = (digitalRead(PIN_INPUT_BRAKE) == LOW);
   int currentRpm = rpm;
+
+  if (btnPressed)
+  {
+    standbyStartTime = now;
+    vehicleLocked = false;
+  }
+
+  // Auto-lock: Lock vehicle after 2 minutes of inactivity, regardless of Standby/ACC/Ignition state
+  if (currentState == STATE_STANDBY || currentState == STATE_ACC || currentState == STATE_IGNITION)
+  {
+    if (now - standbyStartTime > VEHICLE_LOCK_TIMEOUT_MS && !vehicleLocked)
+    {
+      pinMode(PIN_RELAY_LOCK, OUTPUT);
+      digitalWrite(PIN_RELAY_LOCK, HIGH); // Ground the lock wire via relay
+      delay(200);                         // 200ms grounding pulse
+      digitalWrite(PIN_RELAY_LOCK, LOW);
+      pinMode(PIN_RELAY_LOCK, INPUT);     // Float pin to save power
+      vehicleLocked = true;
+    }
+  }
 
   // Handle sleep timeouts when system is in Standby (OFF) or ACC/Ignition
   if (currentState == STATE_STANDBY)
@@ -958,7 +1000,6 @@ void processPushStart()
           else
           {
             currentState = STATE_IGNITION; // 2nd press (without brake) goes to POS2 (IGNITION)
-            ignitionEntryTime = now;       // Capture entry time for ignition state
           }
           standbyStartTime = now; // Reset 2-min timeout
         }
@@ -1223,7 +1264,28 @@ void loop()
 {
   // uint32_t start = micros();
   unsigned long now = millis();
-  health_state = 0; // Assume failure until we complete a successful loop iteration
+
+  //============= send health signal to front MCU ==================
+  static unsigned long lastCanSendTimeMs = 0;
+  if (now - lastCanSendTimeMs >= 200)
+  {
+    bool regulator_ok = (regulatorTaskHandle == NULL) || (now - last_regulator_heartbeat < 500);
+    health_state = regulator_ok ? 100 : 0;
+
+    canMsgTx.can_id = 0x03;
+    canMsgTx.can_dlc = 8;
+    canMsgTx.data[0] = health_state;
+    canMsgTx.data[1] = 0;
+    canMsgTx.data[2] = 0;
+    canMsgTx.data[3] = 0;
+    canMsgTx.data[4] = 0;
+    canMsgTx.data[5] = 0;
+    canMsgTx.data[6] = 0;
+    canMsgTx.data[7] = 0;
+    mcp2515.sendMessage(&canMsgTx);
+    lastCanSendTimeMs = now;
+  }
+
   if (last_clear < 6)
   {
     tv.fillScreen(0x00);
@@ -1334,24 +1396,6 @@ void loop()
   rpm = new_rpm;
   portEXIT_CRITICAL(&dataMux);
 
-  //============= send heath signal to front MCU ==================
-  health_state = 100;
-  static unsigned long lastCanSendTimeMs = 0;
-  if (now - lastCanSendTimeMs >= 200)
-  {
-    canMsgTx.can_id = 0x03;
-    canMsgTx.can_dlc = 8;
-    canMsgTx.data[0] = health_state;
-    canMsgTx.data[1] = 0;
-    canMsgTx.data[2] = 0;
-    canMsgTx.data[3] = 0;
-    canMsgTx.data[4] = 0;
-    canMsgTx.data[5] = 0;
-    canMsgTx.data[6] = 0;
-    canMsgTx.data[7] = 0;
-    mcp2515.sendMessage(&canMsgTx);
-    lastCanSendTimeMs = now;
-  }
   spd_l = map((int)spd_t, 10, 880, 0, 220);
   spd_l = constrain(spd_l, 0, 220);
   int spd_in = (spd_l == 220) ? 0 : spd_l;
@@ -1631,7 +1675,7 @@ void loop()
   // Serial.print(local_rpm);
   // Serial.print(voltage_filtered);
   // Serial.print("V   current: ");
-  Serial.println(rpm);
+  // Serial.println(rpm);
 
   processPushStart();
   esp_task_wdt_reset();
