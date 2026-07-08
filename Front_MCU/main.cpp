@@ -175,7 +175,7 @@ void loop()
   }
 
   // Deactivation is instant when throttle is released or RPM drops below hysteresis limit
-  if (th_Pos == 0 || rpm < 1000)
+  if (th_Pos == 0 || rpm < 1100)
   {
     injDisable = false;
   }
