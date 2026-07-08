@@ -1095,7 +1095,7 @@ void processPushStart()
     setRelays(true, true, false);
 
     // Handle Engine Stall Safety
-    if (currentRpm == 0)
+    if (currentRpm == 0 && (now - lastPacketTime <= 2000))
     {
       currentState = STATE_ACC;
       standbyStartTime = now; // Start 2-minute sleep timeout

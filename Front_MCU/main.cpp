@@ -149,13 +149,8 @@ void loop()
   //=================== Calculate RPM (Every loop) ======================//
   noInterrupts();
   uint32_t p = period;
-  uint32_t lt = lastTime;
   interrupts();
-  if (currentMicros - lt > 500000UL)
-  {
-    rpm = 0; // No pulse for 500ms → engine stopped
-  }
-  else if (p > 0)
+  if (p > 0)
   {
     uint32_t calc = 60000000UL / p;
     rpm = calc / 2; // Only update with valid readings  // Real engine RPM (2 pulses per rev)
