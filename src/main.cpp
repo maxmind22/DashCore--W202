@@ -1095,7 +1095,7 @@ void processPushStart()
     setRelays(true, true, false);
 
     // Handle Engine Stall Safety
-    if (currentRpm == 0 && (now - lastPacketTime <= 2000))
+    if (currentRpm == 0)
     {
       currentState = STATE_ACC;
       standbyStartTime = now; // Start 2-minute sleep timeout
@@ -1387,7 +1387,20 @@ void loop()
       lastPacketTime = now;
     }
   }
-  if (now - lastPacketTime > 2000)
+  // if (now - lastPacketTime > 2000)
+  // {
+  //   new_rpm = 0;
+  // }
+
+  // Stall detection: set RPM to 0 if it hasn't changed for 500ms
+  static uint16_t last_rpm_val = 0;
+  static unsigned long last_rpm_change_time = 0;
+  if (new_rpm != last_rpm_val)
+  {
+    last_rpm_val = new_rpm;
+    last_rpm_change_time = now;
+  }
+  else if (now - last_rpm_change_time >= 500)
   {
     new_rpm = 0;
   }
