@@ -46,13 +46,13 @@ unsigned long standbyStartTime = 0;
 unsigned long lastButtonPressTime = 0;
 bool stoppedToAcc = false;
 volatile bool regulatorTaskRunning = true;
-bool vehicleLocked = false;                         // Tracks if vehicle auto-locked in current state
+bool vehicleLocked = false; // Tracks if vehicle auto-locked in current state
 
-const unsigned long STANDBY_TIMEOUT_MS = 120000;    // 2 Minutes (Production sleep timeout)
-const unsigned long ACCESSORY_TIMEOUT_MS = 7200000; // 2 Hours (7200000 ms)
+const unsigned long STANDBY_TIMEOUT_MS = 120000;      // 2 Minutes (Production sleep timeout)
+const unsigned long ACCESSORY_TIMEOUT_MS = 7200000;   // 2 Hours (7200000 ms)
 const unsigned long VEHICLE_LOCK_TIMEOUT_MS = 120000; // 2 Minutes auto-lock timeout
-const unsigned long BUTTON_COOLDOWN_MS = 500;       // 500 millisecond button lockout
-const unsigned long MAX_CRANK_TIME_MS = 5000;       // 5 Seconds limit
+const unsigned long BUTTON_COOLDOWN_MS = 500;         // 500 millisecond button lockout
+const unsigned long MAX_CRANK_TIME_MS = 5000;         // 5 Seconds limit
 
 ESP_8_BIT_GFX tv(true, 8);
 
@@ -317,7 +317,7 @@ void regulatorTask(void *pvParameters)
     local_state = currentState;
     portEXIT_CRITICAL(&dataMux);
 
-    bool logical_failure = ((voltage_filtered >= v_target + 0.4f || current_A_filtered >= 30.0f) ||
+    bool logical_failure = ((voltage_filtered >= v_target + 0.4f || current_A_filtered >= 40.0f) ||
                             (voltage_filtered <= v_target - 0.2f && current_A_filtered <= 0.0f && (local_state == STATE_RUNNING || local_rpm > 200)));
 
     // Consolidate state hierarchy
@@ -811,7 +811,7 @@ void enterPowerDownSleep()
   digitalWrite(PIN_RELAY_LOCK, HIGH); // Ground the lock wire via relay
   delay(200);                         // Ground pulse duration of 200ms
   digitalWrite(PIN_RELAY_LOCK, LOW);
-  pinMode(PIN_RELAY_LOCK, INPUT);     // Float pin to prevent sleep leakage
+  pinMode(PIN_RELAY_LOCK, INPUT); // Float pin to prevent sleep leakage
 
   // 7.2 Float the relay control pins
   pinMode(PIN_RELAY_ACC, INPUT);
@@ -887,7 +887,7 @@ void processPushStart()
       digitalWrite(PIN_RELAY_LOCK, HIGH); // Ground the lock wire via relay
       delay(200);                         // 200ms grounding pulse
       digitalWrite(PIN_RELAY_LOCK, LOW);
-      pinMode(PIN_RELAY_LOCK, INPUT);     // Float pin to save power
+      pinMode(PIN_RELAY_LOCK, INPUT); // Float pin to save power
       vehicleLocked = true;
     }
   }

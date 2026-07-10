@@ -1,6 +1,6 @@
-# Custom ESP32/AVR Dual-MCU Automotive Telemetry Dashboard & Smart Alternator Regulator
+# Custom ESP32/Arduino nano Dual-MCU Automotive Telemetry Dashboard, Smart Alternator Regulator, Push Start System
 
-A production-grade, real-time vehicle telemetry display and software-defined alternator regulator system. This project uses a dual-microcontroller architecture connected via **CAN Bus** to safely monitor engine status, display telemetry on composite video screens, and implement a closed-loop CV/CC (Constant Voltage / Constant Current) alternator field regulator tailored for a LiFePO4 start battery.
+A production-grade, real-time vehicle telemetry display and software-defined alternator regulator system, push start system. This project uses a dual-microcontroller architecture connected via **CAN Bus** to safely monitor engine status, display telemetry on composite video screens, implement a closed-loop CV/CC (Constant Voltage / Constant Current) alternator field regulator tailored for a LiFePO4 start battery and a push start system replacing mechanical key.
 
 ---
 
@@ -8,11 +8,11 @@ A production-grade, real-time vehicle telemetry display and software-defined alt
 
 The project is split into two physical microcontrollers:
 
-### 1. Front MCU (Engine Bay Controller - AVR/Arduino)
+### 1. Front MCU (Engine Bay Controller - Arduino nano)
 Located in the engine bay, this controller handles raw engine sensor acquisition and primary safety-critical components:
 * **RPM & Speed Tracking:** High-frequency pulse counting via hardware interrupts (`rpmISR`, `spdISR`) with software debouncing.
 * **Thermal Management:** Reads engine coolant temperature via thermistor and monitors A/C state to dynamically control the electric radiator cooling fan using variable PWM duty cycles.
-* **Engine Safety Safeguards:** Implements a safety injector cut-off mechanism under high RPM/throttle conditions.
+* **Custom DFCO (Deceleration Fuel Cut Off) Point:** Cuts fuel during deceleration to futher reduce fuel consumption
 * **Failsafe System:** Features a physical watchdog timer (`avr/wdt.h`) and monitors heartbeat frames from the display unit. If communication is lost, it immediately cuts field voltage to the regulator for safety.
 * **CAN Broadcast:** Packages engine telemetry (speed, RPM, oil level, temperatures) and broadcasts it over a 500kbps CAN Bus every 200ms.
 
@@ -44,7 +44,7 @@ The ESP32 manages a smart, keyless push-to-start system designed to replicate an
   Due to the brake switch only receiving power in Position 2 (Ignition ON), the system check flow is:
   1. **First Press:** Activates ACC & IGN (Position 2 / `STATE_IGNITION`), powering the brake switch.
   2. **Brake Detection:** Once in Position 2, the ESP32 checks for the brake signal. If the brake is held (either immediately during the transition or pressed later), the fuel pump primes for **1000ms**, and the starter automatically engages—no second button press required.
-  3. **Auto-Disengage:** The starter automatically disengages once the engine RPM exceeds **800 RPM**, or cuts out after a **5-second safety limit** if starting fails.
+  3. **Auto-Disengage:** The starter automatically disengages once the engine RPM exceeds **400 RPM**, or cuts out after a **5-second safety limit** if starting fails.
 * **Double Starting Prevention:** If cranking times out, the system automatically falls back to the ACC position (`STATE_ACC`) and cuts the starter/ignition to prevent the user from accidentally grinding the starter gear on a running engine.
 * **Rotary Cycle & Stop Flow:** 
   * *When Off:* Tapping the button cycles: OFF (`STATE_STANDBY`) $\rightarrow$ IGNITION (`STATE_IGNITION`) $\rightarrow$ ACC (`STATE_ACC`) $\rightarrow$ OFF.
@@ -56,7 +56,7 @@ The ESP32 manages a smart, keyless push-to-start system designed to replicate an
 
 ## 🔌 Hardware / Tech Stack
 
-* **Processor Core:** ESP32 (Cabin Display & regulator) & ATmega328P/AVR (Front Sensor Board)
+* **Processor Core:** ESP32 (Cabin Display, regulator & Push start system) & Arduino nano (Front Sensor Board)
 * **Communication:** MCP2515 CAN Bus Controller (500Kbps over SPI)
 * **ADC:** Adafruit ADS1115 (16-bit Sigma-Delta ADC for ultra-stable voltage & current reading in noisy engine environments)
 * **Current Sensor:** FS500E2T Hall-effect current sensor
