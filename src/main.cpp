@@ -46,11 +46,9 @@ unsigned long standbyStartTime = 0;
 unsigned long lastButtonPressTime = 0;
 bool stoppedToAcc = false;
 volatile bool regulatorTaskRunning = true;
-bool vehicleLocked = false; // Tracks if vehicle auto-locked in current state
 
-const unsigned long STANDBY_TIMEOUT_MS = 120000;      // 2 Minutes (Production sleep timeout)
-const unsigned long ACCESSORY_TIMEOUT_MS = 7200000;   // 2 Hours (7200000 ms)
-const unsigned long VEHICLE_LOCK_TIMEOUT_MS = 120000; // 2 Minutes auto-lock timeout
+const unsigned long STANDBY_TIMEOUT_MS = 60000;      // 1 Minute (Production sleep timeout)
+const unsigned long ACCESSORY_TIMEOUT_MS = 3600000;   // 1 Hour (3600000 ms)
 const unsigned long BUTTON_COOLDOWN_MS = 500;         // 500 millisecond button lockout
 const unsigned long MAX_CRANK_TIME_MS = 5000;         // 5 Seconds limit
 
@@ -802,9 +800,21 @@ void enterPowerDownSleep()
   pinMode(19, INPUT); // MISO
   pinMode(23, INPUT); // MOSI
 
-  // 7. Turn off all relays
+  // 7. Turn off and de-energize all relays and peripherals
   setRelays(false, false, false);
-  delay(500); // Allow relay switching and vehicle state to settle (cutting ACC might trigger factory unlock)
+  digitalWrite(PIN_5V_GATE, LOW); // Disable 5V Relay
+  pinMode(PIN_5V_GATE, INPUT);    // Float pin
+  digitalWrite(field_relay_pin, LOW);
+  pinMode(field_relay_pin, INPUT); // Float pin
+  digitalWrite(buzzer_pin, LOW);
+
+  // Float the relay control pins to prevent sleep leakage
+  pinMode(PIN_RELAY_ACC, INPUT);
+  pinMode(PIN_RELAY_IGN, INPUT);
+  pinMode(PIN_RELAY_START, INPUT);
+
+  // Allow relay switching and vehicle state to settle completely (prevent transient unlock)
+  delay(200);
 
   // 7.1 Activate vehicle locking relay briefly to ensure it remains locked after sleep
   pinMode(PIN_RELAY_LOCK, OUTPUT);
@@ -813,24 +823,9 @@ void enterPowerDownSleep()
   digitalWrite(PIN_RELAY_LOCK, LOW);
   pinMode(PIN_RELAY_LOCK, INPUT); // Float pin to prevent sleep leakage
 
-  // 7.2 Float the relay control pins
-  pinMode(PIN_RELAY_ACC, INPUT);
-  pinMode(PIN_RELAY_IGN, INPUT);
-  pinMode(PIN_RELAY_START, INPUT);
-
-  // 8. Turn off the power gates to cut supply voltage to all modules (must happen after relay transitions)
-  digitalWrite(PIN_5V_GATE, LOW); // Disable 5V Relay
-  pinMode(PIN_5V_GATE, INPUT);    // Float pin
-
+  // 8. Turn off the 3.3V digital gate (must happen after locking relay is pulsed)
   digitalWrite(PIN_3V3_DIGITAL_GATE, LOW); // Cut 3.3V pull-ups/shifter
   pinMode(PIN_3V3_DIGITAL_GATE, INPUT);    // Float pin
-
-  // 8. Turn off buzzer
-  digitalWrite(buzzer_pin, LOW);
-
-  // 9. Float the field relay pin
-  digitalWrite(field_relay_pin, LOW);
-  pinMode(field_relay_pin, INPUT);
 
   // 10. Disarm WDT before deep sleep
   esp_task_wdt_delete(NULL);
@@ -875,21 +870,51 @@ void processPushStart()
   if (btnPressed)
   {
     standbyStartTime = now;
-    vehicleLocked = false;
   }
 
-  // Auto-lock: Lock vehicle after 2 minutes of inactivity, regardless of Standby/ACC/Ignition state
-  if (currentState == STATE_STANDBY || currentState == STATE_ACC || currentState == STATE_IGNITION)
+  // Boot-lock: Lock 1 minute after booting when in ACC or IGN state
+  static bool bootLockDone = false;
+  if (!bootLockDone && (currentState == STATE_ACC || currentState == STATE_IGNITION))
   {
-    if (now - standbyStartTime > VEHICLE_LOCK_TIMEOUT_MS && !vehicleLocked)
+    if (now >= 60000) // 1 minute after booting
     {
       pinMode(PIN_RELAY_LOCK, OUTPUT);
       digitalWrite(PIN_RELAY_LOCK, HIGH); // Ground the lock wire via relay
       delay(200);                         // 200ms grounding pulse
       digitalWrite(PIN_RELAY_LOCK, LOW);
       pinMode(PIN_RELAY_LOCK, INPUT); // Float pin to save power
-      vehicleLocked = true;
+      bootLockDone = true;
     }
+  }
+
+  // Drive-lock: Lock after 1 minute every time the vehicle is started & moving
+  static bool driveLockTriggered = false;
+  static bool driveLockDone = false;
+  static unsigned long driveLockTime = 0;
+
+  if (currentState == STATE_RUNNING)
+  {
+    if (spd > 0 && !driveLockTriggered)
+    {
+      driveLockTriggered = true;
+      driveLockTime = now;
+    }
+
+    if (driveLockTriggered && !driveLockDone && (now - driveLockTime >= 60000))
+    {
+      pinMode(PIN_RELAY_LOCK, OUTPUT);
+      digitalWrite(PIN_RELAY_LOCK, HIGH); // Ground the lock wire via relay
+      delay(200);                         // 200ms grounding pulse
+      digitalWrite(PIN_RELAY_LOCK, LOW);
+      pinMode(PIN_RELAY_LOCK, INPUT); // Float pin to save power
+      driveLockDone = true;
+    }
+  }
+  else
+  {
+    // Reset drive-lock flags when not in running state
+    driveLockTriggered = false;
+    driveLockDone = false;
   }
 
   // Handle sleep timeouts when system is in Standby (OFF) or ACC/Ignition
@@ -1051,13 +1076,13 @@ void processPushStart()
     if (crankStage == CRANK_PRIME)
     {
       // Serial.println("prime");
-      // Step 1: Go to POS2 (ACC & IGN ON) for fuel pump prime (500ms)
+      // Step 1: Go to POS2 (ACC & IGN ON) for fuel pump prime (50ms)
       setRelays(true, true, false);
       if (crankStageTime == 0)
       {
         crankStageTime = now;
       }
-      if (now - crankStageTime >= 500)
+      if (now - crankStageTime >= 50)
       {
         crankStage = CRANK_SOLENOID;
         crankStageTime = now; // Reset timer for max crank limit
