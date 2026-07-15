@@ -102,6 +102,14 @@ unsigned long last_fuel_correction = 0;
 int temp_out = 0;
 int percent = 0;
 
+const float INJECTOR_FLOW_RATE_CC_MIN = 206.0f;
+const int NUM_INJECTORS = 4;
+uint32_t accumulated_inj_time_us = 0;
+float total_fuel_liters = 0.0f;
+float total_distance_km = 0.0f;
+float inst_val = 0.0f;
+float avg_l_100km = 0.0f;
+
 struct CalibrationPoint
 {
   int rawValue;
@@ -1385,9 +1393,6 @@ void loop()
       last_fuel_correction = now;
     }
     lastValue = filtered;
-    // tv.setCursor(120, 210);
-    // tv.setTextColor(0xff, 0x00);
-    // tv.print(field_pwm);
   }
   smoothVal = 0.001f * filtered + (1.0f - 0.001f) * smoothVal; // Exponential moving average for smoothing
   percent = (int)getFuelPercent(smoothVal);
@@ -1411,12 +1416,15 @@ void loop()
       oil_level_t = (uint8_t)canMsg.data[7];
       lastPacketTime = now;
     }
+    else if (canMsg.can_id == 0x04)
+    {
+      uint32_t pulse = (uint32_t)canMsg.data[0] |
+                       ((uint32_t)canMsg.data[1] << 8) |
+                       ((uint32_t)canMsg.data[2] << 16) |
+                       ((uint32_t)canMsg.data[3] << 24);
+      accumulated_inj_time_us += pulse;
+    }
   }
-  // if (now - lastPacketTime > 2000)
-  // {
-  //   new_rpm = 0;
-  // }
-
   // Stall detection: set RPM to 0 if it hasn't changed for 500ms
   static uint16_t last_rpm_val = 0;
   static unsigned long last_rpm_change_time = 0;
@@ -1686,6 +1694,70 @@ void loop()
       // snprintf(buf, sizeof(buf), "%3d", temp_out);
       // tv.print(buf);
     }
+
+    // --- Fuel Consumption Calculations ---
+    float elapsed_sec = (now - lastTime) / 1000.0f;
+    if (elapsed_sec <= 0.0f) elapsed_sec = 1.0f;
+
+    // Fuel consumed during the interval (in liters)
+    float fuel_consumed_liters = (accumulated_inj_time_us / 1000000.0f) * 
+                                 (INJECTOR_FLOW_RATE_CC_MIN / 60.0f / 1000.0f) * 
+                                 (float)NUM_INJECTORS;
+    accumulated_inj_time_us = 0; // Reset accumulator
+
+    total_fuel_liters += fuel_consumed_liters;
+
+    // Update trip distance (speed is in km/h, convert to km/sec and multiply by elapsed seconds)
+    float speed_val = (float)spd;
+    total_distance_km += (speed_val / 3600.0f) * elapsed_sec;
+
+    // Calculate instant consumption
+    if (speed_val > 0.0f)
+    {
+      // inst_val in L/100km
+      inst_val = (fuel_consumed_liters / ((speed_val / 3600.0f) * elapsed_sec)) * 100.0f;
+    }
+    else
+    {
+      // stationary consumption in L/h
+      inst_val = (fuel_consumed_liters / elapsed_sec) * 3600.0f;
+    }
+
+    // Calculate average consumption in L/100km
+    if (total_distance_km > 0.001f)
+    {
+      avg_l_100km = (total_fuel_liters / total_distance_km) * 100.0f;
+    }
+    else
+    {
+      avg_l_100km = 0.0f;
+    }
+
+    // Render fuel and distance metrics to screen
+    tv.setCursor(5, 85);
+    tv.setTextColor(0xFF, 0x00);
+    char bufInst[20];
+    if (speed_val > 0.0f)
+    {
+      snprintf(bufInst, sizeof(bufInst), "INS:%5.1f L/100", inst_val);
+    }
+    else
+    {
+      snprintf(bufInst, sizeof(bufInst), "INS:%5.1f L/h  ", inst_val);
+    }
+    tv.print(bufInst);
+
+    tv.setCursor(5, 95);
+    tv.setTextColor(0xFF, 0x00);
+    char bufAvg[20];
+    snprintf(bufAvg, sizeof(bufAvg), "AVG:%5.1f L/100", avg_l_100km);
+    tv.print(bufAvg);
+
+    tv.setCursor(5, 105);
+    tv.setTextColor(0xFF, 0x00);
+    char bufTrip[20];
+    snprintf(bufTrip, sizeof(bufTrip), "TRP:%5.1f km   ", total_distance_km);
+    tv.print(bufTrip);
 
     lastTime = now;
     last_v = v;

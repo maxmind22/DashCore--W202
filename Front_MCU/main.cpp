@@ -13,6 +13,7 @@
 const int tempPin = A0;
 const int fan = 5;
 const int ac = A1;
+#define inj_sense_pin 7
 uint8_t oil_level = 0;
 unsigned long last_check = 0;
 
@@ -21,6 +22,9 @@ volatile uint32_t lastTime = 0;
 volatile uint32_t lastTime2 = 0;
 volatile uint32_t period = 0;
 volatile uint32_t period2 = 0;
+volatile uint32_t total_inj_time_us = 0;
+volatile uint32_t inj_start_micros = 0;
+volatile bool inj_active = false;
 
 // These are only used in loop(), so they do NOT need to be volatile
 uint32_t rpm = 0;
@@ -57,6 +61,28 @@ void spdISR()
   { // Software debounce: 1ms (max 1000Hz)
     period2 = p;
     lastTime2 = now2;
+  }
+}
+
+ISR(PCINT2_vect)
+{
+  uint32_t now = micros();
+  bool pin_state = digitalReadFast(inj_sense_pin);
+  if (pin_state == LOW)
+  {
+    if (!inj_active)
+    {
+      inj_start_micros = now;
+      inj_active = true;
+    }
+  }
+  else
+  {
+    if (inj_active)
+    {
+      total_inj_time_us += (now - inj_start_micros);
+      inj_active = false;
+    }
   }
 }
 
@@ -100,6 +126,10 @@ void setup()
   // Attach interrupts
   attachInterrupt(digitalPinToInterrupt(rpm_pin), rpmISR, FALLING);
   attachInterrupt(digitalPinToInterrupt(spd_pin), spdISR, FALLING);
+
+  pinModeFast(inj_sense_pin, INPUT_PULLUP);
+  PCICR |= (1 << PCIE2);      // Enable PCINT2 (Port D)
+  PCMSK2 |= (1 << PCINT23);   // Enable PCINT23 (pin 7 change interrupt)
 
   mcp2515.reset();
   mcp2515.setBitrate(CAN_500KBPS, MCP_8MHZ);
@@ -237,6 +267,24 @@ void loop()
     canMsgTx.data[5] = rpm_s & 0xFF;
     canMsgTx.data[6] = rpm_s >> 8;
     canMsgTx.data[7] = oil_level;
+    mcp2515.sendMessage(&canMsgTx);
+
+    // Atomically read and reset total_inj_time_us
+    noInterrupts();
+    uint32_t local_inj_time = total_inj_time_us;
+    total_inj_time_us = 0;
+    if (inj_active)
+    {
+      inj_start_micros = currentMicros;
+    }
+    interrupts();
+
+    canMsgTx.can_id = 0x04;
+    canMsgTx.can_dlc = 4;
+    canMsgTx.data[0] = local_inj_time & 0xFF;
+    canMsgTx.data[1] = (local_inj_time >> 8) & 0xFF;
+    canMsgTx.data[2] = (local_inj_time >> 16) & 0xFF;
+    canMsgTx.data[3] = (local_inj_time >> 24) & 0xFF;
     mcp2515.sendMessage(&canMsgTx);
 
     lastCanSendTime = currentMillis;
