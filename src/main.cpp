@@ -47,10 +47,10 @@ unsigned long lastButtonPressTime = 0;
 bool stoppedToAcc = false;
 volatile bool regulatorTaskRunning = true;
 
-const unsigned long STANDBY_TIMEOUT_MS = 60000;      // 1 Minute (Production sleep timeout)
-const unsigned long ACCESSORY_TIMEOUT_MS = 3600000;   // 1 Hour (3600000 ms)
-const unsigned long BUTTON_COOLDOWN_MS = 500;         // 500 millisecond button lockout
-const unsigned long MAX_CRANK_TIME_MS = 5000;         // 5 Seconds limit
+const unsigned long STANDBY_TIMEOUT_MS = 60000;     // 1 Minute (Production sleep timeout)
+const unsigned long ACCESSORY_TIMEOUT_MS = 3600000; // 1 Hour (3600000 ms)
+const unsigned long BUTTON_COOLDOWN_MS = 500;       // 500 millisecond button lockout
+const unsigned long MAX_CRANK_TIME_MS = 5000;       // 5 Seconds limit
 
 ESP_8_BIT_GFX tv(true, 8);
 
@@ -460,33 +460,33 @@ void drawStaticGauge()
 {
   tv.drawRect(FUEL_X, FUEL_Y, FUEL_WIDTH, FUEL_HEIGHT, 0xFF);
   // Draw the continuous arc from -20 to 200 degrees
-  for (float a = -20.0; a <= 200.0; a += 0.5)
-  {
-    float angle = a * PI / 180.0;
-    int px = GAUGE_CX + GAUGE_R * cos(angle);
-    int py = GAUGE_CY - GAUGE_R * sin(angle);
-    tv.drawPixel(px, py, 0xFF);
-  }
+  // for (float a = -20.0; a <= 200.0; a += 0.5)
+  // {
+  //   float angle = a * PI / 180.0;
+  //   int px = GAUGE_CX + GAUGE_R * cos(angle);
+  //   int py = GAUGE_CY - GAUGE_R * sin(angle);
+  //   tv.drawPixel(px, py, 0xFF);
+  // }
 
   // Draw the circular gauge ticks (0 to 220 km/h, 220 degree sweep) and numbers
-  for (int i = 0; i <= 220; i += 20)
-  {
-    float angle = (200.0 - i) * PI / 180.0;
-    int x1 = GAUGE_CX + (GAUGE_R - 8) * cos(angle);
-    int y1 = GAUGE_CY - (GAUGE_R - 8) * sin(angle);
-    int x2 = GAUGE_CX + GAUGE_R * cos(angle);
-    int y2 = GAUGE_CY - GAUGE_R * sin(angle);
-    tv.drawLine(x1, y1, x2, y2, 0xFF);
+  // for (int i = 0; i <= 220; i += 20)
+  // {
+  //   float angle = (200.0 - i) * PI / 180.0;
+  //   int x1 = GAUGE_CX + (GAUGE_R - 8) * cos(angle);
+  //   int y1 = GAUGE_CY - (GAUGE_R - 8) * sin(angle);
+  //   int x2 = GAUGE_CX + GAUGE_R * cos(angle);
+  //   int y2 = GAUGE_CY - GAUGE_R * sin(angle);
+  //   tv.drawLine(x1, y1, x2, y2, 0xFF);
 
-    // Draw numbers just inside the gauge
-    int tr = GAUGE_R - 16;
-    int tx = GAUGE_CX + tr * cos(angle);
-    int ty = GAUGE_CY - tr * sin(angle);
-    int tw = (i < 10) ? 6 : ((i < 100) ? 12 : 18);
-    tv.setCursor(tx - tw / 2, ty - 4);
-    tv.print(i);
-  }
-  tv.fillCircle(GAUGE_CX, GAUGE_CY, 10, 0xFF);
+  //   // Draw numbers just inside the gauge
+  //   int tr = GAUGE_R - 16;
+  //   int tx = GAUGE_CX + tr * cos(angle);
+  //   int ty = GAUGE_CY - tr * sin(angle);
+  //   int tw = (i < 10) ? 6 : ((i < 100) ? 12 : 18);
+  //   tv.setCursor(tx - tw / 2, ty - 4);
+  //   tv.print(i);
+  // }
+  // tv.fillCircle(GAUGE_CX, GAUGE_CY, 10, 0xFF);
 }
 void warnings(int percent, int temp_out, int spd, int coolant_level,
               int oil_level, unsigned long now)
@@ -895,7 +895,7 @@ void processPushStart()
     }
   }
 
-  // Drive-lock: Lock after 1 minute every time the vehicle is started & moving
+  // Drive-lock: Lock after 10 sec every time the vehicle is started & moving
   static bool driveLockTriggered = false;
   static bool driveLockDone = false;
   static unsigned long driveLockTime = 0;
@@ -908,7 +908,7 @@ void processPushStart()
       driveLockTime = now;
     }
 
-    if (driveLockTriggered && !driveLockDone && (now - driveLockTime >= 60000))
+    if (driveLockTriggered && !driveLockDone && (now - driveLockTime >= 10000))
     {
       pinMode(PIN_RELAY_LOCK, OUTPUT);
       digitalWrite(PIN_RELAY_LOCK, HIGH); // Ground the lock wire via relay
@@ -1474,64 +1474,63 @@ void loop()
 
   if (spd != last_spd || lastTime == 0)
   {
-    // Erase old needle
-    float old_angle = (200.0 - last_spd) * PI / 180.0;
-    int old_tip_x = GAUGE_CX + (GAUGE_R - 10) * cos(old_angle);
-    int old_tip_y = GAUGE_CY - (GAUGE_R - 10) * sin(old_angle);
-    int old_b_x1 = GAUGE_CX + 2 * cos(old_angle - PI / 2.0);
-    int old_b_y1 = GAUGE_CY - 2 * sin(old_angle - PI / 2.0);
-    int old_b_x2 = GAUGE_CX + 2 * cos(old_angle + PI / 2.0);
-    int old_b_y2 = GAUGE_CY - 2 * sin(old_angle + PI / 2.0);
-    tv.fillTriangle(old_tip_x, old_tip_y, old_b_x1, old_b_y1, old_b_x2,
-                    old_b_y2, 0x00);
-    struct GaugeNumber
-    {
-      int16_t x, y;
-      int16_t val;
-    };
-    static GaugeNumber numCoords[12];
-    static bool coordsInitialized = false;
+    // // Erase old needle
+    // float old_angle = (200.0 - last_spd) * PI / 180.0;
+    // int old_tip_x = GAUGE_CX + (GAUGE_R - 10) * cos(old_angle);
+    // int old_tip_y = GAUGE_CY - (GAUGE_R - 10) * sin(old_angle);
+    // int old_b_x1 = GAUGE_CX + 2 * cos(old_angle - PI / 2.0);
+    // int old_b_y1 = GAUGE_CY - 2 * sin(old_angle - PI / 2.0);
+    // int old_b_x2 = GAUGE_CX + 2 * cos(old_angle + PI / 2.0);
+    // int old_b_y2 = GAUGE_CY - 2 * sin(old_angle + PI / 2.0);
+    // tv.fillTriangle(old_tip_x, old_tip_y, old_b_x1, old_b_y1, old_b_x2,
+    //                 old_b_y2, 0x00);
+    // struct GaugeNumber
+    // {
+    //   int16_t x, y;
+    //   int16_t val;
+    // };
+    // static GaugeNumber numCoords[12];
+    // static bool coordsInitialized = false;
 
-    if (!coordsInitialized)
-    {
-      int idx = 0;
-      for (int i = 0; i <= 220; i += 20)
-      {
-        float angle = (200.0 - i) * PI / 180.0;
-        int tr = GAUGE_R - 16;
-        int tx = GAUGE_CX + tr * cos(angle);
-        int ty = GAUGE_CY - tr * sin(angle);
-        int tw = (i < 10) ? 6 : ((i < 100) ? 12 : 18);
-        numCoords[idx++] = {(int16_t)(tx - tw / 2), (int16_t)(ty - 4), (int16_t)i};
-      }
-      coordsInitialized = true;
-    }
+    // if (!coordsInitialized)
+    // {
+    //   int idx = 0;
+    //   for (int i = 0; i <= 220; i += 20)
+    //   {
+    //     float angle = (200.0 - i) * PI / 180.0;
+    //     int tr = GAUGE_R - 16;
+    //     int tx = GAUGE_CX + tr * cos(angle);
+    //     int ty = GAUGE_CY - tr * sin(angle);
+    //     int tw = (i < 10) ? 6 : ((i < 100) ? 12 : 18);
+    //     numCoords[idx++] = {(int16_t)(tx - tw / 2), (int16_t)(ty - 4), (int16_t)i};
+    //   }
+    //   coordsInitialized = true;
+    // }
 
-    for (int idx = 0; idx < 12; idx++)
-    {
-      tv.setCursor(numCoords[idx].x, numCoords[idx].y);
-      tv.print(numCoords[idx].val);
-    }
-    // Draw new needle
-    float new_angle = (200.0 - spd) * PI / 180.0;
-    int new_tip_x = GAUGE_CX + (GAUGE_R - 10) * cos(new_angle);
-    int new_tip_y = GAUGE_CY - (GAUGE_R - 10) * sin(new_angle);
-    int new_b_x1 = GAUGE_CX + 2 * cos(new_angle - PI / 2.0);
-    int new_b_y1 = GAUGE_CY - 2 * sin(new_angle - PI / 2.0);
-    int new_b_x2 = GAUGE_CX + 2 * cos(new_angle + PI / 2.0);
-    int new_b_y2 = GAUGE_CY - 2 * sin(new_angle + PI / 2.0);
-    tv.fillTriangle(new_tip_x, new_tip_y, new_b_x1, new_b_y1, new_b_x2,
-                    new_b_y2, 0xE0); // Highlight needle
-    // Redraw center pin
-    tv.fillCircle(GAUGE_CX, GAUGE_CY, 10, 0xFF);
-
-    // tv.setCursor(100, 190);
-    // tv.setTextColor(0xFF, 0x00);
-    // tv.setTextSize(2);
-    // char spdStr[4];
-    // snprintf(spdStr, sizeof(spdStr), "%3d", spd);
-    // tv.print(spdStr);
-    // tv.setTextSize(1);
+    // for (int idx = 0; idx < 12; idx++)
+    // {
+    //   tv.setCursor(numCoords[idx].x, numCoords[idx].y);
+    //   tv.print(numCoords[idx].val);
+    // }
+    // // Draw new needle
+    // float new_angle = (200.0 - spd) * PI / 180.0;
+    // int new_tip_x = GAUGE_CX + (GAUGE_R - 10) * cos(new_angle);
+    // int new_tip_y = GAUGE_CY - (GAUGE_R - 10) * sin(new_angle);
+    // int new_b_x1 = GAUGE_CX + 2 * cos(new_angle - PI / 2.0);
+    // int new_b_y1 = GAUGE_CY - 2 * sin(new_angle - PI / 2.0);
+    // int new_b_x2 = GAUGE_CX + 2 * cos(new_angle + PI / 2.0);
+    // int new_b_y2 = GAUGE_CY - 2 * sin(new_angle + PI / 2.0);
+    // tv.fillTriangle(new_tip_x, new_tip_y, new_b_x1, new_b_y1, new_b_x2,
+    //                 new_b_y2, 0xE0); // Highlight needle
+    // // Redraw center pin
+    // tv.fillCircle(GAUGE_CX, GAUGE_CY, 10, 0xFF);
+    tv.setCursor(72, 150);
+    tv.setTextColor(0xFF, 0x00);
+    tv.setTextSize(5);
+    char spdStr[4];
+    snprintf(spdStr, sizeof(spdStr), "%3d", spd);
+    tv.print(spdStr);
+    tv.setTextSize(1);
 
     last_spd = spd;
   }
@@ -1617,24 +1616,24 @@ void loop()
   lastStateDisplay = currentState;
 
   // display rpm
-  int current_rpm = (int)rpm;
-  static int last_drawn_rpm = -1;
-  static unsigned long lastRpmUpdateTime = 0;
-  if (now - lastRpmUpdateTime >= 250)
-  {
-    if (current_rpm != last_drawn_rpm)
-    {
-      tv.setCursor(95, 190);
-      tv.setTextColor(0xFF, 0x00);
-      tv.setTextSize(2);
-      char rpmStr[6];
-      snprintf(rpmStr, sizeof(rpmStr), "%5d", current_rpm);
-      tv.print(rpmStr);
-      tv.setTextSize(1);
-      last_drawn_rpm = current_rpm;
-    }
-    lastRpmUpdateTime = now;
-  }
+  // int current_rpm = (int)rpm;
+  // static int last_drawn_rpm = -1;
+  // static unsigned long lastRpmUpdateTime = 0;
+  // if (now - lastRpmUpdateTime >= 250)
+  // {
+  //   if (current_rpm != last_drawn_rpm)
+  //   {
+  //     tv.setCursor(95, 190);
+  //     tv.setTextColor(0xFF, 0x00);
+  //     tv.setTextSize(2);
+  //     char rpmStr[6];
+  //     snprintf(rpmStr, sizeof(rpmStr), "%5d", current_rpm);
+  //     tv.print(rpmStr);
+  //     tv.setTextSize(1);
+  //     last_drawn_rpm = current_rpm;
+  //   }
+  //   lastRpmUpdateTime = now;
+  // }
 
   temp_out = map((int)raw2, 250, 950, 40, 120);
   temp_out = constrain(temp_out, 40, 120);
@@ -1697,11 +1696,12 @@ void loop()
 
     // --- Fuel Consumption Calculations ---
     float elapsed_sec = (now - lastTime) / 1000.0f;
-    if (elapsed_sec <= 0.0f) elapsed_sec = 1.0f;
+    if (elapsed_sec <= 0.0f)
+      elapsed_sec = 1.0f;
 
     // Fuel consumed during the interval (in liters)
-    float fuel_consumed_liters = (accumulated_inj_time_us / 1000000.0f) * 
-                                 (INJECTOR_FLOW_RATE_CC_MIN / 60.0f / 1000.0f) * 
+    float fuel_consumed_liters = (accumulated_inj_time_us / 1000000.0f) *
+                                 (INJECTOR_FLOW_RATE_CC_MIN / 60.0f / 1000.0f) *
                                  (float)NUM_INJECTORS;
     accumulated_inj_time_us = 0; // Reset accumulator
 
@@ -1734,29 +1734,31 @@ void loop()
     }
 
     // Render fuel and distance metrics to screen
-    tv.setCursor(5, 85);
+    tv.setCursor(90, 210);
+    tv.setTextSize(2);
     tv.setTextColor(0xFF, 0x00);
     char bufInst[20];
     if (speed_val > 0.0f)
     {
-      snprintf(bufInst, sizeof(bufInst), "INS:%5.1f L/100", inst_val);
+      snprintf(bufInst, sizeof(bufInst), "%4.1f L/100Km", inst_val);
     }
     else
     {
-      snprintf(bufInst, sizeof(bufInst), "INS:%5.1f L/h  ", inst_val);
+      snprintf(bufInst, sizeof(bufInst), "%4.1f L/h  ", inst_val);
     }
     tv.print(bufInst);
+    tv.setTextSize(1);
 
-    tv.setCursor(5, 95);
+    tv.setCursor(FUEL_X + FUEL_WIDTH + 5, FUEL_Y);
     tv.setTextColor(0xFF, 0x00);
     char bufAvg[20];
-    snprintf(bufAvg, sizeof(bufAvg), "AVG:%5.1f L/100", avg_l_100km);
+    snprintf(bufAvg, sizeof(bufAvg), "AVG:%4.1f L/100km", avg_l_100km);
     tv.print(bufAvg);
 
-    tv.setCursor(5, 105);
+    tv.setCursor(FUEL_X + FUEL_WIDTH + 5, FUEL_Y + 20);
     tv.setTextColor(0xFF, 0x00);
     char bufTrip[20];
-    snprintf(bufTrip, sizeof(bufTrip), "TRP:%5.1f km   ", total_distance_km);
+    snprintf(bufTrip, sizeof(bufTrip), "TRIP:%5.1f km   ", total_distance_km);
     tv.print(bufTrip);
 
     lastTime = now;
