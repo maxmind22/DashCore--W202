@@ -128,8 +128,10 @@ void setup()
   attachInterrupt(digitalPinToInterrupt(spd_pin), spdISR, FALLING);
 
   pinModeFast(inj_sense_pin, INPUT_PULLUP);
-  PCICR |= (1 << PCIE2);      // Enable PCINT2 (Port D)
-  PCMSK2 |= (1 << PCINT23);   // Enable PCINT23 (pin 7 change interrupt)
+  PCICR |= (1 << PCIE2);      // Enable PCINT2 group (Port D)
+  PCMSK2 |= (1 << PCINT23);   // Mask to ONLY pin 7 (PCINT23) — any future Port D
+                               // pins used with PCINT MUST also be added here,
+                               // otherwise unintended ISR(PCINT2_vect) calls will occur.
 
   mcp2515.reset();
   mcp2515.setBitrate(CAN_500KBPS, MCP_8MHZ);
@@ -275,7 +277,9 @@ void loop()
     total_inj_time_us = 0;
     if (inj_active)
     {
-      inj_start_micros = currentMicros;
+      // Use a fresh micros() here — currentMicros was captured at loop() entry
+      // and may be stale by several ms, causing undercounting of the ongoing pulse.
+      inj_start_micros = micros();
     }
     interrupts();
 
