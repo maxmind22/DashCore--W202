@@ -1585,7 +1585,6 @@ void loop()
     tv.setCursor(72, 150);
     tv.setTextColor(0xFF, 0x00);
     tv.setTextSize(5);
-    spd = 100;
     char spdStr[4];
     snprintf(spdStr, sizeof(spdStr), "%3d", spd);
     tv.print(spdStr);
