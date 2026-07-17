@@ -104,6 +104,7 @@ int percent = 0;
 
 const float INJECTOR_FLOW_RATE_CC_MIN = 206.0f;
 const int NUM_INJECTORS = 4;
+const float FUEL_TANK_CAPACITY_LITERS = 62.0f;
 uint32_t accumulated_inj_time_us = 0;
 float total_fuel_liters = 0.0f;
 float total_distance_km = 0.0f;
@@ -1705,6 +1706,11 @@ void loop()
                                  (float)NUM_INJECTORS;
     accumulated_inj_time_us = 0; // Reset accumulator
 
+    if (injector_state == 1)
+    {
+      fuel_consumed_liters = 0.0f;
+    }
+
     total_fuel_liters += fuel_consumed_liters;
 
     // Update trip distance (speed is in km/h, convert to km/sec and multiply by elapsed seconds)
@@ -1734,32 +1740,51 @@ void loop()
     }
 
     // Render fuel and distance metrics to screen
-    tv.setCursor(90, 210);
     tv.setTextSize(2);
     tv.setTextColor(0xFF, 0x00);
     char bufInst[20];
     if (speed_val > 0.0f)
     {
-      snprintf(bufInst, sizeof(bufInst), "%4.1f L/100Km", inst_val);
+      snprintf(bufInst, sizeof(bufInst), "%5.1f L/100Km  ", inst_val);
     }
     else
     {
-      snprintf(bufInst, sizeof(bufInst), "%4.1f L/h  ", inst_val);
+      snprintf(bufInst, sizeof(bufInst), "%5.1f L/h       ", inst_val);
     }
+    tv.fillRect(90, 210, 165, 16, 0x00); // Clear previous instant readout
+    tv.setCursor(90, 210);
     tv.print(bufInst);
     tv.setTextSize(1);
 
+    char bufAvg[20];
+    snprintf(bufAvg, sizeof(bufAvg), "AVG:%5.1f L/100km  ", avg_l_100km);
+    tv.fillRect(FUEL_X + FUEL_WIDTH + 5, FUEL_Y, 120, 8, 0x00); // Clear previous AVG readout
     tv.setCursor(FUEL_X + FUEL_WIDTH + 5, FUEL_Y);
     tv.setTextColor(0xFF, 0x00);
-    char bufAvg[20];
-    snprintf(bufAvg, sizeof(bufAvg), "AVG:%4.1f L/100km", avg_l_100km);
     tv.print(bufAvg);
 
+    char bufTrip[20];
+    snprintf(bufTrip, sizeof(bufTrip), "TRIP:%6.1f km     ", total_distance_km);
+    tv.fillRect(FUEL_X + FUEL_WIDTH + 5, FUEL_Y + 20, 120, 8, 0x00); // Clear previous TRIP readout
     tv.setCursor(FUEL_X + FUEL_WIDTH + 5, FUEL_Y + 20);
     tv.setTextColor(0xFF, 0x00);
-    char bufTrip[20];
-    snprintf(bufTrip, sizeof(bufTrip), "TRIP:%5.1f km   ", total_distance_km);
     tv.print(bufTrip);
+
+    char bufRem[20];
+    if (avg_l_100km > 0.001f)
+    {
+      float rem_fuel_l = (percent / 100.0f) * FUEL_TANK_CAPACITY_LITERS;
+      float rem_km = (rem_fuel_l / avg_l_100km) * 100.0f;
+      snprintf(bufRem, sizeof(bufRem), "REM:%6.0f km     ", rem_km);
+    }
+    else
+    {
+      snprintf(bufRem, sizeof(bufRem), "REM: --- km       ");
+    }
+    tv.fillRect(FUEL_X + FUEL_WIDTH + 5, FUEL_Y + 40, 120, 8, 0x00); // Clear previous REM readout
+    tv.setCursor(FUEL_X + FUEL_WIDTH + 5, FUEL_Y + 40);
+    tv.setTextColor(0xFF, 0x00);
+    tv.print(bufRem);
 
     lastTime = now;
     last_v = v;
