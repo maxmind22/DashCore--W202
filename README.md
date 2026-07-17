@@ -19,6 +19,10 @@ Located in the engine bay, this controller handles raw engine sensor acquisition
 ### 2. Display & Regulator MCU (Cabin Controller - ESP32)
 Located in the vehicle cabin, this ESP32 runs a real-time OS (FreeRTOS) to manage the display, alternator regulation, and ignition keyless entry on separate cores:
 * **Composite Video Dash UI:** Renders a high-performance analog-style speedometer needle, digital speed readout, battery charge/discharge telemetry, fuel levels, and warning systems directly to PAL/NTSC composite video outputs using the `ESP_8_BIT` composite library (leveraging the ESP32’s hardware DACs).
+* **Advanced Fuel & Efficiency Telemetry:**
+  * **DFCO Fuel Cut-Off Integration:** Automatically sets instant and interval fuel consumption to `0.0f` when the Front MCU signals Deceleration Fuel Cut Off (`injector_state == 1`).
+  * **Remaining Distance Range (`REM`):** Continuously calculates remaining driving range (km) based on tank capacity (62L calibration for Mercedes W202) and real-time average consumption (`avg_l_100km`).
+  * **Multi-Sensor ECO Driving Indicator:** Monitors engine acceleration rate ($\Delta\text{RPM}/\Delta t$), vehicle speed acceleration ($\Delta\text{Speed}/\Delta t$), instant fuel burn ($\text{L/100km}$), and DFCO state to dynamically display a **Green `ECO`** (economical) or **Red `ECO`** (heavy load / rapid acceleration) indicator on the dash UI.
 * **Software-Defined Alternator Regulator (Core 0):** A high-priority FreeRTOS task running a closed-loop PID control loop. It samples alternator voltage and current through a high-precision ADS1115 ADC to dynamically drive the alternator field coil via 10-bit PWM. Implements seamless CV/CC regulation (targeting 13.6V max and a 20A current ceiling specifically to protect and optimize charging for a LiFePO4 start battery) with secondary physical relay emergency overrides for overcurrent/overvoltage protection.
 * **Smart Keyless Push-to-Start:** Manages the ignition and engine start sequence via a non-blocking state machine driving 3 physical relays (ACC, IGN, Starter).
 * **Cabin Alerts & Warnings:** Controls a physical chime buzzer and on-screen HUD flashes for:

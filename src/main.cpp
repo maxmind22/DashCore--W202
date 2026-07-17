@@ -1739,6 +1739,41 @@ void loop()
       avg_l_100km = 0.0f;
     }
 
+    // --- ECO Driving Evaluation ---
+    static unsigned long last_eco_check = 0;
+    static uint16_t last_eco_rpm = 0;
+    static float last_eco_spd = 0.0f;
+    static bool is_eco = true;
+
+    float dt_eco = (last_eco_check == 0) ? 0.5f : (now - last_eco_check) / 1000.0f;
+    if (dt_eco <= 0.0f)
+      dt_eco = 0.5f;
+
+    float rpm_rate = ((float)new_rpm - (float)last_eco_rpm) / dt_eco;
+    float spd_accel = ((float)spd - last_eco_spd) / dt_eco;
+
+    last_eco_rpm = new_rpm;
+    last_eco_spd = (float)spd;
+    last_eco_check = now;
+
+    if (injector_state == 1)
+    {
+      is_eco = true; // DFCO / fuel cut off is 100% ECO
+    }
+    else if (speed_val <= 0.0f)
+    {
+      is_eco = (inst_val <= 1.2f); // Idle threshold (L/h)
+    }
+    else
+    {
+      bool smooth_rpm_accel = (rpm_rate <= 500.0f);
+      bool smooth_spd_accel = (spd_accel <= 4.0f);
+      bool low_consumption = (inst_val <= 9.0f);
+      bool efficient_rpm_lvl = (new_rpm <= 2400);
+
+      is_eco = (smooth_rpm_accel && smooth_spd_accel && low_consumption && efficient_rpm_lvl);
+    }
+
     // Render fuel and distance metrics to screen
     tv.setTextSize(2);
     tv.setTextColor(0xFF, 0x00);
@@ -1765,7 +1800,7 @@ void loop()
 
     char bufTrip[20];
     snprintf(bufTrip, sizeof(bufTrip), "TRIP:%6.1f km     ", total_distance_km);
-    tv.fillRect(FUEL_X + FUEL_WIDTH + 5, FUEL_Y + 20, 120, 8, 0x00); // Clear previous TRIP readout
+    tv.fillRect(FUEL_X + FUEL_WIDTH + 5, FUEL_Y + 20, 80, 8, 0x00); // Clear previous TRIP readout
     tv.setCursor(FUEL_X + FUEL_WIDTH + 5, FUEL_Y + 20);
     tv.setTextColor(0xFF, 0x00);
     tv.print(bufTrip);
@@ -1781,10 +1816,25 @@ void loop()
     {
       snprintf(bufRem, sizeof(bufRem), "REM: --- km       ");
     }
-    tv.fillRect(FUEL_X + FUEL_WIDTH + 5, FUEL_Y + 40, 120, 8, 0x00); // Clear previous REM readout
+    tv.fillRect(FUEL_X + FUEL_WIDTH + 5, FUEL_Y + 40, 40, 8, 0x00); // Clear previous REM readout
     tv.setCursor(FUEL_X + FUEL_WIDTH + 5, FUEL_Y + 40);
     tv.setTextColor(0xFF, 0x00);
     tv.print(bufRem);
+
+    // Render Green / Red ECO Indicator below REM readout
+    tv.setTextSize(2);
+    tv.fillRect(FUEL_X + FUEL_WIDTH + 150, FUEL_Y + 60, 40, 8, 0x00); // Clear previous ECO readout
+    tv.setCursor(FUEL_X + FUEL_WIDTH + 150, FUEL_Y + 60);
+    if (is_eco)
+    {
+      tv.setTextColor(0x1C, 0x00); // Green ECO
+    }
+    else
+    {
+      tv.setTextColor(0xE0, 0x00); // Red ECO
+    }
+    tv.print("ECO");
+    tv.setTextSize(1);
 
     lastTime = now;
     last_v = v;
