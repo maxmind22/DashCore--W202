@@ -24,7 +24,10 @@ volatile uint32_t period = 0;
 volatile uint32_t period2 = 0;
 volatile uint32_t total_inj_time_us = 0;
 volatile uint32_t inj_start_micros = 0;
+volatile uint32_t last_inj_pulse_width = 0;
 volatile bool inj_active = false;
+volatile bool inj_disable_pending = false;
+volatile bool injDisable = false;
 
 // These are only used in loop(), so they do NOT need to be volatile
 uint32_t rpm = 0;
@@ -34,7 +37,6 @@ uint16_t spd_s = 0;
 
 float temp_avg = 0.0f;    // Float for EMA temp
 float acState_avg = 0.0f; // Float for EMA AC
-bool injDisable = false;
 
 // Timers
 unsigned long lastSpdCalculationTime = 0;
@@ -80,8 +82,17 @@ ISR(PCINT2_vect)
   {
     if (inj_active)
     {
-      total_inj_time_us += (now - inj_start_micros);
+      last_inj_pulse_width = now - inj_start_micros;
+      total_inj_time_us += last_inj_pulse_width;
       inj_active = false;
+
+      // Safely apply disable right as Cyl 1 finishes, before next cylinder fires
+      if (inj_disable_pending)
+      {
+        injDisable = true;
+        digitalWriteFast(inj_pin, HIGH);
+        inj_disable_pending = false;
+      }
     }
   }
 }
@@ -198,7 +209,10 @@ void loop()
       last_inj_check = currentMillis; // Start 1000ms timer
     if (currentMillis - last_inj_check >= 1000)
     {
-      injDisable = true;
+      if (!injDisable)
+      {
+        inj_disable_pending = true;
+      }
     }
   }
   else
@@ -206,12 +220,32 @@ void loop()
     last_inj_check = 0; // Reset timer if condition no longer met
   }
 
+  // Fallback: If inj_disable_pending is true but no pulse arrives for > 1 engine cycle, disable safely
+  if (inj_disable_pending && !inj_active)
+  {
+    noInterrupts();
+    uint32_t p = period;
+    uint32_t start = inj_start_micros;
+    interrupts();
+    if (p > 0 && (currentMicros - start > p))
+    {
+      injDisable = true;
+      inj_disable_pending = false;
+      digitalWriteFast(inj_pin, HIGH);
+    }
+  }
+
   // Deactivation is instant when throttle is released or RPM drops below hysteresis limit
   if (th_Pos == 0 || rpm < 1100)
   {
+    inj_disable_pending = false;
     injDisable = false;
+    digitalWriteFast(inj_pin, LOW);
   }
-  digitalWriteFast(inj_pin, injDisable ? HIGH : LOW);
+  else if (injDisable)
+  {
+    digitalWriteFast(inj_pin, HIGH);
+  }
 
   //==================== Calculate Vehicle Speed (Every 100ms) ====================//
   if (currentMillis - lastSpdCalculationTime >= 100)
