@@ -109,6 +109,7 @@ int percent = 0;
 const float INJECTOR_FLOW_RATE_CC_MIN = 206.0f;
 const int NUM_INJECTORS = 4;
 const float FUEL_TANK_CAPACITY_LITERS = 62.0f;
+const uint32_t MAX_INJ_PULSE_PER_INTERVAL_US = 60000; // 50ms window + 20% margin; rejects corrupt CAN / ISR glitches
 uint32_t accumulated_inj_time_us = 0;
 float total_fuel_liters = 0.0f;
 float total_distance_km = 0.0f;
@@ -1479,7 +1480,10 @@ void loop()
       uint32_t pulse =
           (uint32_t)canMsg.data[0] | ((uint32_t)canMsg.data[1] << 8) |
           ((uint32_t)canMsg.data[2] << 16) | ((uint32_t)canMsg.data[3] << 24);
-      accumulated_inj_time_us += pulse;
+      if (pulse <= MAX_INJ_PULSE_PER_INTERVAL_US)
+      {
+        accumulated_inj_time_us += pulse;
+      }
     }
   }
   // Stall detection: set RPM to 0 if it hasn't changed for 500ms
@@ -1891,7 +1895,7 @@ void loop()
     {
       snprintf(bufRem, sizeof(bufRem), "REM:---km ");
     }
-    tv.fillRect(FUEL_X + FUEL_WIDTH + 150, FUEL_Y + 40, 70, 8,
+    tv.fillRect(FUEL_X + FUEL_WIDTH + 150, FUEL_Y + 40, 60, 8,
                 0x00); // Clear previous REM readout
     tv.setCursor(FUEL_X + FUEL_WIDTH + 150, FUEL_Y + 40);
     tv.setTextColor(0xFF, 0x00);
