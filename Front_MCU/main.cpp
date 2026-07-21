@@ -139,10 +139,10 @@ void setup()
   attachInterrupt(digitalPinToInterrupt(spd_pin), spdISR, FALLING);
 
   pinModeFast(inj_sense_pin, INPUT_PULLUP);
-  PCICR |= (1 << PCIE2);      // Enable PCINT2 group (Port D)
-  PCMSK2 |= (1 << PCINT23);   // Mask to ONLY pin 7 (PCINT23) — any future Port D
-                               // pins used with PCINT MUST also be added here,
-                               // otherwise unintended ISR(PCINT2_vect) calls will occur.
+  PCICR |= (1 << PCIE2);    // Enable PCINT2 group (Port D)
+  PCMSK2 |= (1 << PCINT23); // Mask to ONLY pin 7 (PCINT23) — any future Port D
+                            // pins used with PCINT MUST also be added here,
+                            // otherwise unintended ISR(PCINT2_vect) calls will occur.
 
   mcp2515.reset();
   mcp2515.setBitrate(CAN_500KBPS, MCP_8MHZ);
@@ -338,10 +338,4 @@ void loop()
     digitalWriteFast(regulator_pin, HIGH);
   }
   wdt_reset();
-  // Serial.print("rpm:");
-  // Serial.print(rpm );
-  // Serial.print("   throttle:");
-  // Serial.print(th_Pos  );
-  // Serial.print("  inj: ");
-  // Serial.println(rpm);
 }
