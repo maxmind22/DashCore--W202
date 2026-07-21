@@ -44,6 +44,20 @@ enum SystemState
   STATE_RUNNING
 };
 
+enum EngineStopReason
+{
+  STOP_REASON_NONE = 0,
+  STOP_REASON_MANUAL_ACC,     // User pressed button (Brake held -> ACC)
+  STOP_REASON_MANUAL_STANDBY, // User pressed button (No brake -> STANDBY)
+  STOP_REASON_STALL_LOW_RPM,  // Engine stalled / RPM dropped to 0 while running
+  STOP_REASON_CRANK_TIMEOUT,  // Cranking timed out after 5 seconds
+  STOP_REASON_CAN_LOST        // Front MCU disconnected / CAN loss while running
+};
+
+EngineStopReason lastStopReason = STOP_REASON_NONE;
+unsigned long stopReasonTimestamp = 0;
+const unsigned long STOP_REASON_TIMEOUT_MS = 60000; // 1 minute (60,000 ms) display timeout
+
 RTC_DATA_ATTR SystemState currentState = STATE_SLEEP;
 unsigned long standbyStartTime = 0;
 unsigned long lastButtonPressTime = 0;
@@ -699,11 +713,48 @@ void warnings(int percent, int temp_out, int spd, int coolant_level,
     }
     buzzer_state = 1;
   }
-  else if (!lowBlinkState && chg2 == 1)
+  // -------- Engine Stop Reason Warning (Disappears after 1 minute) --------//
+  static EngineStopReason last_drawn_stop_reason = STOP_REASON_NONE;
+  static bool stop_reason_drawn = false;
+
+  if (lastStopReason != STOP_REASON_NONE &&
+      (now - stopReasonTimestamp < STOP_REASON_TIMEOUT_MS))
   {
-    tv.fillRect(WARNING_X + 50, WARNING_Y + 30, 66, 8, 0x00);
-    chg2 = 0;
+    if (!stop_reason_drawn || last_drawn_stop_reason != lastStopReason)
+    {
+      tv.setCursor(WARNING_X, WARNING_Y + 42);
+      tv.setTextColor(0xFF);
+      switch (lastStopReason)
+      {
+      case STOP_REASON_MANUAL_ACC:
+        tv.print("STOP: BUTTON (ACC)");
+        break;
+      case STOP_REASON_MANUAL_STANDBY:
+        tv.print("STOP: BUTTON (OFF)");
+        break;
+      case STOP_REASON_STALL_LOW_RPM:
+        tv.print("STOP: ENGINE STALLED (LOW RPM)");
+        break;
+      case STOP_REASON_CRANK_TIMEOUT:
+        tv.print("STOP: CRANK TIMEOUT (5s)");
+        break;
+      case STOP_REASON_CAN_LOST:
+        tv.print("STOP: FRONT MCU DISCONNECTED");
+        break;
+      default:
+        break;
+      }
+      stop_reason_drawn = true;
+      last_drawn_stop_reason = lastStopReason;
+    }
   }
+  else if (stop_reason_drawn)
+  {
+    tv.fillRect(WARNING_X, WARNING_Y + 42, 210, 8, 0x00);
+    stop_reason_drawn = false;
+    last_drawn_stop_reason = STOP_REASON_NONE;
+  }
+
   //---------- ring boot chime  ---------
   if (now >= 1000 && boot_chime <= 70)
   {
@@ -1156,6 +1207,7 @@ void processPushStart()
         setRelays(true, true, false); // Disengage starter, keep ACC/IGN on
         crankStage = CRANK_PRIME;     // Reset stages
         crankStageTime = 0;
+        lastStopReason = STOP_REASON_NONE; // Clear stop reason on successful start
       }
       else if (now - crankStageTime > MAX_CRANK_TIME_MS)
       {
@@ -1167,6 +1219,8 @@ void processPushStart()
         crankStage = CRANK_PRIME;
         crankStageTime = 0;
         stoppedToAcc = false; // Reset flag on crank timeout
+        lastStopReason = STOP_REASON_CRANK_TIMEOUT;
+        stopReasonTimestamp = now;
       }
     }
     break;
@@ -1176,11 +1230,20 @@ void processPushStart()
     setRelays(true, true, false);
 
     // Handle Engine Stall Safety
-    if (currentRpm == 0)
+    if (currentRpm == 0 && spd == 0)
     {
       currentState = STATE_ACC;
       standbyStartTime = now; // Start 2-minute sleep timeout
       stoppedToAcc = false;   // Reset flag on engine stall
+      if (now - lastPacketTime > 5000)
+      {
+        lastStopReason = STOP_REASON_CAN_LOST;
+      }
+      else
+      {
+        lastStopReason = STOP_REASON_STALL_LOW_RPM;
+      }
+      stopReasonTimestamp = now;
     }
 
     // Handle Engine Stop Button Press (Only if vehicle is stationary)
@@ -1195,12 +1258,16 @@ void processPushStart()
           setRelays(true, false, false); // Keep ACC ON, kill IGN and START
           currentState = STATE_ACC;      // Go to ACC position
           stoppedToAcc = true;           // Mark that we just stopped the engine to ACC
+          lastStopReason = STOP_REASON_MANUAL_ACC;
+          stopReasonTimestamp = now;
         }
         else
         {
           setRelays(false, false, false); // Kill ACC, IGN, and START
           currentState = STATE_STANDBY;   // Go to Standby (OFF)
           stoppedToAcc = false;           // Reset flag on stop to standby
+          lastStopReason = STOP_REASON_MANUAL_STANDBY;
+          stopReasonTimestamp = now;
         }
         standbyStartTime = now; // Start sleep timeout timer
       }
