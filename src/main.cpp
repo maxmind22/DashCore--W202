@@ -14,6 +14,7 @@
 #include <esp_task_wdt.h>
 #include <math.h>
 #include <mcp2515.h>
+#include <Preferences.h>
 #include <soc/i2s_struct.h>
 
 // Forward declarations
@@ -65,11 +66,11 @@ bool stoppedToAcc = false;
 volatile bool regulatorTaskRunning = true;
 
 const unsigned long STANDBY_TIMEOUT_MS =
-    60000;                                          // 1 Minute (Production sleep timeout)
-const unsigned long ACCESSORY_TIMEOUT_MS = 3600000; // 1 Hour (3600000 ms)
-const unsigned long BUTTON_COOLDOWN_MS = 500;       // 500 millisecond button lockout
+    60000;                                            // 1 Minute (Production sleep timeout)
+const unsigned long ACCESSORY_TIMEOUT_MS = 3600000;   // 1 Hour (3600000 ms)
+const unsigned long BUTTON_COOLDOWN_MS = 500;         // 500 millisecond button lockout
 const unsigned long BUTTON_LONGPRESS_RESET_MS = 3000; // 3 second long-press to reset trip data
-const unsigned long MAX_CRANK_TIME_MS = 5000;       // 5 Seconds limit
+const unsigned long MAX_CRANK_TIME_MS = 5000;         // 5 Seconds limit
 
 ESP_8_BIT_GFX tv(true, 8);
 
@@ -194,6 +195,7 @@ unsigned long lastPacketTime = 0;
 uint8_t oil_level_t = 0;
 int oil_level = 0;
 int last_clear = 0;
+unsigned long resetPrintTime = 0;
 //----------CAN bus variables------------------//
 struct can_frame canMsg;     // Used by loop() for RX only
 struct can_frame canMsgTx;   // Used by loop() for health heartbeat TX
@@ -813,28 +815,15 @@ void resetFuelTripData()
   avg_l_100km = 0.0f;
   inst_val = 0.0f;
 
-  tv.setTextSize(1);
-  tv.setTextColor(0xFF, 0x00);
-
-  // Clear & Redraw AVG
-  tv.fillRect(FUEL_X + FUEL_WIDTH + 5, FUEL_Y, 120, 8, 0x00);
-  tv.setCursor(FUEL_X + FUEL_WIDTH + 5, FUEL_Y);
-  tv.print("AVG:  0.0 L/100km");
-
-  // Clear & Redraw TRIP
-  tv.fillRect(FUEL_X + FUEL_WIDTH + 5, FUEL_Y + 20, 120, 8, 0x00);
-  tv.setCursor(FUEL_X + FUEL_WIDTH + 5, FUEL_Y + 20);
-  tv.print("TRIP:   0.0 km   ");
-
-  // Clear & Redraw USED
-  tv.fillRect(FUEL_X + FUEL_WIDTH + 5, FUEL_Y + 40, 120, 8, 0x00);
-  tv.setCursor(FUEL_X + FUEL_WIDTH + 5, FUEL_Y + 40);
-  tv.print("USED:  0.0 L     ");
-
-  // Clear & Redraw REM
-  tv.fillRect(FUEL_X + FUEL_WIDTH + 150, FUEL_Y + 40, 60, 8, 0x00);
-  tv.setCursor(FUEL_X + FUEL_WIDTH + 150, FUEL_Y + 40);
-  tv.print("REM:---km ");
+  Preferences prefs;
+  prefs.begin("trip_data", false);
+  prefs.putFloat("fuel", 0.0f);
+  prefs.putFloat("dist", 0.0f);
+  prefs.end();
+  tv.setCursor(WARNING_X + 40, WARNING_Y + 50);
+  tv.setTextColor(0xFF);
+  tv.print("RESET DONE!");
+  resetPrintTime = millis();
 }
 
 void startTVDisplay()
@@ -867,6 +856,13 @@ void wakeupCANController()
 
 void enterPowerDownSleep()
 {
+  // Save trip stats to NVS Flash memory right before shutdown
+  Preferences prefs;
+  prefs.begin("trip_data", false);
+  prefs.putFloat("fuel", total_fuel_liters);
+  prefs.putFloat("dist", total_distance_km);
+  prefs.end();
+
   // --- ORDERED SHUTDOWN: Stop everything safely before deep sleep ---
 
   // 1. Safely stop the regulator FreeRTOS task first (running on Core 0, does
@@ -1015,8 +1011,9 @@ void processPushStart()
       buttonLongPressHandled = true;
       if (currentState != STATE_RUNNING && currentState != STATE_CRANKING && spd == 0)
       {
-        resetFuelTripData();
+
         lastButtonPressTime = now; // avoid immediate short-press transition
+        resetFuelTripData();
       }
     }
   }
@@ -1406,8 +1403,17 @@ void setup()
 
   if (rtc_trip_magic != RTC_TRIP_MAGIC_KEY || isnan(total_fuel_liters) || isnan(total_distance_km))
   {
-    total_fuel_liters = 0.0f;
-    total_distance_km = 0.0f;
+    Preferences prefs;
+    prefs.begin("trip_data", true); // Open in read-only mode
+    total_fuel_liters = prefs.getFloat("fuel", 0.0f);
+    total_distance_km = prefs.getFloat("dist", 0.0f);
+    prefs.end();
+
+    if (isnan(total_fuel_liters))
+      total_fuel_liters = 0.0f;
+    if (isnan(total_distance_km))
+      total_distance_km = 0.0f;
+
     rtc_trip_magic = RTC_TRIP_MAGIC_KEY;
   }
 
@@ -1514,6 +1520,14 @@ void loop()
     drawStaticGauge();
     last_clear++;
   }
+
+  // Clear reset message after 5 seconds
+  if (resetPrintTime && now - resetPrintTime >= 5000)
+  {
+    tv.fillRect(WARNING_X + 40, WARNING_Y + 50, 66, 8, 0x00);
+    resetPrintTime = 0;
+  }
+
   tv.waitForFrame();
 
   if (now - lastBlinkTime >= blinkInterval)
@@ -1815,24 +1829,25 @@ void loop()
   lastStateDisplay = currentState;
 
   // display rpm
-  // int current_rpm = (int)rpm;
-  // static int last_drawn_rpm = -1;
-  // static unsigned long lastRpmUpdateTime = 0;
-  // if (now - lastRpmUpdateTime >= 250)
-  // {
-  //   if (current_rpm != last_drawn_rpm)
-  //   {
-  //     tv.setCursor(95, 190);
-  //     tv.setTextColor(0xFF, 0x00);
-  //     tv.setTextSize(2);
-  //     char rpmStr[6];
-  //     snprintf(rpmStr, sizeof(rpmStr), "%5d", current_rpm);
-  //     tv.print(rpmStr);
-  //     tv.setTextSize(1);
-  //     last_drawn_rpm = current_rpm;
-  //   }
-  //   lastRpmUpdateTime = now;
-  // }
+  int current_rpm = (int)rpm;
+  static int last_drawn_rpm = -1;
+  static unsigned long lastRpmUpdateTime = 0;
+  if (now - lastRpmUpdateTime >= 250)
+  {
+    if (current_rpm != last_drawn_rpm)
+    {
+      // tv.setCursor(95, 190);
+      tv.setCursor(FUEL_X + FUEL_WIDTH + 150, FUEL_Y + 60);
+      tv.setTextColor(0xFF, 0x00);
+      tv.setTextSize(2);
+      char rpmStr[6];
+      snprintf(rpmStr, sizeof(rpmStr), "%5d", current_rpm);
+      tv.print(rpmStr);
+      tv.setTextSize(1);
+      last_drawn_rpm = current_rpm;
+    }
+    lastRpmUpdateTime = now;
+  }
 
   temp_out = map((int)raw2, 250, 950, 40, 120);
   temp_out = constrain(temp_out, 40, 120);
@@ -1942,41 +1957,41 @@ void loop()
     }
 
     // --- ECO Driving Evaluation ---
-    static unsigned long last_eco_check = 0;
-    static uint16_t last_eco_rpm = 0;
-    static float last_eco_spd = 0.0f;
-    static bool is_eco = true;
+    // static unsigned long last_eco_check = 0;
+    // static uint16_t last_eco_rpm = 0;
+    // static float last_eco_spd = 0.0f;
+    // static bool is_eco = true;
 
-    float dt_eco =
-        (last_eco_check == 0) ? 0.5f : (now - last_eco_check) / 1000.0f;
-    if (dt_eco <= 0.0f)
-      dt_eco = 0.5f;
+    // float dt_eco =
+    //     (last_eco_check == 0) ? 0.5f : (now - last_eco_check) / 1000.0f;
+    // if (dt_eco <= 0.0f)
+    //   dt_eco = 0.5f;
 
-    float rpm_rate = ((float)new_rpm - (float)last_eco_rpm) / dt_eco;
-    float spd_accel = ((float)spd - last_eco_spd) / dt_eco;
+    // float rpm_rate = ((float)new_rpm - (float)last_eco_rpm) / dt_eco;
+    // float spd_accel = ((float)spd - last_eco_spd) / dt_eco;
 
-    last_eco_rpm = new_rpm;
-    last_eco_spd = (float)spd;
-    last_eco_check = now;
+    // last_eco_rpm = new_rpm;
+    // last_eco_spd = (float)spd;
+    // last_eco_check = now;
 
-    if (injector_state == 1)
-    {
-      is_eco = true; // DFCO / fuel cut off is 100% ECO
-    }
-    else if (speed_val <= 0.0f)
-    {
-      is_eco = (inst_val <= 1.2f); // Idle threshold (L/h)
-    }
-    else
-    {
-      bool smooth_rpm_accel = (rpm_rate <= 500.0f);
-      bool smooth_spd_accel = (spd_accel <= 4.0f);
-      bool low_consumption = (inst_val <= 9.0f);
-      bool efficient_rpm_lvl = (new_rpm <= 2400);
+    // if (injector_state == 1)
+    // {
+    //   is_eco = true; // DFCO / fuel cut off is 100% ECO
+    // }
+    // else if (speed_val <= 0.0f)
+    // {
+    //   is_eco = (inst_val <= 1.2f); // Idle threshold (L/h)
+    // }
+    // else
+    // {
+    //   bool smooth_rpm_accel = (rpm_rate <= 500.0f);
+    //   bool smooth_spd_accel = (spd_accel <= 4.0f);
+    //   bool low_consumption = (inst_val <= 9.0f);
+    //   bool efficient_rpm_lvl = (new_rpm <= 2400);
 
-      is_eco = (smooth_rpm_accel && smooth_spd_accel && low_consumption &&
-                efficient_rpm_lvl);
-    }
+    //   is_eco = (smooth_rpm_accel && smooth_spd_accel && low_consumption &&
+    //             efficient_rpm_lvl);
+    // }
 
     // Render fuel and distance metrics to screen
     tv.setTextSize(2);
@@ -2037,20 +2052,20 @@ void loop()
     tv.print(bufRem);
 
     // Render Green / Red ECO Indicator (below REM)
-    tv.setTextSize(2);
-    tv.fillRect(FUEL_X + FUEL_WIDTH + 150, FUEL_Y + 60, 45, 16,
-                0x00); // Clear previous ECO readout
-    tv.setCursor(FUEL_X + FUEL_WIDTH + 150, FUEL_Y + 60);
-    if (is_eco)
-    {
-      tv.setTextColor(0x1C, 0x00); // Green ECO
-    }
-    else
-    {
-      tv.setTextColor(0xE0, 0x00); // Red ECO
-    }
-    tv.print("ECO");
-    tv.setTextSize(1);
+    // tv.setTextSize(2);
+    // tv.fillRect(FUEL_X + FUEL_WIDTH + 150, FUEL_Y + 60, 45, 16,
+    //             0x00); // Clear previous ECO readout
+    // tv.setCursor(FUEL_X + FUEL_WIDTH + 150, FUEL_Y + 60);
+    // if (is_eco)
+    // {
+    //   tv.setTextColor(0x1C, 0x00); // Green ECO
+    // }
+    // else
+    // {
+    //   tv.setTextColor(0xE0, 0x00); // Red ECO
+    // }
+    // tv.print("ECO");
+    // tv.setTextSize(1);
 
     lastTime = now;
     last_v = v;
