@@ -68,6 +68,7 @@ const unsigned long STANDBY_TIMEOUT_MS =
     60000;                                          // 1 Minute (Production sleep timeout)
 const unsigned long ACCESSORY_TIMEOUT_MS = 3600000; // 1 Hour (3600000 ms)
 const unsigned long BUTTON_COOLDOWN_MS = 500;       // 500 millisecond button lockout
+const unsigned long BUTTON_LONGPRESS_RESET_MS = 3000; // 3 second long-press to reset trip data
 const unsigned long MAX_CRANK_TIME_MS = 5000;       // 5 Seconds limit
 
 ESP_8_BIT_GFX tv(true, 8);
@@ -124,9 +125,11 @@ const float INJECTOR_FLOW_RATE_CC_MIN = 206.0f;
 const int NUM_INJECTORS = 4;
 const float FUEL_TANK_CAPACITY_LITERS = 62.0f;
 const uint32_t MAX_INJ_PULSE_PER_INTERVAL_US = 60000; // 50ms window + 20% margin; rejects corrupt CAN / ISR glitches
+#define RTC_TRIP_MAGIC_KEY 0xCAFE4567
+RTC_DATA_ATTR uint32_t rtc_trip_magic = 0;
 uint32_t accumulated_inj_time_us = 0;
-float total_fuel_liters = 0.0f;
-float total_distance_km = 0.0f;
+RTC_DATA_ATTR float total_fuel_liters = 0.0f;
+RTC_DATA_ATTR float total_distance_km = 0.0f;
 float inst_val = 0.0f;
 float avg_l_100km = 0.0f;
 
@@ -803,6 +806,37 @@ void setRelays(bool acc, bool ign, bool start)
   digitalWrite(PIN_RELAY_START, start ? HIGH : LOW);
 }
 
+void resetFuelTripData()
+{
+  total_fuel_liters = 0.0f;
+  total_distance_km = 0.0f;
+  avg_l_100km = 0.0f;
+  inst_val = 0.0f;
+
+  tv.setTextSize(1);
+  tv.setTextColor(0xFF, 0x00);
+
+  // Clear & Redraw AVG
+  tv.fillRect(FUEL_X + FUEL_WIDTH + 5, FUEL_Y, 120, 8, 0x00);
+  tv.setCursor(FUEL_X + FUEL_WIDTH + 5, FUEL_Y);
+  tv.print("AVG:  0.0 L/100km");
+
+  // Clear & Redraw TRIP
+  tv.fillRect(FUEL_X + FUEL_WIDTH + 5, FUEL_Y + 20, 120, 8, 0x00);
+  tv.setCursor(FUEL_X + FUEL_WIDTH + 5, FUEL_Y + 20);
+  tv.print("TRIP:   0.0 km   ");
+
+  // Clear & Redraw USED
+  tv.fillRect(FUEL_X + FUEL_WIDTH + 5, FUEL_Y + 40, 120, 8, 0x00);
+  tv.setCursor(FUEL_X + FUEL_WIDTH + 5, FUEL_Y + 40);
+  tv.print("USED:  0.0 L     ");
+
+  // Clear & Redraw REM
+  tv.fillRect(FUEL_X + FUEL_WIDTH + 150, FUEL_Y + 40, 60, 8, 0x00);
+  tv.setCursor(FUEL_X + FUEL_WIDTH + 150, FUEL_Y + 40);
+  tv.print("REM:---km ");
+}
+
 void startTVDisplay()
 {
   dac_output_enable(DAC_CHANNEL_1);
@@ -965,6 +999,32 @@ void processPushStart()
 
   bool brakeHeld = (digitalRead(PIN_INPUT_BRAKE) == LOW);
   int currentRpm = rpm;
+
+  static unsigned long buttonDownTime = 0;
+  static bool buttonLongPressHandled = false;
+
+  if (currentBtnState == LOW)
+  {
+    if (buttonDownTime == 0)
+    {
+      buttonDownTime = now;
+      buttonLongPressHandled = false;
+    }
+    else if (!buttonLongPressHandled && now - buttonDownTime >= BUTTON_LONGPRESS_RESET_MS)
+    {
+      buttonLongPressHandled = true;
+      if (currentState != STATE_RUNNING && currentState != STATE_CRANKING && spd == 0)
+      {
+        resetFuelTripData();
+        lastButtonPressTime = now; // avoid immediate short-press transition
+      }
+    }
+  }
+  else
+  {
+    buttonDownTime = 0;
+    buttonLongPressHandled = false;
+  }
 
   if (btnPressed)
   {
@@ -1343,6 +1403,14 @@ void setup()
   btStop();
   tv.begin();
   tv.copyAfterSwap = true;
+
+  if (rtc_trip_magic != RTC_TRIP_MAGIC_KEY || isnan(total_fuel_liters) || isnan(total_distance_km))
+  {
+    total_fuel_liters = 0.0f;
+    total_distance_km = 0.0f;
+    rtc_trip_magic = RTC_TRIP_MAGIC_KEY;
+  }
+
   //========  track reset reason: debug purpose   ======//
   esp_reset_reason_t reason = esp_reset_reason();
   if (reason != ESP_RST_POWERON && reason != ESP_RST_UNKNOWN &&

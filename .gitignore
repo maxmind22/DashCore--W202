@@ -10,3 +10,9 @@
 *.hex
 # IDE settings
 .vscode/
+
+# Ignore unwanted folders
+mercedes-dashboard/
+include/
+lib/
+test/
