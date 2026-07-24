@@ -221,19 +221,19 @@ void loop()
   }
 
   // Fallback: If inj_disable_pending is true but no pulse arrives for > 1 engine cycle, disable safely
-  if (inj_disable_pending && !inj_active)
-  {
-    noInterrupts();
-    uint32_t p = period;
-    uint32_t start = inj_start_micros;
-    interrupts();
-    if (p > 0 && (currentMicros - start > p))
-    {
-      injDisable = true;
-      inj_disable_pending = false;
-      digitalWriteFast(inj_pin, HIGH);
-    }
-  }
+  // if (inj_disable_pending && !inj_active)
+  // {
+  //   noInterrupts();
+  //   uint32_t p = period;
+  //   uint32_t start = inj_start_micros;
+  //   interrupts();
+  //   if (p > 0 && (currentMicros - start > p))
+  //   {
+  //     injDisable = true;
+  //     inj_disable_pending = false;
+  //     digitalWriteFast(inj_pin, HIGH);
+  //   }
+  // }
 
   // Deactivation is instant when throttle is released or RPM drops below hysteresis limit
   if (th_Pos == 0 || rpm < 1100)
@@ -309,12 +309,12 @@ void loop()
     noInterrupts();
     uint32_t local_inj_time = total_inj_time_us;
     total_inj_time_us = 0;
-    if (inj_active)
-    {
-      // Use a fresh micros() here — currentMicros was captured at loop() entry
-      // and may be stale by several ms, causing undercounting of the ongoing pulse.
-      inj_start_micros = micros();
-    }
+    // if (inj_active)
+    // {
+    //   // Use a fresh micros() here — currentMicros was captured at loop() entry
+    //   // and may be stale by several ms, causing undercounting of the ongoing pulse.
+    //   inj_start_micros = micros();
+    // }
     interrupts();
 
     canMsgTx.can_id = 0x04;
