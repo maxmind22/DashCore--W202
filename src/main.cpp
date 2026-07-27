@@ -1645,7 +1645,7 @@ void loop()
   }
   else if (now - last_rpm_change_time >= 500)
   {
-    new_rpm = 0;
+    // new_rpm = 0;
     spd_t = 0; // Also set speed to 0 if RPM is stalled
   }
 
@@ -1833,7 +1833,7 @@ void loop()
   int current_rpm = (int)rpm;
   static int last_drawn_rpm = -1;
   static unsigned long lastRpmUpdateTime = 0;
-  if (now - lastRpmUpdateTime >= 250)
+  if (now - lastRpmUpdateTime >= 500)
   {
     if (current_rpm != last_drawn_rpm)
     {
