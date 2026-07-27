@@ -1652,9 +1652,9 @@ void loop()
   rpm = new_rpm;
   portEXIT_CRITICAL(&dataMux);
 
-  spd_l = map((int)spd_t, 10, 880, 0, 220);
-  spd_l = constrain(spd_l, 0, 220);
-  int spd_in = (spd_l == 220) ? 0 : spd_l;
+  // Front MCU sends km/h directly (pulse-counted from instrument cluster VSS)
+  spd_l = constrain((int)spd_t, 0, 220);
+  int spd_in = spd_l;
 
   // --------------- filter SPD ----------------
   if (lastTime == 0)
