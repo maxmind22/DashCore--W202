@@ -133,7 +133,7 @@ void setup()
   attachInterrupt(digitalPinToInterrupt(rpm_pin), rpmISR, FALLING);
   attachInterrupt(digitalPinToInterrupt(spd_pin), spdISR, FALLING);
 
-  pinModeFast(inj_sense_pin, INPUT_PULLUP);
+  pinModeFast(inj_sense_pin, INPUT);
   PCICR |= (1 << PCIE2);    // Enable PCINT2 group (Port D)
   PCMSK2 |= (1 << PCINT23); // Mask to ONLY pin 7 (PCINT23) — any future Port D
                             // pins used with PCINT MUST also be added here,
