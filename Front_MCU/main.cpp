@@ -10,6 +10,11 @@
 #define inj_pin 8
 #define regulator_pin 9
 
+// W202 C200 instrument cluster speed pulse (195/65R15, 48 ABS teeth, falling edge)
+#define PULSES_PER_KM        24080UL
+#define SPD_WINDOW_MS        100UL
+#define SPD_STALE_TIMEOUT_US 500000UL
+
 const int tempPin = A0;
 const int fan = 5;
 const int ac = A1;
@@ -19,9 +24,9 @@ unsigned long last_check = 0;
 
 // Variables shared with ISR MUST be volatile
 volatile uint32_t lastTime = 0;
-volatile uint32_t lastTime2 = 0;
 volatile uint32_t period = 0;
-volatile uint32_t period2 = 0;
+volatile uint16_t spd_pulse_count = 0;
+volatile uint32_t spd_last_pulse_us = 0;
 volatile uint32_t total_inj_time_us = 0;
 volatile uint32_t inj_start_micros = 0;
 volatile uint32_t last_inj_pulse_width = 0;
@@ -57,13 +62,8 @@ void rpmISR()
 
 void spdISR()
 {
-  uint32_t now2 = micros();
-  uint32_t p = now2 - lastTime2;
-  if (p > 1000)
-  { // Software debounce: 1ms (max 1000Hz)
-    period2 = p;
-    lastTime2 = now2;
-  }
+  spd_pulse_count++;
+  spd_last_pulse_us = micros();
 }
 
 ISR(PCINT2_vect)
@@ -248,23 +248,28 @@ void loop()
   }
 
   //==================== Calculate Vehicle Speed (Every 100ms) ====================//
-  if (currentMillis - lastSpdCalculationTime >= 100)
+  if (currentMillis - lastSpdCalculationTime >= SPD_WINDOW_MS)
   {
     noInterrupts();
-    uint32_t p2 = period2;
-    uint32_t lt2 = lastTime2;
+    uint16_t count = spd_pulse_count;
+    spd_pulse_count = 0;
+    uint32_t last_pulse = spd_last_pulse_us;
     interrupts();
 
-    // Check if 1,000,000us (1s) has passed without a pulse -> Car stopped
-    if (currentMicros - lt2 > 1000000UL)
+    if (currentMicros - last_pulse > SPD_STALE_TIMEOUT_US)
     {
       spd = 0;
     }
-    else if (p2 > 0)
+    else if (count > 0)
     {
-      spd = 600000UL / p2;
+      // km/h = pulses * 3600000 / (PULSES_PER_KM * window_ms)
+      spd = (uint32_t)count * 3600000UL / (PULSES_PER_KM * SPD_WINDOW_MS);
     }
-    spd_s = (spd > 0) ? (uint16_t)spd : 0;
+    else
+    {
+      spd = 0;
+    }
+    spd_s = (spd > 220) ? 220 : (uint16_t)spd;
 
     lastSpdCalculationTime = currentMillis;
   }
@@ -309,12 +314,6 @@ void loop()
     noInterrupts();
     uint32_t local_inj_time = total_inj_time_us;
     total_inj_time_us = 0;
-    // if (inj_active)
-    // {
-    //   // Use a fresh micros() here — currentMicros was captured at loop() entry
-    //   // and may be stale by several ms, causing undercounting of the ongoing pulse.
-    //   inj_start_micros = micros();
-    // }
     interrupts();
 
     canMsgTx.can_id = 0x04;
