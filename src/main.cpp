@@ -1646,6 +1646,7 @@ void loop()
   else if (now - last_rpm_change_time >= 500)
   {
     new_rpm = 0;
+    spd_t = 0; // Also set speed to 0 if RPM is stalled
   }
 
   portENTER_CRITICAL(&dataMux);

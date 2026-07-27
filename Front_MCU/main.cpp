@@ -10,9 +10,9 @@
 #define inj_pin 8
 #define regulator_pin 9
 
-// W202 C200 instrument cluster speed pulse (195/65R15, 48 ABS teeth, falling edge)
-#define PULSES_PER_KM        24080UL
-#define SPD_WINDOW_MS        100UL
+// W202 C200 instrument cluster speed pulse (205/55R16, 48 ABS teeth, falling edge)
+#define PULSES_PER_KM 24179 // 24080UL
+#define SPD_WINDOW_MS 100UL
 #define SPD_STALE_TIMEOUT_US 500000UL
 
 const int tempPin = A0;
@@ -30,6 +30,8 @@ volatile uint32_t spd_last_pulse_us = 0;
 volatile uint32_t total_inj_time_us = 0;
 volatile uint32_t inj_start_micros = 0;
 volatile uint32_t last_inj_pulse_width = 0;
+volatile uint32_t inj_now = 0;
+volatile uint32_t inj_end_time = 0;
 volatile bool inj_active = false;
 volatile bool inj_disable_pending = false;
 volatile bool injDisable = false;
@@ -68,13 +70,13 @@ void spdISR()
 
 ISR(PCINT2_vect)
 {
-  uint32_t now = micros();
+  inj_now = micros();
   bool pin_state = digitalReadFast(inj_sense_pin);
   if (pin_state == LOW)
   {
     if (!inj_active)
     {
-      inj_start_micros = now;
+      inj_start_micros = inj_now;
       inj_active = true;
     }
   }
@@ -82,17 +84,10 @@ ISR(PCINT2_vect)
   {
     if (inj_active)
     {
-      last_inj_pulse_width = now - inj_start_micros;
+      last_inj_pulse_width = inj_now - inj_start_micros;
       total_inj_time_us += last_inj_pulse_width;
       inj_active = false;
-
-      // Safely apply disable right as Cyl 1 finishes, before next cylinder fires
-      if (inj_disable_pending)
-      {
-        injDisable = true;
-        digitalWriteFast(inj_pin, HIGH);
-        inj_disable_pending = false;
-      }
+      inj_end_time = inj_now;
     }
   }
 }
@@ -207,11 +202,18 @@ void loop()
   {
     if (last_inj_check == 0)
       last_inj_check = currentMillis; // Start 1000ms timer
-    if (currentMillis - last_inj_check >= 1000)
+    if (currentMillis - last_inj_check >= 1000 && injDisable == false)
     {
-      if (!injDisable)
+      bool inj_state = false;
+      uint32_t inj_end_time_t = 0;
+      noInterrupts();
+      inj_end_time_t = inj_end_time; // Capture the value of inj_end_time atomically
+      inj_state = inj_active;
+      interrupts();
+      if (!inj_state && currentMicros - inj_end_time_t < 4000)
       {
-        inj_disable_pending = true;
+        digitalWriteFast(inj_pin, HIGH);
+        injDisable = true;
       }
     }
   }
@@ -220,25 +222,9 @@ void loop()
     last_inj_check = 0; // Reset timer if condition no longer met
   }
 
-  // Fallback: If inj_disable_pending is true but no pulse arrives for > 1 engine cycle, disable safely
-  // if (inj_disable_pending && !inj_active)
-  // {
-  //   noInterrupts();
-  //   uint32_t p = period;
-  //   uint32_t start = inj_start_micros;
-  //   interrupts();
-  //   if (p > 0 && (currentMicros - start > p))
-  //   {
-  //     injDisable = true;
-  //     inj_disable_pending = false;
-  //     digitalWriteFast(inj_pin, HIGH);
-  //   }
-  // }
-
   // Deactivation is instant when throttle is released or RPM drops below hysteresis limit
-  if (th_Pos == 0 || rpm < 1100)
+  if ((th_Pos == 0 || rpm < 1100) && injDisable == true)
   {
-    inj_disable_pending = false;
     injDisable = false;
     digitalWriteFast(inj_pin, LOW);
   }
@@ -336,5 +322,8 @@ void loop()
   {
     digitalWriteFast(regulator_pin, HIGH);
   }
+  // uint32_t runtime = micros() - currentMicros;
+  // Serial.print("Loop runtime: ");
+  // Serial.println(runtime);
   wdt_reset();
 }
