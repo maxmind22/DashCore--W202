@@ -72,9 +72,9 @@ ISR(PCINT2_vect)
 {
   inj_now = micros();
   // bool pin_state = digitalReadFast(inj_sense_pin);
-  bool pin_state = (PIND & _BV(PD7)) != 0;
+  // bool pin_state = (PIND & _BV(PD7)) != 0;
   // if (pin_state == LOW)
-  if (!pin_state)
+  if (!(PIND & _BV(PD7)))
   {
     if (!inj_active)
     {
