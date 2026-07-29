@@ -28,10 +28,10 @@ volatile uint32_t period = 0;
 volatile uint16_t spd_pulse_count = 0;
 volatile uint32_t spd_last_pulse_us = 0;
 volatile uint32_t total_inj_time_us = 0;
-volatile uint32_t inj_start_micros = 0;
+volatile uint16_t inj_start_ticks = 0;
 volatile uint32_t last_inj_pulse_width = 0;
 // volatile uint32_t inj_now = 0;
-volatile uint32_t inj_end_time = 0;
+volatile uint16_t inj_end_ticks = 0;
 volatile bool inj_active = false;
 volatile bool inj_disable_pending = false;
 volatile bool injDisable = false;
@@ -70,12 +70,12 @@ void spdISR()
 
 ISR(PCINT2_vect)
 {
-  uint32_t inj_now = micros();
+  uint16_t inj_now_ticks = TCNT1;
   if (!(PIND & _BV(PD7)))
   {
     if (!inj_active)
     {
-      inj_start_micros = inj_now;
+      inj_start_ticks = inj_now_ticks;
       inj_active = true;
     }
   }
@@ -83,10 +83,11 @@ ISR(PCINT2_vect)
   {
     if (inj_active)
     {
-      last_inj_pulse_width = inj_now - inj_start_micros;
+      uint16_t pulse_ticks = inj_now_ticks - inj_start_ticks;
+      last_inj_pulse_width = pulse_ticks >> 1; // Convert 0.5us ticks (Prescaler 8) to us
       total_inj_time_us += last_inj_pulse_width;
       inj_active = false;
-      inj_end_time = inj_now;
+      inj_end_ticks = inj_now_ticks; 
     }
   }
 }
@@ -138,6 +139,10 @@ void setup()
   // PCMSK2 |= (1 << PCINT23); // Mask to ONLY pin 7 (PCINT23) — any future Port D
   // pins used with PCINT MUST also be added here,
   // otherwise unintended ISR(PCINT2_vect) calls will occur.
+
+  // Initialize Timer1 for high-precision fuel injection pulse timing (0.5us per tick @ 16MHz)
+  TCCR1A = 0;
+  TCCR1B = _BV(CS11); // Normal mode, Prescaler 8
 
   mcp2515.reset();
   mcp2515.setBitrate(CAN_500KBPS, MCP_8MHZ);
@@ -205,12 +210,13 @@ void loop()
     if (currentMillis - last_inj_check >= 1000 && injDisable == false)
     {
       bool inj_state = false;
-      uint32_t inj_end_time_t = 0;
+      uint16_t inj_end_ticks_t = 0;
       noInterrupts();
-      inj_end_time_t = inj_end_time; // Capture the value of inj_end_time atomically
+      inj_end_ticks_t = inj_end_ticks; // Capture the value of inj_end_ticks atomically
       inj_state = inj_active;
       interrupts();
-      if (!inj_state && currentMicros - inj_end_time_t < 4000)
+      uint16_t elapsed_ticks = (uint16_t)(TCNT1 - inj_end_ticks_t);
+      if (!inj_state && elapsed_ticks < 8000) // 8000 ticks @ 0.5us/tick = 4000us
       {
         digitalWriteFast(inj_pin, HIGH);
         injDisable = true;
