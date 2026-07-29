@@ -30,7 +30,7 @@ volatile uint32_t spd_last_pulse_us = 0;
 volatile uint32_t total_inj_time_us = 0;
 volatile uint32_t inj_start_micros = 0;
 volatile uint32_t last_inj_pulse_width = 0;
-volatile uint32_t inj_now = 0;
+// volatile uint32_t inj_now = 0;
 volatile uint32_t inj_end_time = 0;
 volatile bool inj_active = false;
 volatile bool inj_disable_pending = false;
@@ -70,10 +70,7 @@ void spdISR()
 
 ISR(PCINT2_vect)
 {
-  inj_now = micros();
-  // bool pin_state = digitalReadFast(inj_sense_pin);
-  // bool pin_state = (PIND & _BV(PD7)) != 0;
-  // if (pin_state == LOW)
+  uint32_t inj_now = micros();
   if (!(PIND & _BV(PD7)))
   {
     if (!inj_active)
@@ -129,17 +126,18 @@ void setup()
   digitalWrite(regulator_pin, HIGH);
   Serial.begin(115200);
   wdt_disable();
-  wdt_enable(WDTO_2S);
+  wdt_enable(WDTO_120MS);
 
   // Attach interrupts
   attachInterrupt(digitalPinToInterrupt(rpm_pin), rpmISR, FALLING);
   attachInterrupt(digitalPinToInterrupt(spd_pin), spdISR, FALLING);
 
   pinModeFast(inj_sense_pin, INPUT);
-  PCICR |= (1 << PCIE2);    // Enable PCINT2 group (Port D)
-  PCMSK2 |= (1 << PCINT23); // Mask to ONLY pin 7 (PCINT23) — any future Port D
-                            // pins used with PCINT MUST also be added here,
-                            // otherwise unintended ISR(PCINT2_vect) calls will occur.
+  PCICR |= (1 << PCIE2); // Enable PCINT2 group (Port D)
+  PCMSK2 = _BV(PCINT23);
+  // PCMSK2 |= (1 << PCINT23); // Mask to ONLY pin 7 (PCINT23) — any future Port D
+  // pins used with PCINT MUST also be added here,
+  // otherwise unintended ISR(PCINT2_vect) calls will occur.
 
   mcp2515.reset();
   mcp2515.setBitrate(CAN_500KBPS, MCP_8MHZ);
