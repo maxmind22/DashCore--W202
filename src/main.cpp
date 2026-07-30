@@ -131,6 +131,7 @@ RTC_DATA_ATTR uint32_t rtc_trip_magic = 0;
 uint32_t accumulated_inj_time_us = 0;
 RTC_DATA_ATTR float total_fuel_liters = 0.0f;
 RTC_DATA_ATTR float total_distance_km = 0.0f;
+RTC_DATA_ATTR float compounded_r_int = 0.0f;
 float inst_val = 0.0f;
 float avg_l_100km = 0.0f;
 
@@ -862,6 +863,7 @@ void enterPowerDownSleep()
   prefs.begin("trip_data", false);
   prefs.putFloat("fuel", total_fuel_liters);
   prefs.putFloat("dist", total_distance_km);
+  prefs.putFloat("r_int", compounded_r_int);
   prefs.end();
 
   // --- ORDERED SHUTDOWN: Stop everything safely before deep sleep ---
@@ -1408,12 +1410,15 @@ void setup()
     prefs.begin("trip_data", true); // Open in read-only mode
     total_fuel_liters = prefs.getFloat("fuel", 0.0f);
     total_distance_km = prefs.getFloat("dist", 0.0f);
+    compounded_r_int = prefs.getFloat("r_int", 0.0f);
     prefs.end();
 
     if (isnan(total_fuel_liters))
       total_fuel_liters = 0.0f;
     if (isnan(total_distance_km))
       total_distance_km = 0.0f;
+    if (isnan(compounded_r_int) || compounded_r_int < 0.0f)
+      compounded_r_int = 0.0f;
 
     rtc_trip_magic = RTC_TRIP_MAGIC_KEY;
   }
@@ -1768,15 +1773,32 @@ void loop()
     lastMetricsUpdateTime = now;
   }
 
-  // --- Display cranking amps briefly after starting ---
+  // --- Display cranking amps & battery internal resistance briefly after starting ---
   static float peak_crank_current = 0.0f;
   static SystemState lastStateDisplay = STATE_SLEEP;
   static unsigned long startedRunningTime = 0;
   static bool was_cranking_amps_drawn = false;
 
+  static float resting_voltage = 12.6f;
+  static float v_rest_frozen = 12.6f;
+  static float crank_r_sum = 0.0f;
+  static int crank_r_count = 0;
+
+  // Track resting voltage prior to cranking when current load is low
+  if (currentState != STATE_CRANKING && currentState != STATE_RUNNING)
+  {
+    if (abs(local_current_A_filtered) < 15.0f && local_voltage_filtered > 10.0f)
+    {
+      resting_voltage = 0.05f * local_voltage_filtered + 0.95f * resting_voltage;
+    }
+  }
+
   if (currentState == STATE_CRANKING && lastStateDisplay != STATE_CRANKING)
   {
     peak_crank_current = 0.0f;
+    v_rest_frozen = (resting_voltage >= 10.0f) ? resting_voltage : local_voltage_filtered;
+    crank_r_sum = 0.0f;
+    crank_r_count = 0;
   }
   if (currentState == STATE_CRANKING)
   {
@@ -1784,10 +1806,62 @@ void loop()
     {
       peak_crank_current = local_current_A_filtered;
     }
+
+    // Accumulate internal resistance samples during heavy discharge (> 30A)
+    float discharge_current = -local_current_A_filtered;
+    if (discharge_current > 30.0f)
+    {
+      float v_drop = v_rest_frozen - local_voltage_filtered;
+      if (v_drop > 0.05f)
+      {
+        float r_inst_mOhm = (v_drop / discharge_current) * 1000.0f;
+        if (r_inst_mOhm >= 0.5f && r_inst_mOhm <= 100.0f)
+        {
+          crank_r_sum += r_inst_mOhm;
+          crank_r_count++;
+        }
+      }
+    }
   }
+
   if (currentState == STATE_RUNNING && lastStateDisplay == STATE_CRANKING)
   {
     startedRunningTime = now;
+
+    // Calculate this crank event's average internal resistance
+    float r_event = 0.0f;
+    if (crank_r_count > 0)
+    {
+      r_event = crank_r_sum / (float)crank_r_count;
+    }
+    else if (peak_crank_current < -30.0f)
+    {
+      float v_drop = v_rest_frozen - local_voltage_filtered;
+      if (v_drop > 0.05f)
+      {
+        r_event = (v_drop / (-peak_crank_current)) * 1000.0f;
+      }
+    }
+
+    // Compound over time using Exponential Moving Average across crank events
+    if (r_event >= 0.5f && r_event <= 100.0f)
+    {
+      if (compounded_r_int < 0.5f || isnan(compounded_r_int))
+      {
+        compounded_r_int = r_event;
+      }
+      else
+      {
+        compounded_r_int = 0.30f * r_event + 0.70f * compounded_r_int;
+      }
+
+      Preferences prefs;
+      if (prefs.begin("trip_data", false))
+      {
+        prefs.putFloat("r_int", compounded_r_int);
+        prefs.end();
+      }
+    }
   }
 
   bool show_crank_amps =
@@ -1800,9 +1874,16 @@ void loop()
     {
       tv.setCursor(5, 70);
       tv.setTextColor(0xFF, 0x00);
-      char bufCA[15];
+      char bufCA[24];
       float ca_val = (peak_crank_current < 0.0f) ? -peak_crank_current : 0.0f;
-      snprintf(bufCA, sizeof(bufCA), "CRK %4.0fA", ca_val);
+      if (compounded_r_int > 0.1f)
+      {
+        snprintf(bufCA, sizeof(bufCA), "CRK %4.0fA %4.1fm", ca_val, compounded_r_int);
+      }
+      else
+      {
+        snprintf(bufCA, sizeof(bufCA), "CRK %4.0fA", ca_val);
+      }
       tv.print(bufCA);
       was_cranking_amps_drawn = true;
     }
@@ -1811,7 +1892,7 @@ void loop()
   {
     tv.setCursor(5, 70);
     tv.setTextColor(0xFF, 0x00);
-    tv.print("         "); // Erase with spaces
+    tv.print("                   "); // Erase with spaces
     was_cranking_amps_drawn = false;
   }
 
