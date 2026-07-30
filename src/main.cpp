@@ -668,6 +668,7 @@ void warnings(int percent, int temp_out, int spd, int coolant_level,
     tv.setTextColor(0xFF);
     tv.print("Front MCU Diconnected");
     conn_on = false;
+    spd = 0;
   }
   else if (!(now - lastPacketTime > 5000) && conn_on == false)
   {
@@ -707,7 +708,7 @@ void warnings(int percent, int temp_out, int spd, int coolant_level,
     chg = 0;
   }
   if (local_charge_state == 2 && lowBlinkState &&
-      now - local_last_charge > 10000 && priority == 0 && rpm > 50)
+      now - local_last_charge > 10000 && priority == 0 && local_rpm > 50)
   {
     if (chg2 == 0)
     {
@@ -1287,7 +1288,7 @@ void processPushStart()
     setRelays(true, true, false);
 
     // Handle Engine Stall Safety
-    if (currentRpm == 0 && spd == 0)
+    if (currentRpm == 0)
     {
       currentState = STATE_ACC;
       standbyStartTime = now; // Start 2-minute sleep timeout
@@ -1635,20 +1636,7 @@ void loop()
       }
     }
   }
-  // Stall detection: set RPM to 0 if it hasn't changed for 500ms
-  static uint16_t last_rpm_val = 0;
-  static unsigned long last_rpm_change_time = 0;
-  if (new_rpm != last_rpm_val)
-  {
-    last_rpm_val = new_rpm;
-    last_rpm_change_time = now;
-  }
-  else if (now - last_rpm_change_time >= 500)
-  {
-    // new_rpm = 0;
-    spd_t = 0; // Also set speed to 0 if RPM is stalled
-  }
-
+  
   portENTER_CRITICAL(&dataMux);
   rpm = new_rpm;
   portEXIT_CRITICAL(&dataMux);
