@@ -12,20 +12,19 @@ The project is split into two physical microcontrollers:
 
 Located in the engine bay, this controller handles raw engine sensor acquisition and primary safety-critical components:
 
-- **RPM & Speed Tracking:** High-frequency pulse counting via hardware interrupts (`rpmISR`, `spdISR`) with software debouncing.
-- **Thermal Management:** Reads engine coolant temperature via thermistor and monitors A/C state to dynamically control the electric radiator cooling fan using variable PWM duty cycles.
-- **Custom DFCO (Deceleration Fuel Cut Off) Point:** Cuts fuel during deceleration to futher reduce fuel consumption
+- **RPM, Fuel consumption & Speed Tracking:** High-frequency pulse counting via hardware interrupts.
+- **Thermal Management:** Reads engine coolant temperature and monitors A/C state to dynamically control the electric radiator cooling fan using variable PWM duty cycles.
+- **Custom DFCO (Deceleration Fuel Cut Off) Point:** Cuts fuel during deceleration to reduce fuel consumption
 - **Failsafe System:** Features a physical watchdog timer (`avr/wdt.h`) and monitors heartbeat frames from the display unit. If communication is lost, it immediately cuts field voltage to the regulator for safety.
-- **CAN Broadcast:** Packages engine telemetry (speed, RPM, oil level, temperatures) and broadcasts it over a 500kbps CAN Bus every 200ms.
+- **CAN Broadcast:** Packages engine telemetry (speed, RPM, oil level, temperatures) and broadcasts it over a 500kbps CAN Bus every 50ms.
 
 ### 2. Display & Regulator MCU (Cabin Controller - ESP32)
 
-Located in the vehicle cabin, this ESP32 runs a real-time OS (FreeRTOS) to manage the display, alternator regulation, and ignition keyless entry on separate cores:
+Located in the vehicle cabin, this ESP32 manages the display, alternator regulation, and ignition keyless entry on separate cores:
 
-- **Composite Video Dash UI:** Renders a high-performance analog-style speedometer needle, digital speed readout, battery charge/discharge telemetry, fuel levels, and warning systems directly to PAL/NTSC composite video outputs using the `ESP_8_BIT` composite library (leveraging the ESP32’s hardware DACs).
+- **Composite Video Dash UI:** Renders a digital speedometer, digital speed readout, battery charge/discharge telemetry, fuel levels, fuel consumption, and warning systems directly to PAL/NTSC composite video outputs using the `ESP_8_BIT` composite library (leveraging the ESP32’s hardware DACs).
 - **Advanced Fuel & Efficiency Telemetry:**
   - **Remaining Distance Range (`REM`):** Continuously calculates remaining driving range (km) based on remaining fuel and real-time average consumption (`avg_l_100km`).
-  - **Multi-Sensor ECO Driving Indicator:** Monitors engine acceleration rate ($\Delta\text{RPM}/\Delta t$), vehicle speed acceleration ($\Delta\text{Speed}/\Delta t$), instant fuel burn ($\text{L/100km}$), and DFCO state to dynamically display a **Green `ECO`** (economical) or **Red `ECO`** (heavy load / rapid acceleration) indicator on the dash UI.
 - **Software-Defined Alternator Regulator (Core 0):** A high-priority FreeRTOS task running a closed-loop PID control loop. It samples alternator voltage and current through a high-precision ADS1115 ADC to dynamically drive the alternator field coil via 10-bit PWM. Implements seamless CV/CC regulation (targeting 13.6V max and a 20A current ceiling specifically to protect and optimize charging for a LiFePO4 start battery) with secondary physical relay emergency overrides for overcurrent/overvoltage protection.
 - **Smart Keyless Push-to-Start:** Manages the ignition and engine start sequence via a non-blocking state machine driving 3 physical relays (ACC, IGN, Starter).
 - **Cabin Alerts & Warnings:** Controls a physical chime buzzer and on-screen HUD flashes for:
@@ -56,7 +55,7 @@ The ESP32 manages a smart, keyless push-to-start system designed to replicate an
 - **Rotary Cycle & Stop Flow:**
   - _When Off:_ Tapping the button cycles: OFF (`STATE_STANDBY`) $\rightarrow$ IGNITION (`STATE_IGNITION`) $\rightarrow$ ACC (`STATE_ACC`) $\rightarrow$ OFF.
   - _When Running:_ Tapping the button stops the engine:
-    - **With Brake Held:** Stops the engine but keeps ACC active (system goes to `STATE_ACC` so you can listen to music).
+    - **With Brake Held:** Stops the engine but keeps ACC active (system goes to `STATE_ACC` so you can listen to radio).
     - **Without Brake:** Stops the engine and shuts down all accessories immediately (system goes to `STATE_STANDBY`).
 
 ---
