@@ -33,6 +33,7 @@ void recoverI2CBus(int sdaPin, int sclPin);
 #define PIN_3V3_DIGITAL_GATE \
   17                      // Powers the Level Shifter LV and digital 3.3V pull-ups
 #define PIN_RELAY_LOCK 32 // Controls the vehicle lock relay (Active High)
+#define buzzer_pin 4
 
 // --- SYSTEM STATES ---
 enum SystemState
@@ -45,28 +46,126 @@ enum SystemState
   STATE_RUNNING
 };
 
-enum EngineStopReason
-{
-  STOP_REASON_NONE = 0,
-  STOP_REASON_MANUAL_ACC,     // User pressed button (Brake held -> ACC)
-  STOP_REASON_MANUAL_STANDBY, // User pressed button (No brake -> STANDBY)
-  STOP_REASON_STALL_LOW_RPM,  // Engine stalled / RPM dropped to 0 while running
-  STOP_REASON_CRANK_TIMEOUT,  // Cranking timed out after 5 seconds
-  STOP_REASON_CAN_LOST        // Front MCU disconnected / CAN loss while running
-};
-
-EngineStopReason lastStopReason = STOP_REASON_NONE;
-unsigned long stopReasonTimestamp = 0;
-const unsigned long STOP_REASON_TIMEOUT_MS = 60000; // 1 minute (60,000 ms) display timeout
-
 RTC_DATA_ATTR SystemState currentState = STATE_SLEEP;
+RTC_DATA_ATTR bool vehicleLockDisabled = false; // Persistent toggle to temporarily disable auto-locking
+RTC_DATA_ATTR bool engineStartDisabled = false; // Persistent toggle to disable engine starting (lockdown mode)
 unsigned long standbyStartTime = 0;
 unsigned long lastButtonPressTime = 0;
 bool stoppedToAcc = false;
 volatile bool regulatorTaskRunning = true;
 
+// --- UNLOCK SIGNAL PULSE MONITORING (10-second window, burst evaluation) ---
+static unsigned long unlockFirstPulseTime = 0;
+static unsigned long unlockLastPulseTime = 0;
+static uint8_t unlockPulseCount = 0;
+static bool lastUnlockPinState = LOW;
+static unsigned long lastUnlockEdgeTime = 0;
+
+void playUnlockToggleTone(bool disabled)
+{
+  if (disabled)
+  {
+    // Vehicle lock DISABLED: 2 short beeps
+    for (int i = 0; i < 2; i++)
+    {
+      digitalWriteFast(buzzer_pin, HIGH);
+      delay(200);
+      digitalWriteFast(buzzer_pin, LOW);
+      delay(200);
+    }
+  }
+  else
+  {
+    // Vehicle lock RE-ENABLED: 1 long beep
+    digitalWriteFast(buzzer_pin, HIGH);
+    delay(300);
+    digitalWriteFast(buzzer_pin, LOW);
+  }
+}
+
+void playLockdownToggleTone(bool lockdownActive)
+{
+  if (lockdownActive)
+  {
+    // Vehicle lockdown ACTIVE (Engine start disabled): 3 short beeps
+    for (int i = 0; i < 3; i++)
+    {
+      digitalWriteFast(buzzer_pin, HIGH);
+      delay(200);
+      digitalWriteFast(buzzer_pin, LOW);
+      delay(200);
+    }
+  }
+  else
+  {
+    // Vehicle lockdown DEACTIVATED (Engine start allowed): 1 long beep
+    digitalWriteFast(buzzer_pin, HIGH);
+    delay(400);
+    digitalWriteFast(buzzer_pin, LOW);
+  }
+}
+
+void playAuthWarningTone()
+{
+  // Warning beep when attempting to start while locked down
+  for (int i = 0; i < 2; i++)
+  {
+    digitalWriteFast(buzzer_pin, HIGH);
+    delay(100);
+    digitalWriteFast(buzzer_pin, LOW);
+    delay(100);
+  }
+}
+
+void processUnlockSignals()
+{
+  unsigned long now = millis();
+  bool currentUnlockPinState = digitalRead(PIN_WAKE_UNLOCK);
+
+  // Optocoupler output goes HIGH on unlock pulse (active high into ESP32)
+  if (currentUnlockPinState == HIGH && lastUnlockPinState == LOW)
+  {
+    if (now - lastUnlockEdgeTime >= 150) // 150ms debounce
+    {
+      lastUnlockEdgeTime = now;
+      unlockLastPulseTime = now;
+
+      if (unlockPulseCount == 0)
+      {
+        unlockFirstPulseTime = now;
+      }
+      unlockPulseCount++;
+    }
+  }
+  lastUnlockPinState = currentUnlockPinState;
+
+  // Evaluate the pulse burst after 1.5 seconds of inactivity
+  if (unlockPulseCount > 0 && (now - unlockLastPulseTime >= 1500))
+  {
+    unsigned long burstDuration = unlockLastPulseTime - unlockFirstPulseTime;
+    if (burstDuration <= 10000)
+    {
+      if (unlockPulseCount == 3)
+      {
+        vehicleLockDisabled = !vehicleLockDisabled;
+        playUnlockToggleTone(vehicleLockDisabled);
+      }
+      else if (unlockPulseCount == 4)
+      {
+        engineStartDisabled = !engineStartDisabled;
+        playLockdownToggleTone(engineStartDisabled);
+      }
+    }
+
+    // Reset for next burst
+    unlockPulseCount = 0;
+    unlockFirstPulseTime = 0;
+    unlockLastPulseTime = 0;
+  }
+}
+
 const unsigned long STANDBY_TIMEOUT_MS =
-    60000;                                            // 1 Minute (Production sleep timeout)
+    120000;                                           // 2 Minute (Production sleep timeout)
 const unsigned long ACCESSORY_TIMEOUT_MS = 3600000;   // 1 Hour (3600000 ms)
 const unsigned long BUTTON_COOLDOWN_MS = 500;         // 500 millisecond button lockout
 const unsigned long BUTTON_LONGPRESS_RESET_MS = 3000; // 3 second long-press to reset trip data
@@ -82,7 +181,6 @@ ESP_8_BIT_GFX tv(true, 8);
 #define FUEL_Y 100
 #define FUEL_HEIGHT 100
 #define FUEL_WIDTH 15
-#define buzzer_pin 4
 
 #define TEMP_X 240
 #define TEMP_Y 100
@@ -720,46 +818,28 @@ void warnings(int percent, int temp_out, int spd, int coolant_level,
     }
     buzzer_state = 1;
   }
-  // -------- Engine Stop Reason Warning (Disappears after 1 minute) --------//
-  static EngineStopReason last_drawn_stop_reason = STOP_REASON_NONE;
-  static bool stop_reason_drawn = false;
 
-  if (lastStopReason != STOP_REASON_NONE &&
-      (now - stopReasonTimestamp < STOP_REASON_TIMEOUT_MS))
+  // -------- Vehicle Lockdown / Authentication Warning --------//
+  static bool authWarningDrawn = false;
+  if (engineStartDisabled)
   {
-    if (!stop_reason_drawn || last_drawn_stop_reason != lastStopReason)
+    if (lowBlinkState)
     {
-      tv.setCursor(WARNING_X, WARNING_Y + 42);
+      tv.setCursor(WARNING_X + 15, WARNING_Y + 50);
       tv.setTextColor(0xFF);
-      switch (lastStopReason)
-      {
-      case STOP_REASON_MANUAL_ACC:
-        tv.print("STOP: BUTTON (ACC)");
-        break;
-      case STOP_REASON_MANUAL_STANDBY:
-        tv.print("STOP: BUTTON (OFF)");
-        break;
-      case STOP_REASON_STALL_LOW_RPM:
-        tv.print("STOP: ENGINE STALLED (LOW RPM)");
-        break;
-      case STOP_REASON_CRANK_TIMEOUT:
-        tv.print("STOP: CRANK TIMEOUT (5s)");
-        break;
-      case STOP_REASON_CAN_LOST:
-        tv.print("STOP: FRONT MCU DISCONNECTED");
-        break;
-      default:
-        break;
-      }
-      stop_reason_drawn = true;
-      last_drawn_stop_reason = lastStopReason;
+      tv.setTextSize(1);
+      tv.print("AUTH ERROR: ENGINE LOCKED");
+      authWarningDrawn = true;
+    }
+    else if (authWarningDrawn)
+    {
+      tv.fillRect(WARNING_X + 15, WARNING_Y + 50, 160, 8, 0x00);
     }
   }
-  else if (stop_reason_drawn)
+  else if (authWarningDrawn)
   {
-    tv.fillRect(WARNING_X, WARNING_Y + 42, 210, 8, 0x00);
-    stop_reason_drawn = false;
-    last_drawn_stop_reason = STOP_REASON_NONE;
+    tv.fillRect(WARNING_X + 15, WARNING_Y + 50, 160, 8, 0x00);
+    authWarningDrawn = false;
   }
 
   //---------- ring boot chime  ---------
@@ -945,12 +1025,15 @@ void enterPowerDownSleep()
   delay(200);
 
   // 7.1 Activate vehicle locking relay briefly to ensure it remains locked
-  // after sleep
-  pinMode(PIN_RELAY_LOCK, OUTPUT);
-  digitalWrite(PIN_RELAY_LOCK, HIGH); // Ground the lock wire via relay
-  delay(200);                         // Ground pulse duration of 200ms
-  digitalWrite(PIN_RELAY_LOCK, LOW);
-  pinMode(PIN_RELAY_LOCK, INPUT); // Float pin to prevent sleep leakage
+  // after sleep (if locking is not temporarily disabled)
+  if (!vehicleLockDisabled)
+  {
+    pinMode(PIN_RELAY_LOCK, OUTPUT);
+    digitalWrite(PIN_RELAY_LOCK, HIGH); // Ground the lock wire via relay
+    delay(200);                         // Ground pulse duration of 200ms
+    digitalWrite(PIN_RELAY_LOCK, LOW);
+    pinMode(PIN_RELAY_LOCK, INPUT); // Float pin to prevent sleep leakage
+  }
 
   // 8. Turn off the 3.3V digital gate (must happen after locking relay is
   // pulsed)
@@ -989,6 +1072,12 @@ void setupPushStartPins()
 void processPushStart()
 {
   unsigned long now = millis();
+
+  // Continuously monitor unlock pulses while engine is not running.
+  if (currentState == !STATE_RUNNING)
+  {
+    processUnlockSignals();
+  }
 
   // Edge detection for push button
   static bool lastBtnState = HIGH;
@@ -1031,18 +1120,21 @@ void processPushStart()
     standbyStartTime = now;
   }
 
-  // Boot-lock: Lock 1 minute after booting when in ACC or IGN state
+  // Boot-lock: Lock 2 minute after booting when in ACC or IGN state
   static bool bootLockDone = false;
   if (!bootLockDone &&
       (currentState == STATE_ACC || currentState == STATE_IGNITION))
   {
-    if (now >= 60000) // 1 minute after booting
+    if (now >= 120000) // 2 minutes after booting
     {
-      pinMode(PIN_RELAY_LOCK, OUTPUT);
-      digitalWrite(PIN_RELAY_LOCK, HIGH); // Ground the lock wire via relay
-      delay(200);                         // 200ms grounding pulse
-      digitalWrite(PIN_RELAY_LOCK, LOW);
-      pinMode(PIN_RELAY_LOCK, INPUT); // Float pin to save power
+      if (!vehicleLockDisabled)
+      {
+        pinMode(PIN_RELAY_LOCK, OUTPUT);
+        digitalWrite(PIN_RELAY_LOCK, HIGH); // Ground the lock wire via relay
+        delay(200);                         // 200ms grounding pulse
+        digitalWrite(PIN_RELAY_LOCK, LOW);
+        pinMode(PIN_RELAY_LOCK, INPUT); // Float pin to save power
+      }
       bootLockDone = true;
     }
   }
@@ -1063,11 +1155,14 @@ void processPushStart()
     if (driveLockTriggered && !driveLockDone &&
         (now - driveLockTime >= 10000))
     {
-      pinMode(PIN_RELAY_LOCK, OUTPUT);
-      digitalWrite(PIN_RELAY_LOCK, HIGH); // Ground the lock wire via relay
-      delay(200);                         // 200ms grounding pulse
-      digitalWrite(PIN_RELAY_LOCK, LOW);
-      pinMode(PIN_RELAY_LOCK, INPUT); // Float pin to save power
+      if (!vehicleLockDisabled)
+      {
+        pinMode(PIN_RELAY_LOCK, OUTPUT);
+        digitalWrite(PIN_RELAY_LOCK, HIGH); // Ground the lock wire via relay
+        delay(200);                         // 200ms grounding pulse
+        digitalWrite(PIN_RELAY_LOCK, LOW);
+        pinMode(PIN_RELAY_LOCK, INPUT); // Float pin to save power
+      }
       driveLockDone = true;
     }
   }
@@ -1129,7 +1224,16 @@ void processPushStart()
         bool brakeIsHeldNow = (digitalRead(PIN_INPUT_BRAKE) == LOW);
         if (brakeIsHeldNow)
         {
-          currentState = STATE_CRANKING;
+          if (!engineStartDisabled)
+          {
+            currentState = STATE_CRANKING;
+          }
+          else
+          {
+            // Serial.println("[LOCKDOWN] Engine start blocked! PLZ AUTHENTICATE");
+            playAuthWarningTone();
+            currentState = STATE_STANDBY;
+          }
         }
         else
         {
@@ -1176,8 +1280,17 @@ void processPushStart()
         bool brakeIsHeldNow = (digitalRead(PIN_INPUT_BRAKE) == LOW);
         if (brakeIsHeldNow)
         {
-          currentState = STATE_CRANKING;
-          stoppedToAcc = false;
+          if (!engineStartDisabled)
+          {
+            currentState = STATE_CRANKING;
+            stoppedToAcc = false;
+          }
+          else
+          {
+            Serial.println("[LOCKDOWN] Engine start blocked! PLZ AUTHENTICATE");
+            playAuthWarningTone();
+            currentState = STATE_ACC;
+          }
         }
         else
         {
@@ -1213,7 +1326,6 @@ void processPushStart()
 
   case STATE_IGNITION:
     // Relays: ACC ON, IGN ON, START OFF (POS2)
-    // Serial.println("POS2");
     setRelays(true, true, false);
 
     if (btnPressed && (now - lastButtonPressTime >= BUTTON_COOLDOWN_MS))
@@ -1221,8 +1333,14 @@ void processPushStart()
       lastButtonPressTime = now;
       if (brakeHeld)
       {
-        // Serial.println("brake singal works");
-        currentState = STATE_CRANKING;
+        if (!engineStartDisabled)
+        {
+          currentState = STATE_CRANKING;
+        }
+        else
+        {
+          playAuthWarningTone();
+        }
       }
       else
       {
@@ -1234,6 +1352,13 @@ void processPushStart()
     break;
 
   case STATE_CRANKING:
+    if (engineStartDisabled)
+    {
+      setRelays(true, false, false); // Abort cranking immediately
+      currentState = STATE_ACC;
+      playAuthWarningTone();
+      break;
+    }
     // Non-blocking stage machine for cranking sequence
     static enum { CRANK_PRIME,
                   CRANK_SOLENOID } crankStage = CRANK_PRIME;
@@ -1256,7 +1381,6 @@ void processPushStart()
     }
     else if (crankStage == CRANK_SOLENOID)
     {
-      // Serial.println("cranking");
       // Step 2: Engage starter solenoid (ACC ON, IGN ON, START ON)
       setRelays(true, true, true);
 
@@ -1267,7 +1391,6 @@ void processPushStart()
         setRelays(true, true, false); // Disengage starter, keep ACC/IGN on
         crankStage = CRANK_PRIME;     // Reset stages
         crankStageTime = 0;
-        lastStopReason = STOP_REASON_NONE; // Clear stop reason on successful start
       }
       else if (now - crankStageTime > MAX_CRANK_TIME_MS)
       {
@@ -1279,8 +1402,6 @@ void processPushStart()
         crankStage = CRANK_PRIME;
         crankStageTime = 0;
         stoppedToAcc = false; // Reset flag on crank timeout
-        lastStopReason = STOP_REASON_CRANK_TIMEOUT;
-        stopReasonTimestamp = now;
       }
     }
     break;
@@ -1295,15 +1416,6 @@ void processPushStart()
       currentState = STATE_ACC;
       standbyStartTime = now; // Start 2-minute sleep timeout
       stoppedToAcc = false;   // Reset flag on engine stall
-      if (now - lastPacketTime > 5000)
-      {
-        lastStopReason = STOP_REASON_CAN_LOST;
-      }
-      else
-      {
-        lastStopReason = STOP_REASON_STALL_LOW_RPM;
-      }
-      stopReasonTimestamp = now;
     }
 
     // Handle Engine Stop Button Press (Only if vehicle is stationary)
@@ -1318,16 +1430,12 @@ void processPushStart()
           setRelays(true, false, false); // Keep ACC ON, kill IGN and START
           currentState = STATE_ACC;      // Go to ACC position
           stoppedToAcc = true;           // Mark that we just stopped the engine to ACC
-          lastStopReason = STOP_REASON_MANUAL_ACC;
-          stopReasonTimestamp = now;
         }
         else
         {
           setRelays(false, false, false); // Kill ACC, IGN, and START
           currentState = STATE_STANDBY;   // Go to Standby (OFF)
           stoppedToAcc = false;           // Reset flag on stop to standby
-          lastStopReason = STOP_REASON_MANUAL_STANDBY;
-          stopReasonTimestamp = now;
         }
         standbyStartTime = now; // Start sleep timeout timer
       }
@@ -1424,39 +1532,39 @@ void setup()
   }
 
   //========  track reset reason: debug purpose   ======//
-  esp_reset_reason_t reason = esp_reset_reason();
-  if (reason != ESP_RST_POWERON && reason != ESP_RST_UNKNOWN &&
-      reason != ESP_RST_EXT && reason != ESP_RST_DEEPSLEEP)
-  {
-    esp_task_wdt_deinit(); // Disable WDT before long delay to prevent reboot
-                           // loops
-    tv.fillScreen(0x00);
-    tv.setCursor(10, 50);
-    tv.setTextColor(0xFF);
-    tv.setTextSize(2);
-    tv.print("WARNING: CRASH!");
-    tv.setTextSize(1);
-    tv.setCursor(10, 80);
-    tv.setTextColor(0xFF);
-    tv.print("Reset Reason ID: ");
-    tv.print(reason);
-    tv.setCursor(10, 100);
-    if (reason == ESP_RST_PANIC)
-      tv.print("- Software Panic (Bug)");
-    else if (reason == ESP_RST_INT_WDT)
-      tv.print("- Interrupt WDT");
-    else if (reason == ESP_RST_TASK_WDT)
-      tv.print("- Task WDT (FreeRTOS)");
-    else if (reason == ESP_RST_WDT)
-      tv.print("- Other Watchdog");
-    else if (reason == ESP_RST_BROWNOUT)
-      tv.print("- Brownout / Power Drop");
-    else
-      tv.print("- Other non-power-on reset");
+  // esp_reset_reason_t reason = esp_reset_reason();
+  // if (reason != ESP_RST_POWERON && reason != ESP_RST_UNKNOWN &&
+  //     reason != ESP_RST_EXT && reason != ESP_RST_DEEPSLEEP)
+  // {
+  //   esp_task_wdt_deinit(); // Disable WDT before long delay to prevent reboot
+  //                          // loops
+  //   tv.fillScreen(0x00);
+  //   tv.setCursor(10, 50);
+  //   tv.setTextColor(0xFF);
+  //   tv.setTextSize(2);
+  //   tv.print("WARNING: CRASH!");
+  //   tv.setTextSize(1);
+  //   tv.setCursor(10, 80);
+  //   tv.setTextColor(0xFF);
+  //   tv.print("Reset Reason ID: ");
+  //   tv.print(reason);
+  //   tv.setCursor(10, 100);
+  //   if (reason == ESP_RST_PANIC)
+  //     tv.print("- Software Panic (Bug)");
+  //   else if (reason == ESP_RST_INT_WDT)
+  //     tv.print("- Interrupt WDT");
+  //   else if (reason == ESP_RST_TASK_WDT)
+  //     tv.print("- Task WDT (FreeRTOS)");
+  //   else if (reason == ESP_RST_WDT)
+  //     tv.print("- Other Watchdog");
+  //   else if (reason == ESP_RST_BROWNOUT)
+  //     tv.print("- Brownout / Power Drop");
+  //   else
+  //     tv.print("- Other non-power-on reset");
 
-    tv.waitForFrame();
-    delay(5000);
-  }
+  //   tv.waitForFrame();
+  //   delay(5000);
+  // }
 
   pinModeFast(buzzer_pin, OUTPUT);
   pinModeFast(coolant_level_pin, INPUT);
@@ -1464,8 +1572,19 @@ void setup()
   digitalWriteFast(field_relay_pin, LOW); // Start with field relay off
   Serial.begin(250000);
   delay(50); // Let UART stabilize
-  Serial.print("\n--- ESP32 BOOTED ---\nReset Reason ID: ");
-  Serial.println(reason);
+  // Serial.print("\n--- ESP32 BOOTED ---\nReset Reason ID: ");
+  // Serial.println(reason);
+
+  // if (reason == ESP_RST_DEEPSLEEP)
+  // {
+  //   esp_sleep_wakeup_cause_t wakeup_reason = esp_sleep_get_wakeup_cause();
+  //   if (wakeup_reason == ESP_SLEEP_WAKEUP_EXT1)
+  //   {
+  //     unlockFirstPulseTime = millis();
+  //     unlockLastPulseTime = millis();
+  //     unlockPulseCount = 1;
+  //   }
+  // }
 
   mcp2515.reset();
   mcp2515.setBitrate(CAN_500KBPS, MCP_8MHZ); // Match transmitter
