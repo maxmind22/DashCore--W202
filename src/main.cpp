@@ -1641,7 +1641,7 @@ void loop()
       }
     }
   }
-  
+
   portENTER_CRITICAL(&dataMux);
   rpm = new_rpm;
   portEXIT_CRITICAL(&dataMux);
@@ -1921,6 +1921,11 @@ void loop()
 
   temp_out = map((int)raw2, 250, 950, 40, 120);
   temp_out = constrain(temp_out, 40, 120);
+
+  if (now - lastPacketTime > 2000)
+  {
+    rpm = 0;
+  }
 
   // =========================== Send Dynamic data to display
   // ============================
