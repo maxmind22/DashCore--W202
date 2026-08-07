@@ -14,7 +14,7 @@ void checkCanErrors() {
     if (errFlags & MCP2515::EFLG_TXBO) {
       mcp2515.reset();
       mcp2515.setBitrate(CAN_500KBPS, MCP_8MHZ);
-      mcp2515.setNormalMode();
+      mcp2515.setNormalOneShotMode();
     }
   }
 }
