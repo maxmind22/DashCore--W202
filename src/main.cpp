@@ -90,6 +90,7 @@ void setup()
   Serial.begin(250000);
   delay(50); // Let UART stabilize
 
+  SPI.begin();
   mcp2515.reset();
   mcp2515.setBitrate(CAN_500KBPS, MCP_8MHZ); // Match transmitter
   mcp2515.setNormalOneShotMode();            // mcp2515.setNormalMode();
