@@ -1,6 +1,6 @@
 # Custom ESP32/Arduino nano Dual-MCU Automotive Telemetry Dashboard, Smart Alternator Regulator, Push Start System
 
-A production-grade, real-time vehicle telemetry display and software-defined alternator regulator system, push start system. This project uses a dual-microcontroller architecture connected via **CAN Bus** to safely monitor engine status, display telemetry on composite video screens, implement a closed-loop CV/CC (Constant Voltage / Constant Current) alternator field regulator tailored for a LiFePO4 start battery and a push start system replacing mechanical key.
+A production-grade, real-time vehicle telemetry display, software-defined alternator regulator, and smart keyless push-to-start system. This project uses a dual-microcontroller architecture connected via **CAN Bus** to safely monitor engine status, display telemetry on composite video screens, implement a closed-loop CV/CC (Constant Voltage / Constant Current) alternator field regulator tailored for a LiFePO4 start battery, and replace the mechanical ignition lock.
 
 ---
 
@@ -8,26 +8,26 @@ A production-grade, real-time vehicle telemetry display and software-defined alt
 
 The project is split into two physical microcontrollers:
 
-### 1. Front MCU (Engine Bay Controller - Arduino nano)
+### 1. Front MCU (Engine Bay Controller - Arduino Nano / ATmega328P)
 
 Located in the engine bay, this controller handles raw engine sensor acquisition and primary safety-critical components:
 
-- **RPM, Fuel consumption & Speed Tracking:** High-frequency pulse counting via hardware interrupts.
+- **RPM, Fuel Consumption & Speed Tracking:** High-frequency pulse counting via hardware interrupts.
 - **Thermal Management:** Reads engine coolant temperature and monitors A/C state to dynamically control the electric radiator cooling fan using variable PWM duty cycles.
-- **Custom DFCO (Deceleration Fuel Cut Off) Point:** Cuts fuel during deceleration to reduce fuel consumption
-- **Failsafe System:** Features a physical watchdog timer (`avr/wdt.h`) and monitors heartbeat frames from the display unit. If communication is lost, it immediately cuts field voltage to the regulator for safety.
+- **Custom DFCO (Deceleration Fuel Cut Off):** Cuts fuel during deceleration when RPM > 1500, throttle closed, and engine warm.
+- **Failsafe System:** Features a hardware watchdog timer (`avr/wdt.h`), regulator failsafe hysteresis (preventing relay chatter), and heartbeat frame monitoring from the display unit. If communication is lost, it cuts field voltage to the regulator for safety.
 - **CAN Broadcast:** Packages engine telemetry (speed, RPM, oil level, temperatures) and broadcasts it over a 500kbps CAN Bus every 50ms.
 
 ### 2. Display & Regulator MCU (Cabin Controller - ESP32)
 
-Located in the vehicle cabin, this ESP32 manages the display, alternator regulation, and ignition keyless entry on separate cores:
+Located in the vehicle cabin, this ESP32 manages the display, alternator regulation, and ignition keyless entry on separate FreeRTOS cores:
 
 - **Composite Video Dash UI:** Renders a digital speedometer, digital speed readout, battery charge/discharge telemetry, fuel levels, fuel consumption, and warning systems directly to PAL/NTSC composite video outputs using the `ESP_8_BIT` composite library (leveraging the ESP32’s hardware DACs).
 - **Advanced Fuel & Efficiency Telemetry:**
   - **Remaining Distance Range (`REM`):** Continuously calculates remaining driving range (km) based on remaining fuel and real-time average consumption (`avg_l_100km`).
 - **Software-Defined Alternator Regulator (Core 0):** A high-priority FreeRTOS task running a closed-loop PID control loop. It samples alternator voltage and current through a high-precision ADS1115 ADC to dynamically drive the alternator field coil via 10-bit PWM. Implements seamless CV/CC regulation (targeting 13.6V max and a 20A current ceiling specifically to protect and optimize charging for a LiFePO4 start battery) with secondary physical relay emergency overrides for overcurrent/overvoltage protection.
 - **Smart Keyless Push-to-Start:** Manages the ignition and engine start sequence via a non-blocking state machine driving 3 physical relays (ACC, IGN, Starter).
-- **Cabin Alerts & Warnings:** Controls a physical chime buzzer and on-screen HUD flashes for:
+- **Cabin Alerts & Warnings:** Non-blocking buzzer tone queue and on-screen HUD flashes for:
   - Low Fuel Level (with noise-rejecting calibration tables)
   - Low Engine Oil / Coolant Levels
   - Engine Overheating (Temp > 96°C)
@@ -36,34 +36,30 @@ Located in the vehicle cabin, this ESP32 manages the display, alternator regulat
 
 ---
 
-## 🔑 Keyless Push-to-Start System
+## 🔑 Keyless Push-to-Start & Safety System
 
 The ESP32 manages a smart, keyless push-to-start system designed to replicate and modernize the ignition sequence of the Mercedes W202 chassis:
 
 - **Triple-Relay Control System:** Controls Terminal 15R (ACC), Terminal 15 (IGN), and Terminal 50 (Starter Solenoid) via physical relays.
-- **Low-Power Deep Sleep (~15µA):**
+- **Ultra-Low-Power Deep Sleep with Hardware Pin Hold:**
   To prevent battery drain while parked, the cabin ESP32 automatically shuts down all peripherals (regulator task, I2S/DMA video, CAN, I2C, and Watchdogs) and enters deep sleep:
   - _In Standby (OFF) State:_ After 2 minutes of inactivity.
-  - _In ACC (POS1) or IGNITION (POS2) States:_ After **2 hours** of inactivity (preventing battery drain if left on accidentally).
-  - _Wake-up Mechanism:_ Uses an active-high `ext1` wake trigger tied to the vehicle's central locking unlock line. Since the line normally rests at 13.3V (holding the optocoupler ON, pin LOW) and pulses to 0V (optocoupler OFF, pin HIGH) on unlock, the ESP32 wakes up instantly and boots when the car is unlocked.
-- **Non-Blocking Crank Sequence:**
-  Due to the brake switch only receiving power in Position 2 (Ignition ON), the system check flow is:
-  1. **First Press:** Activates ACC & IGN (Position 2 / `STATE_IGNITION`), powering the brake switch.
-  2. **Brake Detection:** Once in Position 2, the ESP32 checks for the brake signal. If the brake is held (either immediately during the transition or pressed later), the fuel pump primes for **1000ms**, and the starter automatically engages—no second button press required.
-  3. **Auto-Disengage:** The starter automatically disengages once the engine RPM exceeds **400 RPM**, or cuts out after a **5-second safety limit** if starting fails.
-- **Double Starting Prevention:** If cranking times out, the system automatically falls back to the ACC position (`STATE_ACC`) and cuts the starter/ignition to prevent the user from accidentally grinding the starter gear on a running engine.
-- **Rotary Cycle & Stop Flow:**
-  - _When Off:_ Tapping the button cycles: OFF (`STATE_STANDBY`) $\rightarrow$ IGNITION (`STATE_IGNITION`) $\rightarrow$ ACC (`STATE_ACC`) $\rightarrow$ OFF.
-  - _When Running:_ Tapping the button stops the engine:
-    - **With Brake Held:** Stops the engine but keeps ACC active (system goes to `STATE_ACC` so you can listen to radio).
-    - **Without Brake:** Stops the engine and shuts down all accessories immediately (system goes to `STATE_STANDBY`).
+  - _In ACC (POS1) or IGNITION (POS2) States:_ After **1 hour** of inactivity (preventing battery drain if left on accidentally).
+  - _Hardware Pin Hold (`gpio_hold_en`):_ All relay output pins (ACC, IGN, Starter, 5V Gate, Field Relay) are locked LOW during sleep. This prevents floating input states caused by moisture or noise from ghost-engaging the starter or ignition while parked.
+  - _Wake-up Mechanism:_ Uses an active-high `ext1` wake trigger tied to the vehicle's central locking unlock line.
+- **Non-Blocking Crank & State Machine:**
+  - **First Press:** Activates ACC & IGN (Position 2 / `STATE_IGNITION`), powering the brake switch.
+  - **Brake Detection:** Checks for the brake signal. If the brake is held, the fuel pump primes for **50ms**, and the starter automatically engages.
+  - **Auto-Disengage:** Disengages once engine RPM exceeds **400 RPM**, or cuts out after a **5-second safety limit** if starting fails.
+  - **Stall Safety:** Stall detection requires CAN connectivity verification (`lastPacketTime < 2000ms`), ensuring a transient CAN signal loss at highway speed will never cut engine ignition.
+- **Double Starting Prevention:** If cranking times out, the system automatically falls back to `STATE_ACC` to prevent gear grinding on a running engine.
 
 ---
 
 ## 🔌 Hardware / Tech Stack
 
-- **Processor Core:** ESP32 (Cabin Display, regulator & Push start system) & Arduino nano (Front Sensor Board)
-- **Communication:** MCP2515 CAN Bus Controller (500Kbps over SPI)
+- **Processor Core:** ESP32 (Cabin Display, Regulator & Push Start) & Arduino Nano (Engine Bay Sensor Controller)
+- **Communication:** MCP2515 CAN Bus Controller (500Kbps over SPI with double-buffered RX drain)
 - **ADC:** Adafruit ADS1115 (16-bit Sigma-Delta ADC for ultra-stable voltage & current reading in noisy engine environments)
 - **Current Sensor:** FS500E2T Hall-effect current sensor
 - **Display Output:** Native ESP32 composite video out (RCA composite cable connected directly to GPIO25/DAC1)
@@ -77,6 +73,15 @@ The ESP32 manages a smart, keyless push-to-start system designed to replicate an
 
 ## 📁 Repository Structure
 
-- `/src/main.cpp` - ESP32 codebase containing the FreeRTOS telemetry rendering engine, warning logic, and the alternator PID regulator task.
-- `/Front_MCU/main.cpp` - AVR codebase running the engine bay sensor acquisition, engine safety relays, fan PWM control, and CAN transmitter loop.
-- `/platformio.ini` - PlatformIO build settings, build flags, and dependency definitions.
+The ESP32 codebase is fully modularized for clean separation of concerns:
+
+- `/src/config.h` - System pin mapping, constants, macros, threshold definitions, and state enums.
+- `/src/globals.h` / `/src/globals.cpp` - Shared state variables, RTC persistent data, and peripheral objects (`tv`, `adc`, `mcp2515`, `dataMux`).
+- `/src/display.h` / `/src/display.cpp` - Composite video HUD graphics routines (`drawStaticGauge()`, `warnings()`).
+- `/src/regulator.h` / `/src/regulator.cpp` - Closed-loop PID alternator field regulator task (Core 0) & I2C bus recovery logic.
+- `/src/pushstart.h` / `/src/pushstart.cpp` - Keyless push-to-start state machine, non-blocking lock/buzzer timers, unlock handler, and deep sleep management.
+- `/src/can_comm.h` / `/src/can_comm.cpp` - CAN frame buffer drain (`drainCanRxBuffer`), error flag diagnostic clearing, and heartbeat transmitter.
+- `/src/fuel.h` / `/src/fuel.cpp` - Non-linear fuel tank volume interpolation (`getFuelPercent()`) & trip data reset routines.
+- `/src/main.cpp` - Clean ESP32 orchestrator containing `setup()` and `loop()`.
+- `/Front_MCU/main.cpp` - ATmega328P engine bay sensor acquisition, radiator fan PWM control, safety relays, and CAN broadcast loop.
+- `/platformio.ini` - PlatformIO build environments for `esp32dev` and `front_mcu`.

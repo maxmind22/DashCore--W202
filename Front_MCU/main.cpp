@@ -19,6 +19,33 @@ const int tempPin = A0;
 const int fan = 5;
 const int ac = A1;
 #define inj_sense_pin 7
+
+// --- DFCO Configuration ---
+#define DFCO_ENGAGE_RPM 1500
+#define DFCO_DISENGAGE_RPM 1100
+#define DFCO_ENGAGE_DELAY_MS 1000
+#define DFCO_ENGINE_WARM_ADC 440
+#define DFCO_INJ_WINDOW_TICKS 8000  // 8000 ticks @ 0.5us/tick = 4000us
+
+// --- Failsafe ---
+#define HEARTBEAT_TIMEOUT_MS 1000
+#define REGULATOR_FAIL_THRESHOLD 3
+
+// --- Fan Control ---
+#define FAN_TEMP_MIN_ADC 690
+#define FAN_TEMP_MAX_ADC 730
+#define FAN_AC_MIN_ADC 50
+#define FAN_AC_MAX_ADC 500
+#define FAN_DUTY_MIN 20
+#define FAN_DUTY_MAX 255
+
+// --- Speed ---
+#define MAX_SPEED_KMH 220
+
+// --- CAN ---
+#define CAN_SEND_INTERVAL_MS 50
+#define CAN_SENSOR_READ_INTERVAL_MS 500
+
 uint8_t oil_level = 0;
 unsigned long last_check = 0;
 
@@ -33,7 +60,6 @@ volatile uint32_t last_inj_pulse_width = 0;
 // volatile uint32_t inj_now = 0;
 volatile uint16_t inj_end_ticks = 0;
 volatile bool inj_active = false;
-volatile bool inj_disable_pending = false;
 volatile bool injDisable = false;
 
 // These are only used in loop(), so they do NOT need to be volatile
@@ -155,7 +181,7 @@ void loop()
   unsigned long currentMicros = micros();
 
   //=================== Read Sensors & Control Fan (Every 500ms) ======================//
-  if (currentMillis - lastSensorTime >= 500)
+  if (currentMillis - lastSensorTime >= CAN_SENSOR_READ_INTERVAL_MS)
   {
     float temp_t = analogRead(tempPin);
     static bool temp_initialized = false; // Initialize averages on first run or use float-based exponential moving average
@@ -166,8 +192,8 @@ void loop()
     }
     else
       temp_avg = temp_avg + (temp_t - temp_avg) * 0.0625f; // 1/16 = 0.0625
-    int dutyCycle_temp = map((int)temp_avg, 690, 730, 20, 255);
-    dutyCycle_temp = constrain(dutyCycle_temp, 0, 255);
+    int dutyCycle_temp = map((int)temp_avg, FAN_TEMP_MIN_ADC, FAN_TEMP_MAX_ADC, FAN_DUTY_MIN, FAN_DUTY_MAX);
+    dutyCycle_temp = constrain(dutyCycle_temp, 0, FAN_DUTY_MAX);
 
     float acState_t = analogRead(ac);
     static bool ac_initialized = false;
@@ -178,8 +204,8 @@ void loop()
     }
     else
       acState_avg = acState_avg + (acState_t - acState_avg) * 0.125f; // 1/8 = 0.125
-    int dutyCycle_ac = map((int)acState_avg, 50, 500, 20, 255);
-    dutyCycle_ac = constrain(dutyCycle_ac, 0, 255);
+    int dutyCycle_ac = map((int)acState_avg, FAN_AC_MIN_ADC, FAN_AC_MAX_ADC, FAN_DUTY_MIN, FAN_DUTY_MAX);
+    dutyCycle_ac = constrain(dutyCycle_ac, 0, FAN_DUTY_MAX);
 
     int dutyCycle = max(dutyCycle_temp, dutyCycle_ac);
     analogWrite(fan, dutyCycle);
@@ -203,11 +229,11 @@ void loop()
   int th_Pos = digitalReadFast(th_pin);
   static unsigned long last_inj_check = 0;
 
-  if (rpm > 1500 && th_Pos == 1 && temp_avg > 440)
+  if (rpm > DFCO_ENGAGE_RPM && th_Pos == 1 && temp_avg > DFCO_ENGINE_WARM_ADC)
   {
     if (last_inj_check == 0)
       last_inj_check = currentMillis; // Start 1000ms timer
-    if (currentMillis - last_inj_check >= 1000 && injDisable == false)
+    if (currentMillis - last_inj_check >= DFCO_ENGAGE_DELAY_MS && injDisable == false)
     {
       bool inj_state = false;
       uint16_t inj_end_ticks_t = 0;
@@ -216,7 +242,7 @@ void loop()
       inj_state = inj_active;
       interrupts();
       uint16_t elapsed_ticks = (uint16_t)(TCNT1 - inj_end_ticks_t);
-      if (!inj_state && elapsed_ticks < 8000) // 8000 ticks @ 0.5us/tick = 4000us
+      if (!inj_state && elapsed_ticks < DFCO_INJ_WINDOW_TICKS) // 8000 ticks @ 0.5us/tick = 4000us
       {
         digitalWriteFast(inj_pin, HIGH);
         injDisable = true;
@@ -229,7 +255,7 @@ void loop()
   }
 
   // Deactivation is instant when throttle is released or RPM drops below hysteresis limit
-  if ((th_Pos == 0 || rpm < 1100) && injDisable == true)
+  if ((th_Pos == 0 || rpm < DFCO_DISENGAGE_RPM) && injDisable == true)
   {
     injDisable = false;
     digitalWriteFast(inj_pin, LOW);
@@ -261,7 +287,7 @@ void loop()
     {
       spd = 0;
     }
-    spd_s = (spd > 220) ? 220 : (uint16_t)spd;
+    spd_s = (spd > MAX_SPEED_KMH) ? MAX_SPEED_KMH : (uint16_t)spd;
 
     lastSpdCalculationTime = currentMillis;
   }
@@ -279,7 +305,7 @@ void loop()
   }
 
   // Failsafe timeout: if no message in 1000ms, assume dead
-  if (currentMillis - last_check > 1000)
+  if (currentMillis - last_check > HEARTBEAT_TIMEOUT_MS)
   {
     alive = 0;
   }
@@ -287,7 +313,7 @@ void loop()
   uint8_t injDisable_s = (uint8_t)injDisable;
   uint16_t rpm_s = (uint16_t)(rpm);
   //================= Send to Display MCU (Every 50ms) ===============//
-  if (currentMillis - lastCanSendTime >= 50)
+  if (currentMillis - lastCanSendTime >= CAN_SEND_INTERVAL_MS)
   {
     uint16_t temp_s = (uint16_t)temp_avg;
     canMsgTx.can_id = 0x02;
@@ -320,12 +346,16 @@ void loop()
   }
 
   //================= Regulator Failsafe ===============//
+  static uint8_t regFailCount = 0;
   if (alive != 100)
   {
-    digitalWriteFast(regulator_pin, LOW);
+    if (++regFailCount >= REGULATOR_FAIL_THRESHOLD) {
+      digitalWriteFast(regulator_pin, LOW);
+    }
   }
   else
   {
+    regFailCount = 0;
     digitalWriteFast(regulator_pin, HIGH);
   }
   // uint32_t runtime = micros() - currentMicros;
