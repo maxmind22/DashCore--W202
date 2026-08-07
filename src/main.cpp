@@ -1,1267 +1,14 @@
-// fuel low: 1326,  full: 21900 (vals)  volts: low: 0.17, full: 2.73
-//============= variables =============//
-
-#include <Adafruit_ADS1X15.h>
-#include <ESP_8_BIT_GFX.h>
-#include <Preferences.h>
-#include <SPI.h>
-#include <WiFi.h>
-#include <Wire.h>
-#include <digitalWriteFast.h>
-#include <driver/dac.h>
-#include <driver/rtc_io.h>
-#include <esp_bt.h>
-#include <esp_sleep.h>
-#include <esp_task_wdt.h>
-#include <math.h>
-#include <mcp2515.h>
-#include <soc/i2s_struct.h>
-
-// Forward declarations
-void recoverI2CBus(int sdaPin, int sclPin);
-
-// --- PUSH START PIN DEFINITIONS ---
-#define PIN_RELAY_ACC 16   // Terminal 15R (Accessory)
-#define PIN_RELAY_IGN 26   // Terminal 15 (POS2/Ignition)
-#define PIN_RELAY_START 13 // Terminal 50 (Starter)
-#define PIN_BTN_START 33   // Push Button (Active Low, Pull-Up, RTC-capable)
-#define PIN_INPUT_BRAKE                                                        \
-  36 // Brake Light Sensor (Active High, Opto-isolated, Input-only)
-#define PIN_WAKE_UNLOCK                                                        \
-  35 // Unlock Pulse Input (Active Low, Opto-isolated, RTC Input-only)
-#define PIN_5V_GATE 27 // Controls the 5V Relay (via ULN2003)
-#define PIN_3V3_DIGITAL_GATE                                                   \
-  17 // Powers the Level Shifter LV and digital 3.3V pull-ups
-#define PIN_RELAY_LOCK 32 // Controls the vehicle lock relay (Active High)
-#define buzzer_pin 4
-
-// --- SYSTEM STATES ---
-enum SystemState {
-  STATE_SLEEP,
-  STATE_STANDBY,
-  STATE_ACC,      // POS1 (ACC ON, IGN OFF)
-  STATE_IGNITION, // POS2 (ACC ON, IGN ON)
-  STATE_CRANKING,
-  STATE_RUNNING
-};
-
-RTC_DATA_ATTR SystemState currentState = STATE_SLEEP;
-RTC_DATA_ATTR bool vehicleLockDisabled =
-    false; // Persistent toggle to temporarily disable auto-locking
-RTC_DATA_ATTR bool engineStartDisabled =
-    false; // Persistent toggle to disable engine starting (lockdown mode)
-unsigned long standbyStartTime = 0;
-unsigned long lastButtonPressTime = 0;
-bool stoppedToAcc = false;
-volatile bool regulatorTaskRunning = true;
-
-// --- UNLOCK SIGNAL PULSE MONITORING (10-second window, burst evaluation) ---
-static unsigned long unlockFirstPulseTime = 0;
-static unsigned long unlockLastPulseTime = 0;
-static uint8_t unlockPulseCount = 0;
-static bool lastUnlockPinState = LOW;
-static unsigned long lastUnlockEdgeTime = 0;
-
-void playUnlockToggleTone(bool disabled) {
-  if (disabled) {
-    // Vehicle lock DISABLED: 2 short beeps
-    for (int i = 0; i < 2; i++) {
-      digitalWriteFast(buzzer_pin, HIGH);
-      delay(200);
-      digitalWriteFast(buzzer_pin, LOW);
-      delay(200);
-    }
-  } else {
-    // Vehicle lock RE-ENABLED: 1 long beep
-    digitalWriteFast(buzzer_pin, HIGH);
-    delay(300);
-    digitalWriteFast(buzzer_pin, LOW);
-  }
-}
-
-void playLockdownToggleTone(bool lockdownActive) {
-  if (lockdownActive) {
-    // Vehicle lockdown ACTIVE (Engine start disabled): 3 short beeps
-    for (int i = 0; i < 3; i++) {
-      digitalWriteFast(buzzer_pin, HIGH);
-      delay(200);
-      digitalWriteFast(buzzer_pin, LOW);
-      delay(200);
-    }
-  } else {
-    // Vehicle lockdown DEACTIVATED (Engine start allowed): 1 long beep
-    digitalWriteFast(buzzer_pin, HIGH);
-    delay(400);
-    digitalWriteFast(buzzer_pin, LOW);
-  }
-}
-
-void playAuthWarningTone() {
-  // Warning beep when attempting to start while locked down
-  for (int i = 0; i < 2; i++) {
-    digitalWriteFast(buzzer_pin, HIGH);
-    delay(100);
-    digitalWriteFast(buzzer_pin, LOW);
-    delay(100);
-  }
-}
-
-void processUnlockSignals() {
-  unsigned long now = millis();
-  bool currentUnlockPinState = digitalRead(PIN_WAKE_UNLOCK);
-
-  // Optocoupler output goes HIGH on unlock pulse (active high into ESP32)
-  if (currentUnlockPinState == HIGH && lastUnlockPinState == LOW) {
-    if (now - lastUnlockEdgeTime >= 150) // 150ms debounce
-    {
-      lastUnlockEdgeTime = now;
-      unlockLastPulseTime = now;
-
-      if (unlockPulseCount == 0) {
-        unlockFirstPulseTime = now;
-      }
-      unlockPulseCount++;
-    }
-  }
-  lastUnlockPinState = currentUnlockPinState;
-
-  // Evaluate the pulse burst after 1.5 seconds of inactivity
-  if (unlockPulseCount > 0 && (now - unlockLastPulseTime >= 1500)) {
-    unsigned long burstDuration = unlockLastPulseTime - unlockFirstPulseTime;
-    if (burstDuration <= 10000) {
-      if (unlockPulseCount == 3) {
-        vehicleLockDisabled = !vehicleLockDisabled;
-        playUnlockToggleTone(vehicleLockDisabled);
-      } else if (unlockPulseCount == 4) {
-        engineStartDisabled = !engineStartDisabled;
-        playLockdownToggleTone(engineStartDisabled);
-      }
-    }
-
-    // Reset for next burst
-    unlockPulseCount = 0;
-    unlockFirstPulseTime = 0;
-    unlockLastPulseTime = 0;
-  }
-}
-
-const unsigned long STANDBY_TIMEOUT_MS =
-    120000; // 2 Minute (Production sleep timeout)
-const unsigned long ACCESSORY_TIMEOUT_MS = 3600000; // 1 Hour (3600000 ms)
-const unsigned long BUTTON_COOLDOWN_MS = 500; // 500 millisecond button lockout
-const unsigned long BUTTON_LONGPRESS_RESET_MS =
-    3000; // 3 second long-press to reset trip data
-const unsigned long MAX_CRANK_TIME_MS = 5000; // 5 Seconds limit
-
-ESP_8_BIT_GFX tv(true, 8);
-
-#define coolant_level_pin 34
-#define FIELD_PIN 12
-#define field_relay_pin 14
-
-#define FUEL_X 5
-#define FUEL_Y 100
-#define FUEL_HEIGHT 100
-#define FUEL_WIDTH 15
-
-#define TEMP_X 240
-#define TEMP_Y 100
-#define TEMP_HEIGHT 100
-#define TEMP_TICKS_WIDTH 5
-#define TEMP_TICKS_HEIGHT 2
-#define TEMP_VALUE_TICK_WIDTH 11
-#define TEMP_VALUE_TICK_HEIGHT 6
-
-#define GAUGE_CX 128
-#define GAUGE_CY 165
-#define GAUGE_R 85 // 75
-#define WARNING_X 50
-#define WARNING_Y 20
-
-unsigned long lastTime = 0;
-unsigned long last_spd_correction = 0;
-unsigned long lastSpeedTime = 0;
-const int LOW_FUEL_LEVEL = 10;
-bool lowBlinkState = false;
-bool lowBlinkState2 = false;
-unsigned long lastBlinkTime = 0;
-unsigned long lastBlinkTime2 = 0;
-int fuel_in_temporary = 0;
-int filtered = 0;
-const int smoother = 3000;
-const int blinkInterval = 400; // ms
-const int blinkInterval2 = 120;
-float smoothVal = 0;
-int lastValue = 0;
-int raw = 0;
-int goodSamples = 0;
-int goodSamples2 = 0;
-int badSamples = 0;
-int badSamples2 = 0;
-unsigned long last_fuel_correction = 0;
-int temp_out = 0;
-int percent = 0;
-
-const float INJECTOR_FLOW_RATE_CC_MIN = 206.0f;
-const int NUM_INJECTORS = 4;
-const float FUEL_TANK_CAPACITY_LITERS = 62.0f;
-const uint32_t MAX_INJ_PULSE_PER_INTERVAL_US =
-    60000; // 50ms window + 20% margin; rejects corrupt CAN / ISR glitches
-#define RTC_TRIP_MAGIC_KEY 0xCAFE4567
-RTC_DATA_ATTR uint32_t rtc_trip_magic = 0;
-uint32_t accumulated_inj_time_us = 0;
-float live_inj_duty_cycle = 0.0f;
-RTC_DATA_ATTR float total_fuel_liters = 0.0f;
-RTC_DATA_ATTR float total_distance_km = 0.0f;
-RTC_DATA_ATTR float compounded_r_int = 0.0f;
-RTC_DATA_ATTR float total_fuel_saved_liters = 0.0f;
-float inst_val = 0.0f;
-float avg_l_100km = 0.0f;
-
-struct CalibrationPoint {
-  int rawValue;
-  float percent;
-};
-
-const int NUM_CALIBRATION_POINTS = 11;
-const CalibrationPoint calibrationTable[NUM_CALIBRATION_POINTS] = {
-    {1326, 0.0f},    // Height 0.0:   0.0% volume (empty)
-    {3383, 4.9f},    // Height 0.1:   4.9% volume
-    {5440, 10.5f},   // Height 0.2:  10.5% volume
-    {7498, 16.8f},   // Height 0.3:  16.8% volume
-    {9555, 23.9f},   // Height 0.4:  23.9% volume
-    {11613, 35.4f},  // Height 0.5:  35.4% volume
-    {13670, 50.2f},  // Height 0.6:  50.2% volume (middle bridge)
-    {15727, 64.4f},  // Height 0.7:  64.4% volume
-    {17785, 78.0f},  // Height 0.8:  78.0% volume
-    {19842, 90.5f},  // Height 0.9:  90.5% volume
-    {21900, 100.0f}, // Height 1.0: 100.0% volume (full)
-};
-
-float getFuelPercent(float rawValue) {
-  if (rawValue <= calibrationTable[0].rawValue)
-    return calibrationTable[0].percent;
-  if (rawValue >= calibrationTable[NUM_CALIBRATION_POINTS - 1].rawValue)
-    return calibrationTable[NUM_CALIBRATION_POINTS - 1].percent;
-
-  for (int i = 0; i < NUM_CALIBRATION_POINTS - 1; i++) {
-    if (rawValue >= calibrationTable[i].rawValue &&
-        rawValue <= calibrationTable[i + 1].rawValue) {
-      float x0 = calibrationTable[i].rawValue;
-      float x1 = calibrationTable[i + 1].rawValue;
-      float y0 = calibrationTable[i].percent;
-      float y1 = calibrationTable[i + 1].percent;
-      return y0 + (rawValue - x0) * (y1 - y0) / (x1 - x0);
-    }
-  }
-  return 0.0f;
-}
-
-//---------- display variables------------------//
-//-----------fuel
-int v = 11;
-int last_v = 0;
-int fill = 0;
-char fuel_color = 0x00;
-//------------ temp
-int t = 11;
-int last_t = 0;
-int fill2 = 0;
-
-volatile int spd = 0;
-volatile uint16_t spd_t = 0;
-uint16_t raw2;
-unsigned long lastPacketTime = 0;
-uint8_t oil_level_t = 0;
-int oil_level = 0;
-int last_clear = 0;
-unsigned long resetPrintTime = 0;
-//----------CAN bus variables------------------//
-struct can_frame canMsg;     // Used by loop() for RX only
-struct can_frame canMsgTx;   // Used by loop() for health heartbeat TX
-MCP2515 mcp2515(5, 8000000); // CS pin 5
-// SemaphoreHandle_t spiMutex;         // Protects MCP2515 (SPI) access across
-// cores
-//------------------- warning variables ------------------//
-unsigned int counter = 0;
-int last_spd = -1;
-bool coolant_level = false;
-int buzzer_state = 0;
-int spd_l = 0;
-bool fuel = false;
-bool cool = false;
-bool cool_run = true;
-bool speed_on = true;
-bool oil = false;
-bool hot = false;
-bool fuel_run = true;
-bool oil_on = true;
-bool temp_on = true;
-bool conn_on = true;
-int overspeed_state = 0;
-uint8_t injector_state = 0;
-bool inj_on = true;
-const int over_speed_on = 500;
-const int over_speed_off = 170;
-volatile uint8_t health_state =
-    0; // 0 =  charging malfunction, 100 = working fine
-int boot_chime = 0;
-uint16_t new_rpm = 0;
-
-Adafruit_ADS1115 adc;
-
-//------------------- regulator variables ------------------//
-portMUX_TYPE dataMux = portMUX_INITIALIZER_UNLOCKED;
-volatile float voltage_filtered = 13.6f;
-volatile float current_A_filtered = 0.0f; // filtered reading used for control
-TaskHandle_t regulatorTaskHandle;
-volatile int ads_fuel = 0;
-volatile int charge_state = 0;
-int chg = 0;
-int chg2 = 0;
-volatile uint32_t last_charge = 0;
-volatile uint32_t last_regulator_heartbeat =
-    0; // Updated by regulatorTask each iteration
-volatile uint16_t rpm = 0;
-int field_pwm = 0;
-uint16_t local_rpm = 0;
-// volatile UBaseType_t free_stack = 0;
-
-void regulatorTask(void *pvParameters) {
-  esp_task_wdt_add(NULL);
-  int consecutive_failures = 0;
-
-  const float voltage_alpha = 0.8f;               // 0.3
-  const float current_sensor_offset_mv = 2500.0f; // 2519
-  const float current_sensor_mV_per_A = 4.0f; // 4.0f; // mV per Amp (FS500E2T)
-  const float current_limit_upper = 20.000f;  // start pulling back above this
-  const float current_alpha = 0.2f;
-  // const float current_alpha = 0.3f; // previously 0.2
-  const float base_Kp = 30.000f;
-  const float base_Ki = 5.0f;
-  const float Kd = 0.0f;
-
-  static float integral_error = 0.0f;
-  static unsigned long last_regulator_time = 0;
-  static uint32_t last_fuel_time = 0;
-  static uint32_t last_stack_check = 0;
-
-  static float last_error = 0.0f;
-  const float v_target = 13.6000f; // Max voltage is 13.6V
-  SystemState local_state = STATE_SLEEP;
-  unsigned long runningStartTime = 0;
-  const unsigned long CHARGE_DELAY_MS =
-      2000; // 2 seconds delay before charging starts
-
-  for (;;) {
-    if (!regulatorTaskRunning) {
-      esp_task_wdt_delete(NULL);
-      ledcWrite(0, 0); // Ensure field coil off before deleting
-      portENTER_CRITICAL(&dataMux);
-      regulatorTaskHandle = NULL;
-      portEXIT_CRITICAL(&dataMux);
-      vTaskDelete(NULL); // Delete self safely
-    }
-    // uint32_t start = micros();
-
-    //-------------------- Voltage measurement
-    int voltage_raw = adc.readADC_SingleEnded(0);
-    int16_t current_raw_t = adc.readADC_SingleEnded(1);
-
-    // Glitch protection: only update if reading is sane
-    esp_task_wdt_reset(); // Reset WDT after potentially blocking I2C reads
-
-    if (voltage_raw > 0 && current_raw_t > 0) {
-      consecutive_failures = 0;
-      // GAIN_ONE is 0.125mV per bit (0.000125V)
-      // Pre-calculated voltage multiplier: 0.000125f * 4.33766718718175f
-      float voltage = voltage_raw * 0.0005422084f;
-      float new_v =
-          voltage_alpha * voltage + (1.0f - voltage_alpha) * voltage_filtered;
-
-      // Pre-calculated current multiplier: 0.000125V * 1000 = 0.125mV per bit
-      float current_mv = current_raw_t * 0.125f;
-      float current_raw =
-          (current_mv - current_sensor_offset_mv) / current_sensor_mV_per_A;
-      float new_c = current_alpha * current_raw +
-                    (1.0f - current_alpha) * current_A_filtered;
-
-      portENTER_CRITICAL(&dataMux);
-      voltage_filtered = new_v;
-      current_A_filtered = new_c;
-      portEXIT_CRITICAL(&dataMux);
-    } else {
-      consecutive_failures++;
-      if (consecutive_failures > 50) {
-        // I2C Bus Recovery
-        Wire.end();
-        vTaskDelay(pdMS_TO_TICKS(
-            10));              // Yield CPU properly instead of blocking delay()
-        recoverI2CBus(21, 22); // Toggle SCL to release any stuck I2C slave
-        Wire.begin();
-        Wire.setClock(100000);
-        Wire.setTimeOut(
-            20); // Ensure I2C transaction timeout is set in recovery
-        adc.begin();
-        adc.setGain(GAIN_ONE);
-        adc.setDataRate(RATE_ADS1115_250SPS);
-        consecutive_failures = 0;
-      }
-    }
-
-    // --- Evaluate charging system state ---
-    bool severe_failure = false;
-    bool sensor_error = (consecutive_failures > 5);
-
-    // 1. Emergency hard cut on severe overvoltage, overcurrent, or sensor
-    // failure
-    if (voltage_filtered >= v_target + 0.6f || current_A_filtered > 40.0f ||
-        sensor_error) {
-      digitalWriteFast(field_relay_pin, HIGH);
-      severe_failure = true;
-    } else
-      digitalWriteFast(field_relay_pin, LOW);
-
-    // 2. Logical malfunctions (regulator output doesn't match expected
-    // response)
-    // - High voltage/current despite commanding low field (runaway/short)
-    // - Low voltage and no current despite commanding high field (open
-    // circuit/broken belt) We use <= 0.5A instead of 0.0A to account for small
-    // ADC noise around zero
-    portENTER_CRITICAL(&dataMux);
-    local_rpm = rpm;
-    local_state = currentState;
-    portEXIT_CRITICAL(&dataMux);
-
-    bool logical_failure =
-        ((voltage_filtered >= v_target + 0.4f || current_A_filtered >= 40.0f) ||
-         (voltage_filtered <= v_target - 0.2f && current_A_filtered <= 0.0f &&
-          (local_state == STATE_RUNNING || local_rpm > 200)));
-
-    // Consolidate state hierarchy
-    int next_charge_state = 0;
-    if (severe_failure || logical_failure) {
-      next_charge_state = 1; // charging malfunction warning
-    } else if (voltage_filtered <
-               v_target -
-                   1.4) // If voltage is very low while engine is running.
-    {
-      next_charge_state = 2; // battery low warning
-    } else {
-      next_charge_state = 0; // normal
-    }
-
-    portENTER_CRITICAL(&dataMux);
-    charge_state = next_charge_state;
-    if (charge_state == 0) {
-      last_charge = millis();
-    }
-    portEXIT_CRITICAL(&dataMux);
-    // --- Target settings ---
-
-    // Calculate dt (time elapsed in seconds) to make PID immune to loop delays
-    uint32_t current_micros = micros();
-    float dt = (current_micros - last_regulator_time) / 1000000.0f;
-    if (last_regulator_time == 0 || dt > 0.1f || dt <= 0.0f) {
-      dt = 0.020f; // Default to 20ms on first run or severe lag (typical loop
-                   // time)
-    }
-    last_regulator_time = current_micros;
-
-    // 1. Seamless CC/CV Error
-    // We increase PWM until we hit EITHER 13.6V or our 20A limit.
-    // The most restrictive target (smallest error) commands the loop
-    // seamlessly. bool over_target = false;
-    float err_v = (v_target - voltage_filtered) * 100;
-    float err_i = (current_limit_upper - current_A_filtered) * 10;
-    float err = (err_v < err_i) ? err_v : err_i;
-
-    float p_term = base_Kp * err;
-
-    if (isfinite(err) && isfinite(dt)) {
-      integral_error += (err * dt);
-    }
-
-    if (!isfinite(integral_error))
-      integral_error = 0.0f;
-    if (integral_error > 1023.0f)
-      integral_error = 1023.0f;
-    if (integral_error < 0.0f)
-      integral_error = 0.0f;
-
-    float i_term = base_Ki * integral_error;
-    last_error = err;
-
-    int voltage_pwm = constrain((int)(p_term + i_term), 0, 1023);
-
-    // 2. Absolute Hard Voltage Ceiling (Safety Override)
-    // We already have CC/CV in the PID above. These overrides are just to
-    // provide an extra push if we cross the absolute limits, but they must
-    // not be so aggressive that they cause oscillation.
-    int safety_pwm = voltage_pwm;
-    // Extra pullback if overvoltage occurs (Safety backup for PID)
-    if (voltage_filtered >= v_target + 0.2f) {
-      float ov_err = ((v_target + 0.2f) - voltage_filtered) * 100;
-      safety_pwm = safety_pwm + (int)(200.0f * ov_err);
-    }
-    // Extra pullback if overcurrent occurs (Safety backup for PID)
-    if (current_A_filtered >= current_limit_upper + 10.0f) {
-      float oi_err = ((current_limit_upper + 10.0f) - current_A_filtered) * 10;
-      safety_pwm = safety_pwm + (int)(200.0f * oi_err); // Mild push-back
-    }
-
-    // Reset running start time if engine is not running or not in RUNNING state
-    if (local_state != STATE_RUNNING) {
-      runningStartTime = 0;
-    } else if (runningStartTime == 0) {
-      runningStartTime = millis();
-    }
-
-    bool delay_active = (runningStartTime != 0 &&
-                         (millis() - runningStartTime < CHARGE_DELAY_MS));
-
-    // Force field coil off if engine is not running (neither STATE_RUNNING nor
-    // rpm > 200), during start delay, or sensor error occurs
-    if (!(local_state == STATE_RUNNING || local_rpm > 200) || delay_active ||
-        sensor_error) {
-      field_pwm = 0;
-      integral_error = 0.0f; // Reset integrator
-    } else {
-      field_pwm = constrain(safety_pwm, 0, 1023);
-    }
-
-    ledcWrite(0, field_pwm);
-
-    // --- Auxiliary Sensors (Not used for regulator control, but read here to
-    // avoid I2C contention) ---
-    if (current_micros - last_fuel_time >= 100000) {
-      int new_fuel = adc.readADC_SingleEnded(2);
-      if (new_fuel >= 0) // Only update on valid I2C read
-      {
-        portENTER_CRITICAL(&dataMux);
-        ads_fuel = new_fuel;
-        portEXIT_CRITICAL(&dataMux);
-      }
-      last_fuel_time = current_micros;
-    }
-
-    // --- Stack monitoring ---
-    // if (current_micros - last_stack_check >= 1000000) // Every 1 second
-    // {
-    //   free_stack = uxTaskGetStackHighWaterMark(NULL);
-    //   last_stack_check = current_micros;
-    // }
-    // task_duration = micros() - start;
-    vTaskDelay(pdMS_TO_TICKS(
-        20)); // Use vTaskDelay instead of vTaskDelayUntil to always yield
-    last_regulator_heartbeat =
-        millis(); // Signal Core 1 that regulator is alive
-    esp_task_wdt_reset();
-  }
-}
-
-//================== draw static values once ==============//
-void drawStaticGauge() {
-  tv.drawRect(FUEL_X, FUEL_Y, FUEL_WIDTH, FUEL_HEIGHT, 0xFF);
-}
-void warnings(int percent, int temp_out, int spd, int coolant_level,
-              int oil_level, unsigned long now) {
-  buzzer_state = 0;
-  static int priority = 0;
-  //------------------------------------------
-  if (percent <= LOW_FUEL_LEVEL && lowBlinkState && fuel_run) {
-    // -------- LOW FUEL warning --------//
-
-    tv.setCursor(FUEL_X, FUEL_Y + FUEL_HEIGHT + 3);
-    tv.setTextColor(0xFF);
-    tv.setTextSize(2);
-    tv.print("LOW");
-    tv.setTextSize(1);
-    fuel_run = false;
-    fuel = true;
-  } else if (!lowBlinkState && fuel) {
-    // tv.fillRect(FUEL_X + 20, FUEL_Y - 15 + FUEL_HEIGHT, 36, 16, 0x00);
-    tv.fillRect(FUEL_X, FUEL_Y + FUEL_HEIGHT + 3, 36, 16, 0x00);
-    fuel = 0;
-  }
-  //------------------------------------------
-  if (!coolant_level && lowBlinkState && priority == 0) {
-    if (cool_run) {
-      tv.setCursor(WARNING_X + 40, WARNING_Y);
-      tv.setTextColor(0xFF);
-      tv.print("COOLANT LOW");
-      cool_run = false;
-      cool = true;
-    }
-    buzzer_state = 1;
-  } else if (!lowBlinkState && cool == true) {
-    tv.fillRect(WARNING_X + 40, WARNING_Y, 66, 8, 0x00);
-    cool = false;
-  }
-
-  //--------------------------------------------
-  if (overspeed_state == 0 &&
-      spd >= 58) { // -------- over speed warning --------//
-    overspeed_state = 1;
-    counter = 0;
-  }
-
-  if (overspeed_state == 1) {
-    if (speed_on) {
-      tv.setCursor(WARNING_X + 30, WARNING_Y + 10);
-      tv.setTextColor(0xFF);
-      tv.print("OVER SPEED !");
-      speed_on = false;
-    }
-    priority = 1;
-
-    if (lowBlinkState2) {
-      buzzer_state = 1;
-    }
-    if (counter > 3) {
-      overspeed_state = 2;
-    }
-  } else if (overspeed_state == 2 || overspeed_state == 0) {
-    if (!speed_on) {
-      tv.fillRect(WARNING_X + 30, WARNING_Y + 10, 72, 8, 0x00);
-      speed_on = true;
-      priority = 0;
-    }
-    if (spd < 58) {
-      overspeed_state = 0;
-    }
-  }
-
-  //------------------------------------------------
-  if (oil_level > 0 && lowBlinkState && priority == 0) {
-    if (oil_on) {
-      tv.setCursor(WARNING_X + 30, WARNING_Y + 18);
-      tv.setTextColor(0xFF);
-      tv.print("LOW ENGINE OIL");
-      oil = true;
-      oil_on = false;
-    }
-    buzzer_state = 1;
-  } else if (!lowBlinkState && oil == true) {
-    tv.fillRect(WARNING_X + 30, WARNING_Y + 18, 84, 8, 0x00);
-    oil = false;
-  }
-  //------------------------------------------------
-  if (temp_out >= 96 && lowBlinkState && priority == 0) {
-    if (temp_on) {
-      tv.setCursor(WARNING_X + 30, WARNING_Y + 26);
-      tv.setTextColor(0xFF);
-      tv.print("ENGINE OVERHEAT");
-      hot = true;
-      temp_on = false;
-    }
-
-    buzzer_state = 1;
-  } else if (!lowBlinkState && hot == true) {
-    tv.fillRect(WARNING_X + 30, WARNING_Y + 26, 90, 8,
-                0x00); // clear old warning
-    hot = false;
-  }
-  if (now - lastPacketTime > 5000 &&
-      conn_on) { // -----connection check--------------
-    tv.setCursor(WARNING_X, WARNING_Y + 34);
-    tv.setTextColor(0xFF);
-    tv.print("Front MCU Diconnected");
-    conn_on = false;
-    spd = 0;
-  } else if (!(now - lastPacketTime > 5000) && conn_on == false) {
-    tv.fillRect(WARNING_X, WARNING_Y + 34, 126, 8, 0x00);
-    conn_on = true;
-  }
-  if (injector_state == 1 && inj_on == true) {
-    tv.fillCircle(10, 25, 5, 0x1C);
-    inj_on = false;
-  } else if (inj_on == false && injector_state == 0) {
-    tv.fillCircle(10, 25, 5, 0x00);
-    inj_on = true;
-  }
-  portENTER_CRITICAL(&dataMux);
-  int local_charge_state = charge_state;
-  uint32_t local_last_charge = last_charge;
-  portEXIT_CRITICAL(&dataMux);
-
-  if (local_charge_state == 1 && lowBlinkState &&
-      now - local_last_charge > 20000 && priority == 0) {
-    if (chg == 0) {
-      tv.setCursor(WARNING_X + 10, WARNING_Y + 10);
-      tv.setTextColor(0xFF);
-      tv.print("CHARGING SYSTEM FAIL !");
-      chg = 1;
-    }
-    buzzer_state = 1;
-  } else if (!lowBlinkState && chg == 1) {
-    tv.fillRect(WARNING_X + 10, WARNING_Y + 10, 140, 8, 0x00);
-    chg = 0;
-  }
-  if (local_charge_state == 2 && lowBlinkState &&
-      now - local_last_charge > 10000 && priority == 0 && local_rpm > 50) {
-    if (chg2 == 0) {
-      tv.setCursor(WARNING_X + 50, WARNING_Y + 30);
-      tv.setTextColor(0xFF);
-      tv.print("BATTERY LOW !");
-      chg2 = 1;
-    }
-    buzzer_state = 1;
-  }
-
-  // -------- Vehicle Lockdown / Authentication Warning --------//
-  static bool authWarningDrawn = false;
-  if (engineStartDisabled) {
-    if (lowBlinkState) {
-      tv.setCursor(WARNING_X + 15, WARNING_Y + 50);
-      tv.setTextColor(0xFF);
-      tv.setTextSize(1);
-      tv.print("AUTH ERROR: ENGINE LOCKED");
-      authWarningDrawn = true;
-    } else if (authWarningDrawn) {
-      tv.fillRect(WARNING_X + 15, WARNING_Y + 50, 160, 8, 0x00);
-    }
-  } else if (authWarningDrawn) {
-    tv.fillRect(WARNING_X + 15, WARNING_Y + 50, 160, 8, 0x00);
-    authWarningDrawn = false;
-  }
-
-  //---------- ring boot chime  ---------
-  if (now >= 1000 && boot_chime <= 70) {
-    boot_chime++;
-    buzzer_state = 1;
-  }
-  if (buzzer_state == 1) {
-    digitalWriteFast(buzzer_pin, HIGH);
-  } else {
-    digitalWriteFast(buzzer_pin, LOW);
-  }
-}
-
-//=================== CAN Diagnostics ==================//
-void checkCanErrors() {
-  uint8_t errFlags = mcp2515.getErrorFlags();
-  if (errFlags != 0) {
-    // Clear overflow flags to resume reception
-    if (errFlags & (MCP2515::EFLG_RX0OVR | MCP2515::EFLG_RX1OVR)) {
-      mcp2515.clearRXnOVR();
-    }
-
-    // Only completely reset the chip if it goes into Bus-Off (fatal state).
-    // Do NOT interfere if it's just in Error Passive (TXEP/RXEP); it will
-    // self-recover.
-    if (errFlags & MCP2515::EFLG_TXBO) {
-      mcp2515.reset();
-      mcp2515.setBitrate(CAN_500KBPS, MCP_8MHZ);
-      mcp2515.setNormalOneShotMode();
-    }
-  }
-}
-
-// --- PUSH START HELPER FUNCTIONS ---
-void setRelays(bool acc, bool ign, bool start) {
-  digitalWrite(PIN_RELAY_ACC, acc ? HIGH : LOW);
-  digitalWrite(PIN_RELAY_IGN, ign ? HIGH : LOW);
-  digitalWrite(PIN_RELAY_START, start ? HIGH : LOW);
-}
-
-void resetFuelTripData() {
-  total_fuel_liters = 0.0f;
-  total_distance_km = 0.0f;
-  total_fuel_saved_liters = 0.0f;
-  avg_l_100km = 0.0f;
-  inst_val = 0.0f;
-
-  Preferences prefs;
-  prefs.begin("trip_data", false);
-  prefs.putFloat("fuel", 0.0f);
-  prefs.putFloat("dist", 0.0f);
-  prefs.putFloat("saved", 0.0f);
-  prefs.end();
-  tv.setCursor(WARNING_X + 40, WARNING_Y + 50);
-  tv.setTextColor(0xFF);
-  tv.print("RESET DONE!");
-  resetPrintTime = millis();
-}
-
-void startTVDisplay() {
-  dac_output_enable(DAC_CHANNEL_1);
-  dac_i2s_enable();
-  I2S0.conf.tx_start = 1;
-  I2S0.out_link.start = 1;
-}
-
-void stopTVDisplay() {
-  tv.waitForFrame();       // Let any in-flight DMA frame complete first
-  I2S0.out_link.start = 0; // Stop DMA linked list (must stop before tx)
-  delay(1);
-  I2S0.conf.tx_start = 0; // Stop I2S TX
-  delay(1);
-  dac_output_disable(DAC_CHANNEL_1);
-  dac_i2s_disable();
-}
-
-void sleepCANController() { mcp2515.setSleepMode(); }
-
-void wakeupCANController() {
-  mcp2515.reset();
-  mcp2515.setBitrate(CAN_500KBPS, MCP_8MHZ);
-  mcp2515.setNormalOneShotMode();
-}
-
-void enterPowerDownSleep() {
-  // Save trip stats to NVS Flash memory right before shutdown
-  Preferences prefs;
-  prefs.begin("trip_data", false);
-  prefs.putFloat("fuel", total_fuel_liters);
-  prefs.putFloat("dist", total_distance_km);
-  prefs.putFloat("r_int", compounded_r_int);
-  prefs.putFloat("saved", total_fuel_saved_liters);
-  prefs.end();
-
-  // --- ORDERED SHUTDOWN: Stop everything safely before deep sleep ---
-
-  // 1. Safely stop the regulator FreeRTOS task first (running on Core 0, does
-  // I2C)
-  //    Keep the original 1s WDT alive by resetting it in the wait loop.
-  if (regulatorTaskHandle != NULL) {
-    regulatorTaskRunning = false;
-    for (int timeout = 0; timeout < 100; timeout++) {
-      esp_task_wdt_reset(); // Keep current WDT alive while waiting for task
-                            // exit
-      taskYIELD();
-      delay(5);
-      if (regulatorTaskHandle == NULL)
-        break;
-    }
-    // Use critical section to safely check-and-delete (prevents race with
-    // self-deleting task)
-    portENTER_CRITICAL(&dataMux);
-    TaskHandle_t h = regulatorTaskHandle;
-    regulatorTaskHandle = NULL;
-    portEXIT_CRITICAL(&dataMux);
-    if (h != NULL) {
-      vTaskDelete(h);
-    }
-  }
-
-  // 2. Now that regulatorTask is stopped, extend WDT to 5s for remaining
-  // shutdown
-  esp_task_wdt_delete(NULL);
-  esp_task_wdt_deinit();
-  esp_task_wdt_init(5, true); // 5s timeout with panic=true
-  esp_task_wdt_add(NULL);
-
-  // 3. Turn off field coil PWM and detach LEDC
-  ledcWrite(0, 0);
-  ledcDetachPin(FIELD_PIN);
-
-  // 4. Stop TV display (I2S DMA) — must stop before deep sleep or DMA crash
-  stopTVDisplay();
-  delay(10); // Let DMA finish any in-flight transfer
-
-  // 5. Put MCP2515 CAN controller to sleep (SPI device)
-  sleepCANController();
-
-  // 6. Close communication buses
-  Wire.end();
-  SPI.end(); // Stop SPI bus to release SCK, MOSI, MISO
-  esp_task_wdt_reset();
-
-  // 6.1 Put communication pins into high-impedance (floating) mode
-  // This prevents leakage through level-shifter pull-ups
-  pinMode(21, INPUT); // SDA
-  pinMode(22, INPUT); // SCL
-  pinMode(5, INPUT);  // CS (CAN)
-  pinMode(18, INPUT); // SCK
-  pinMode(19, INPUT); // MISO
-  pinMode(23, INPUT); // MOSI
-
-  // 7. Turn off and de-energize all relays and peripherals
-  setRelays(false, false, false);
-  digitalWrite(PIN_5V_GATE, LOW); // Disable 5V Relay
-  pinMode(PIN_5V_GATE, INPUT);    // Float pin
-  digitalWrite(field_relay_pin, LOW);
-  pinMode(field_relay_pin, INPUT); // Float pin
-  digitalWrite(buzzer_pin, LOW);
-
-  // Float the relay control pins to prevent sleep leakage
-  pinMode(PIN_RELAY_ACC, INPUT);
-  pinMode(PIN_RELAY_IGN, INPUT);
-  pinMode(PIN_RELAY_START, INPUT);
-
-  // Allow relay switching and vehicle state to settle completely (prevent
-  // transient unlock)
-  delay(200);
-
-  // 7.1 Activate vehicle locking relay briefly to ensure it remains locked
-  // after sleep (if locking is not temporarily disabled)
-  if (!vehicleLockDisabled) {
-    pinMode(PIN_RELAY_LOCK, OUTPUT);
-    digitalWrite(PIN_RELAY_LOCK, HIGH); // Ground the lock wire via relay
-    delay(200);                         // Ground pulse duration of 200ms
-    digitalWrite(PIN_RELAY_LOCK, LOW);
-    pinMode(PIN_RELAY_LOCK, INPUT); // Float pin to prevent sleep leakage
-  }
-
-  // 8. Turn off the 3.3V digital gate (must happen after locking relay is
-  // pulsed)
-  digitalWrite(PIN_3V3_DIGITAL_GATE, LOW); // Cut 3.3V pull-ups/shifter
-  pinMode(PIN_3V3_DIGITAL_GATE, INPUT);    // Float pin
-
-  // 10. Disarm WDT before deep sleep
-  esp_task_wdt_delete(NULL);
-  esp_task_wdt_deinit();
-
-  // 11. Configure RTC wakeup: Wake on HIGH because unlock pulses to 0V (opto
-  // output goes HIGH)
-  esp_sleep_enable_ext1_wakeup(1ULL << PIN_WAKE_UNLOCK,
-                               ESP_EXT1_WAKEUP_ANY_HIGH);
-
-  // 12. Enter deep sleep — CPU halts here, wakes up via reset
-  currentState = STATE_SLEEP;
-  esp_deep_sleep_start();
-}
-
-void setupPushStartPins() {
-  pinMode(PIN_RELAY_ACC, OUTPUT);
-  pinMode(PIN_RELAY_IGN, OUTPUT);
-  pinMode(PIN_RELAY_START, OUTPUT);
-  setRelays(false, false, false);
-
-  pinMode(PIN_RELAY_LOCK, OUTPUT);
-  digitalWrite(PIN_RELAY_LOCK, LOW);
-
-  pinMode(PIN_BTN_START, INPUT);
-  pinMode(PIN_INPUT_BRAKE, INPUT);
-  pinMode(PIN_WAKE_UNLOCK, INPUT);
-}
-
-void processPushStart() {
-  unsigned long now = millis();
-
-  // Continuously monitor unlock pulses while engine is not running.
-  if (currentState == !STATE_RUNNING) {
-    processUnlockSignals();
-  }
-
-  // Edge detection for push button
-  static bool lastBtnState = HIGH;
-  bool currentBtnState = digitalRead(PIN_BTN_START);
-  bool btnPressed = (currentBtnState == LOW && lastBtnState == HIGH);
-  lastBtnState = currentBtnState;
-
-  bool brakeHeld = (digitalRead(PIN_INPUT_BRAKE) == LOW);
-  int currentRpm = rpm;
-
-  static unsigned long buttonDownTime = 0;
-  static bool buttonLongPressHandled = false;
-
-  if (currentBtnState == LOW) {
-    if (buttonDownTime == 0) {
-      buttonDownTime = now;
-      buttonLongPressHandled = false;
-    } else if (!buttonLongPressHandled &&
-               now - buttonDownTime >= BUTTON_LONGPRESS_RESET_MS) {
-      buttonLongPressHandled = true;
-      if (currentState != STATE_RUNNING && currentState != STATE_CRANKING &&
-          spd == 0) {
-
-        lastButtonPressTime = now; // avoid immediate short-press transition
-        resetFuelTripData();
-      }
-    }
-  } else {
-    buttonDownTime = 0;
-    buttonLongPressHandled = false;
-  }
-
-  if (btnPressed) {
-    standbyStartTime = now;
-  }
-
-  // Boot-lock: Lock 2 minute after booting when in ACC or IGN state
-  static bool bootLockDone = false;
-  if (!bootLockDone &&
-      (currentState == STATE_ACC || currentState == STATE_IGNITION)) {
-    if (now >= 120000) // 2 minutes after booting
-    {
-      if (!vehicleLockDisabled) {
-        pinMode(PIN_RELAY_LOCK, OUTPUT);
-        digitalWrite(PIN_RELAY_LOCK, HIGH); // Ground the lock wire via relay
-        delay(200);                         // 200ms grounding pulse
-        digitalWrite(PIN_RELAY_LOCK, LOW);
-        pinMode(PIN_RELAY_LOCK, INPUT); // Float pin to save power
-      }
-      bootLockDone = true;
-    }
-  }
-
-  // Drive-lock: Lock after 10 sec every time the vehicle is started & moving
-  static bool driveLockTriggered = false;
-  static bool driveLockDone = false;
-  static unsigned long driveLockTime = 0;
-
-  if (currentState == STATE_RUNNING) {
-    if (spd > 0 && !driveLockTriggered) {
-      driveLockTriggered = true;
-      driveLockTime = now;
-    }
-
-    if (driveLockTriggered && !driveLockDone &&
-        (now - driveLockTime >= 10000)) {
-      if (!vehicleLockDisabled) {
-        pinMode(PIN_RELAY_LOCK, OUTPUT);
-        digitalWrite(PIN_RELAY_LOCK, HIGH); // Ground the lock wire via relay
-        delay(200);                         // 200ms grounding pulse
-        digitalWrite(PIN_RELAY_LOCK, LOW);
-        pinMode(PIN_RELAY_LOCK, INPUT); // Float pin to save power
-      }
-      driveLockDone = true;
-    }
-  } else {
-    // Reset drive-lock flags when not in running state
-    driveLockTriggered = false;
-    driveLockDone = false;
-  }
-
-  // Handle sleep timeouts when system is in Standby (OFF) or ACC/Ignition
-  if (currentState == STATE_STANDBY) {
-    if (now - standbyStartTime > STANDBY_TIMEOUT_MS) {
-      enterPowerDownSleep();
-      return;
-    }
-  } else if (currentState == STATE_ACC || currentState == STATE_IGNITION) {
-    if (now - standbyStartTime > ACCESSORY_TIMEOUT_MS) {
-      enterPowerDownSleep();
-      return;
-    }
-  }
-
-  // Handle state transitions
-  switch (currentState) {
-  case STATE_SLEEP:
-    // Woken up by deep sleep reset (unlock pulse) -> Authenticated
-    currentState = STATE_STANDBY;
-    standbyStartTime = now;
-    lastButtonPressTime = 0; // Clear cooldown on first boot
-
-    wakeupCANController();
-    startTVDisplay();
-    if (regulatorTaskHandle != NULL) {
-      vTaskResume(regulatorTaskHandle);
-    }
-    break;
-
-  case STATE_STANDBY: {
-    // Serial.println("OFF");
-    // Relays: ACC OFF, IGN OFF, START OFF
-    static bool standbyBrakeCheckPending = false;
-    static unsigned long standbyBrakeCheckTime = 0;
-
-    if (standbyBrakeCheckPending) {
-      setRelays(true, true, false); // Turn on ACC & IGN to power brake circuit
-      if (now - standbyBrakeCheckTime >= 50) {
-        standbyBrakeCheckPending = false;
-        bool brakeIsHeldNow = (digitalRead(PIN_INPUT_BRAKE) == LOW);
-        if (brakeIsHeldNow) {
-          if (!engineStartDisabled) {
-            currentState = STATE_CRANKING;
-          } else {
-            // Serial.println("[LOCKDOWN] Engine start blocked! PLZ
-            // AUTHENTICATE");
-            playAuthWarningTone();
-            currentState = STATE_STANDBY;
-          }
-        } else {
-          currentState =
-              STATE_ACC; // 1st press (without brake) goes to ACC (POS1)
-          standbyStartTime = now; // Reset 2-min timeout
-          stoppedToAcc = false;   // Reset flag as we didn't stop from a running
-                                  // engine to ACC
-        }
-      }
-    } else {
-      setRelays(false, false, false);
-
-      if (btnPressed && (now - lastButtonPressTime >= BUTTON_COOLDOWN_MS)) {
-        lastButtonPressTime = now;
-        // Temporarily turn on ACC & IGN to power the brake switch circuit
-        setRelays(true, true, false);
-        standbyBrakeCheckPending = true;
-        standbyBrakeCheckTime = now;
-      }
-    }
-    break;
-  }
-
-  case STATE_ACC: {
-    // Serial.println("ACC");
-    // Relays: ACC ON, IGN OFF, START OFF (POS1)
-    // Non-blocking brake check: after button press, IGN turns on for 50ms
-    // to let relay/optocoupler settle, then brake is read without blocking the
-    // main loop
-    static bool accBrakeCheckPending = false;
-    static unsigned long accBrakeCheckTime = 0;
-
-    if (accBrakeCheckPending) {
-      setRelays(true, true, false); // Keep IGN on during settle wait
-      if (now - accBrakeCheckTime >= 50) {
-        accBrakeCheckPending = false;
-        bool brakeIsHeldNow = (digitalRead(PIN_INPUT_BRAKE) == LOW);
-        if (brakeIsHeldNow) {
-          if (!engineStartDisabled) {
-            currentState = STATE_CRANKING;
-            stoppedToAcc = false;
-          } else {
-            Serial.println("[LOCKDOWN] Engine start blocked! PLZ AUTHENTICATE");
-            playAuthWarningTone();
-            currentState = STATE_ACC;
-          }
-        } else {
-          if (stoppedToAcc) {
-            currentState = STATE_STANDBY; // Go to OFF (standby)
-            stoppedToAcc = false;
-          } else {
-            currentState = STATE_IGNITION; // 2nd press (without brake) goes to
-                                           // POS2 (IGNITION)
-          }
-          standbyStartTime = now; // Reset 2-min timeout
-        }
-      }
-    } else {
-      setRelays(true, false, false);
-
-      if (btnPressed && (now - lastButtonPressTime >= BUTTON_COOLDOWN_MS)) {
-        lastButtonPressTime = now;
-        // Temporarily turn on IGN to power the brake switch circuit
-        setRelays(true, true, false);
-        accBrakeCheckPending = true;
-        accBrakeCheckTime = now;
-      }
-    }
-    break;
-  }
-
-  case STATE_IGNITION:
-    // Relays: ACC ON, IGN ON, START OFF (POS2)
-    setRelays(true, true, false);
-
-    if (btnPressed && (now - lastButtonPressTime >= BUTTON_COOLDOWN_MS)) {
-      lastButtonPressTime = now;
-      if (brakeHeld) {
-        if (!engineStartDisabled) {
-          currentState = STATE_CRANKING;
-        } else {
-          playAuthWarningTone();
-        }
-      } else {
-        currentState =
-            STATE_STANDBY; // 3rd press (without brake) goes to OFF (STANDBY)
-        standbyStartTime = now; // Reset 2-min timeout
-      }
-    }
-    break;
-
-  case STATE_CRANKING:
-    if (engineStartDisabled) {
-      setRelays(true, false, false); // Abort cranking immediately
-      currentState = STATE_ACC;
-      playAuthWarningTone();
-      break;
-    }
-    // Non-blocking stage machine for cranking sequence
-    static enum { CRANK_PRIME, CRANK_SOLENOID } crankStage = CRANK_PRIME;
-    static unsigned long crankStageTime = 0;
-
-    if (crankStage == CRANK_PRIME) {
-      // Serial.println("prime");
-      // Step 1: Go to POS2 (ACC & IGN ON) for fuel pump prime (50ms)
-      setRelays(true, true, false);
-      if (crankStageTime == 0) {
-        crankStageTime = now;
-      }
-      if (now - crankStageTime >= 50) {
-        crankStage = CRANK_SOLENOID;
-        crankStageTime = now; // Reset timer for max crank limit
-      }
-    } else if (crankStage == CRANK_SOLENOID) {
-      // Step 2: Engage starter solenoid (ACC ON, IGN ON, START ON)
-      setRelays(true, true, true);
-
-      if (currentRpm > 400) {
-        // Engine started successfully
-        currentState = STATE_RUNNING;
-        setRelays(true, true, false); // Disengage starter, keep ACC/IGN on
-        crankStage = CRANK_PRIME;     // Reset stages
-        crankStageTime = 0;
-      } else if (now - crankStageTime > MAX_CRANK_TIME_MS) {
-        // Cranking failed or timed out (5s safety cutoff)
-        setRelays(true, false, false); // Disengage starter to ACC for another
-                                       // try (w202 prevent double starting)
-        currentState = STATE_ACC;
-        standbyStartTime = now; // Reset 2-min timeout
-        crankStage = CRANK_PRIME;
-        crankStageTime = 0;
-        stoppedToAcc = false; // Reset flag on crank timeout
-      }
-    }
-    break;
-
-  case STATE_RUNNING:
-    // Relays: ACC ON, IGN ON, START OFF (Engine running)
-    setRelays(true, true, false);
-
-    // Handle Engine Stall Safety
-    if (currentRpm == 0) {
-      currentState = STATE_ACC;
-      standbyStartTime = now; // Start 2-minute sleep timeout
-      stoppedToAcc = false;   // Reset flag on engine stall
-    }
-
-    // Handle Engine Stop Button Press (Only if vehicle is stationary)
-    if (btnPressed && (now - lastButtonPressTime >= BUTTON_COOLDOWN_MS)) {
-      if (spd == 0) { // Safety check: speed must be zero
-        lastButtonPressTime = now;
-        bool brakeHeld = (digitalRead(PIN_INPUT_BRAKE) == LOW);
-        if (brakeHeld) {
-          setRelays(true, false, false); // Keep ACC ON, kill IGN and START
-          currentState = STATE_ACC;      // Go to ACC position
-          stoppedToAcc = true; // Mark that we just stopped the engine to ACC
-        } else {
-          setRelays(false, false, false); // Kill ACC, IGN, and START
-          currentState = STATE_STANDBY;   // Go to Standby (OFF)
-          stoppedToAcc = false;           // Reset flag on stop to standby
-        }
-        standbyStartTime = now; // Start sleep timeout timer
-      }
-    }
-    break;
-  }
-}
-
-void recoverI2CBus(int sdaPin, int sclPin) {
-  pinMode(sdaPin, INPUT_PULLUP);
-  pinMode(sclPin, OUTPUT);
-  digitalWrite(sclPin, HIGH);
-  delay(1);
-
-  // Toggle SCL if SDA is held low by a stuck slave device
-  if (digitalRead(sdaPin) == LOW) {
-    for (int i = 0; i < 9; i++) {
-      digitalWrite(sclPin, LOW);
-      delayMicroseconds(5);
-      digitalWrite(sclPin, HIGH);
-      delayMicroseconds(5);
-      if (digitalRead(sdaPin) == HIGH) {
-        break; // Device released the bus
-      }
-    }
-  }
-}
+#include "config.h"
+#include "globals.h"
+#include "display.h"
+#include "regulator.h"
+#include "pushstart.h"
+#include "can_comm.h"
+#include "fuel.h"
 
 //=================== setup ===============//
-void setup() {
+void setup()
+{
   // 1. Immediately turn on the switched rails
   pinMode(PIN_5V_GATE, OUTPUT);
   digitalWrite(PIN_5V_GATE, HIGH); // Enable Relay
@@ -1270,6 +17,16 @@ void setup() {
   digitalWrite(PIN_3V3_DIGITAL_GATE, HIGH); // Power 3.3V pull-ups/level shifter
 
   delay(30); // Allow voltage rails to stabilize
+
+  // Release any GPIO holds from previous deep sleep
+  gpio_hold_dis((gpio_num_t)PIN_RELAY_ACC);
+  gpio_hold_dis((gpio_num_t)PIN_RELAY_IGN);
+  gpio_hold_dis((gpio_num_t)PIN_RELAY_START);
+  gpio_hold_dis((gpio_num_t)PIN_5V_GATE);
+  gpio_hold_dis((gpio_num_t)field_relay_pin);
+  gpio_hold_dis((gpio_num_t)buzzer_pin);
+  gpio_hold_dis((gpio_num_t)PIN_3V3_DIGITAL_GATE);
+  gpio_deep_sleep_hold_dis();
 
   setupPushStartPins();
 
@@ -1285,11 +42,14 @@ void setup() {
   Wire.setClock(100000); // Slower clock for better noise immunity in engine bay
   Wire.setTimeOut(20);   // Abort I2C transaction if it takes > 20ms
   bool adcReady = adc.begin();
-  if (!adcReady) {
+  if (!adcReady)
+  {
     Serial.println("Failed to initialize ADS1115!");
     // We don't block here because the UI might still be useful,
     // but the regulatorTask will likely fail/crash on ADC reads.
-  } else {
+  }
+  else
+  {
     adc.setGain(GAIN_ONE); // 1x gain for ±4.096V range, adjust if your input
                            // exceeds this
     adc.setDataRate(RATE_ADS1115_250SPS);
@@ -1301,7 +61,8 @@ void setup() {
   tv.copyAfterSwap = true;
 
   if (rtc_trip_magic != RTC_TRIP_MAGIC_KEY || isnan(total_fuel_liters) ||
-      isnan(total_distance_km) || isnan(total_fuel_saved_liters)) {
+      isnan(total_distance_km) || isnan(total_fuel_saved_liters))
+  {
     Preferences prefs;
     prefs.begin("trip_data", true); // Open in read-only mode
     total_fuel_liters = prefs.getFloat("fuel", 0.0f);
@@ -1322,60 +83,12 @@ void setup() {
     rtc_trip_magic = RTC_TRIP_MAGIC_KEY;
   }
 
-  //========  track reset reason: debug purpose   ======//
-  // esp_reset_reason_t reason = esp_reset_reason();
-  // if (reason != ESP_RST_POWERON && reason != ESP_RST_UNKNOWN &&
-  //     reason != ESP_RST_EXT && reason != ESP_RST_DEEPSLEEP)
-  // {
-  //   esp_task_wdt_deinit(); // Disable WDT before long delay to prevent reboot
-  //                          // loops
-  //   tv.fillScreen(0x00);
-  //   tv.setCursor(10, 50);
-  //   tv.setTextColor(0xFF);
-  //   tv.setTextSize(2);
-  //   tv.print("WARNING: CRASH!");
-  //   tv.setTextSize(1);
-  //   tv.setCursor(10, 80);
-  //   tv.setTextColor(0xFF);
-  //   tv.print("Reset Reason ID: ");
-  //   tv.print(reason);
-  //   tv.setCursor(10, 100);
-  //   if (reason == ESP_RST_PANIC)
-  //     tv.print("- Software Panic (Bug)");
-  //   else if (reason == ESP_RST_INT_WDT)
-  //     tv.print("- Interrupt WDT");
-  //   else if (reason == ESP_RST_TASK_WDT)
-  //     tv.print("- Task WDT (FreeRTOS)");
-  //   else if (reason == ESP_RST_WDT)
-  //     tv.print("- Other Watchdog");
-  //   else if (reason == ESP_RST_BROWNOUT)
-  //     tv.print("- Brownout / Power Drop");
-  //   else
-  //     tv.print("- Other non-power-on reset");
-
-  //   tv.waitForFrame();
-  //   delay(5000);
-  // }
-
   pinModeFast(buzzer_pin, OUTPUT);
   pinModeFast(coolant_level_pin, INPUT);
   pinMode(field_relay_pin, OUTPUT);
   digitalWriteFast(field_relay_pin, LOW); // Start with field relay off
   Serial.begin(250000);
   delay(50); // Let UART stabilize
-  // Serial.print("\n--- ESP32 BOOTED ---\nReset Reason ID: ");
-  // Serial.println(reason);
-
-  // if (reason == ESP_RST_DEEPSLEEP)
-  // {
-  //   esp_sleep_wakeup_cause_t wakeup_reason = esp_sleep_get_wakeup_cause();
-  //   if (wakeup_reason == ESP_SLEEP_WAKEUP_EXT1)
-  //   {
-  //     unlockFirstPulseTime = millis();
-  //     unlockLastPulseTime = millis();
-  //     unlockPulseCount = 1;
-  //   }
-  // }
 
   mcp2515.reset();
   mcp2515.setBitrate(CAN_500KBPS, MCP_8MHZ); // Match transmitter
@@ -1387,14 +100,15 @@ void setup() {
   ledcAttachPin(FIELD_PIN, 0);
 
   // Configure FreeRTOS task for regulator loop instead of hardware timer
-  if (adcReady) {
+  if (adcReady)
+  {
     xTaskCreatePinnedToCore(
         regulatorTask,   // Task function
         "RegulatorTask", // Name of task
         8192,            // Stack size of task
         nullptr,         // Parameter of the task
         configMAX_PRIORITIES -
-            2, // Priority: high but not max, to avoid starving idle task
+            2,                // Priority: high but not max, to avoid starving idle task
         &regulatorTaskHandle, // Task handle
         0);                   // Pin to Core 0 (Isolate from UI on Core 1)
   }
@@ -1402,15 +116,17 @@ void setup() {
 }
 
 // ===================== main loop ======================//
-void loop() {
+void loop()
+{
   // uint32_t start = micros();
   unsigned long now = millis();
 
   //============= send health signal to front MCU ==================
   static unsigned long lastCanSendTimeMs = 0;
-  if (now - lastCanSendTimeMs >= 200) {
+  if (now - lastCanSendTimeMs >= CAN_HEALTH_SEND_INTERVAL_MS)
+  {
     bool regulator_ok =
-        (regulatorTaskHandle == NULL) || (now - last_regulator_heartbeat < 500);
+        (regulatorTaskHandle == NULL) || (now - last_regulator_heartbeat < REGULATOR_HEARTBEAT_TIMEOUT_MS);
     health_state = regulator_ok ? 100 : 0;
 
     canMsgTx.can_id = 0x03;
@@ -1427,24 +143,32 @@ void loop() {
     lastCanSendTimeMs = now;
   }
 
-  if (last_clear < 6) {
+  if (last_clear < 6)
+  {
     tv.fillScreen(0x00);
     drawStaticGauge();
     last_clear++;
   }
 
   // Clear reset message after 5 seconds
-  if (resetPrintTime && now - resetPrintTime >= 5000) {
+  if (resetPrintTime && now - resetPrintTime >= 5000)
+  {
     tv.fillRect(WARNING_X + 40, WARNING_Y + 50, 66, 8, 0x00);
     resetPrintTime = 0;
   }
 
+  // Drain CAN buffer before blocking for frame sync to prevent RX overflow
+  checkCanErrors();
+  drainCanRxBuffer();
+
   tv.waitForFrame();
 
-  if (now - lastBlinkTime >= blinkInterval) {
+  if (now - lastBlinkTime >= blinkInterval)
+  {
     lowBlinkState = !lowBlinkState;
 
-    if (lowBlinkState == true) {
+    if (lowBlinkState == true)
+    {
       fuel_run = true;
       cool_run = true;
       oil_on = true;
@@ -1454,9 +178,11 @@ void loop() {
   }
   int over_speed_blink_interval =
       lowBlinkState2 ? over_speed_on : over_speed_off;
-  if (now - lastBlinkTime2 >= over_speed_blink_interval) {
+  if (now - lastBlinkTime2 >= over_speed_blink_interval)
+  {
     lowBlinkState2 = !lowBlinkState2;
-    if (lowBlinkState2 == true && counter < 10) {
+    if (lowBlinkState2 == true && counter < 10)
+    {
       counter++;
     }
     lastBlinkTime2 = now;
@@ -1471,24 +197,33 @@ void loop() {
   fuel_in_temporary =
       local_ads_fuel; // Use pre-fetched value from regulatorTask
   if (fuel_in_temporary < /*2190 max*/ 22000 &&
-      fuel_in_temporary > 1200 /*1326 min*/) {
+      fuel_in_temporary > 1200 /*1326 min*/)
+  {
     raw = fuel_in_temporary;
   }
-  if (lastTime == 0) {
+  if (lastTime == 0)
+  {
     smoothVal = (float)raw;
     filtered = raw;
     lastValue = raw;
-  } else {
+  }
+  else
+  {
     int delta = abs(raw - lastValue);
-    if (delta <= 2000) { // sample accepted
+    if (delta <= 2000)
+    { // sample accepted
       filtered = raw;
       goodSamples++;
-    } else {
+    }
+    else
+    {
       filtered = lastValue; // sample rejected, set it to previous good value
       badSamples++;
     }
-    if (now - last_fuel_correction >= 15000) { // sample error correction
-      if (goodSamples < badSamples) {
+    if (now - last_fuel_correction >= 15000)
+    { // sample error correction
+      if (goodSamples < badSamples)
+      {
         filtered = raw;
       }
       goodSamples = 0;
@@ -1509,38 +244,8 @@ void loop() {
   //================================ Read data from engine MCU
   //==============================================//
 
-  checkCanErrors();
-  MCP2515::ERROR readStatus = mcp2515.readMessage(&canMsg);
-  if (readStatus == MCP2515::ERROR_OK) {
-    if (canMsg.can_id == 0x02) {
-      raw2 = (uint16_t)((canMsg.data[1] << 8) | canMsg.data[0]);
-      spd_t = (uint16_t)(canMsg.data[3] << 8 | canMsg.data[2]);
-      injector_state = canMsg.data[4];
-      new_rpm = (uint16_t)((canMsg.data[6] << 8) | canMsg.data[5]);
-      oil_level_t = (uint8_t)canMsg.data[7];
-      lastPacketTime = now;
-    } else if (canMsg.can_id == 0x04) {
-      uint32_t pulse =
-          (uint32_t)canMsg.data[0] | ((uint32_t)canMsg.data[1] << 8) |
-          ((uint32_t)canMsg.data[2] << 16) | ((uint32_t)canMsg.data[3] << 24);
-      if (pulse <= MAX_INJ_PULSE_PER_INTERVAL_US) {
-        accumulated_inj_time_us += pulse;
-
-        static unsigned long last_0x04_time = 0;
-        unsigned long now_us = micros();
-        if (last_0x04_time > 0) {
-          uint32_t delta_us = now_us - last_0x04_time;
-          if (delta_us >= 20000 && delta_us <= 150000) {
-            float raw_duty = ((float)pulse / (float)delta_us) * 100.0f;
-            raw_duty = constrain(raw_duty, 0.0f, 100.0f);
-            live_inj_duty_cycle =
-                0.25f * raw_duty + 0.75f * live_inj_duty_cycle;
-          }
-        }
-        last_0x04_time = now_us;
-      }
-    }
-  }
+  // Post-frame CAN drain (catch anything that arrived during frame sync)
+  drainCanRxBuffer();
 
   portENTER_CRITICAL(&dataMux);
   rpm = new_rpm;
@@ -1551,18 +256,24 @@ void loop() {
   int spd_in = spd_l;
 
   // --------------- filter SPD ----------------
-  if (lastTime == 0) {
+  if (lastTime == 0)
+  {
     last_spd = spd_in;
   }
-  if (abs(spd_in - last_spd) <= 3) { // sample accepted
+  if (abs(spd_in - last_spd) <= 3)
+  { // sample accepted
     spd = spd_in;
     goodSamples2++;
-  } else {
+  }
+  else
+  {
     spd = last_spd; // sample rejected, set it to previous good value
     badSamples2++;
   }
-  if (now - last_spd_correction >= 5000) { // sample error correction
-    if (goodSamples2 < badSamples2) {
+  if (now - last_spd_correction >= 5000)
+  { // sample error correction
+    if (goodSamples2 < badSamples2)
+    {
       spd = spd_in;
     }
     goodSamples2 = 0;
@@ -1570,7 +281,8 @@ void loop() {
     last_spd_correction = now;
   }
 
-  if (spd != last_spd || lastTime == 0) {
+  if (spd != last_spd || lastTime == 0)
+  {
 
     tv.setCursor(72, 150);
     tv.setTextColor(0xFF, 0x00);
@@ -1585,13 +297,15 @@ void loop() {
 
   // --- Display voltage & current ---
   static unsigned long lastMetricsUpdateTime = 0;
-  if (now - lastMetricsUpdateTime >= 250) {
+  if (now - lastMetricsUpdateTime >= DISPLAY_METRICS_UPDATE_MS)
+  {
     // Voltage
     float volts = local_voltage_filtered;
     char bufV[10];
     snprintf(bufV, sizeof(bufV), "%5.1fV", volts);
     static char last_bufV[10] = "";
-    if (strcmp(bufV, last_bufV) != 0) {
+    if (strcmp(bufV, last_bufV) != 0)
+    {
       tv.setCursor(5, 40);
       tv.setTextColor(0xFF, 0x00);
       tv.print(bufV);
@@ -1603,7 +317,8 @@ void loop() {
     char bufI[10];
     snprintf(bufI, sizeof(bufI), "%5.0fA", current_d);
     static char last_bufI[10] = "";
-    if (strcmp(bufI, last_bufI) != 0) {
+    if (strcmp(bufI, last_bufI) != 0)
+    {
       tv.setCursor(5, 55);
       tv.setTextColor(0xFF, 0x00);
       tv.print(bufI);
@@ -1614,7 +329,8 @@ void loop() {
     char bufInj[12];
     snprintf(bufInj, sizeof(bufInj), "INJ:%3.0f%% ", live_inj_duty_cycle);
     static char last_bufInj[12] = "";
-    if (strcmp(bufInj, last_bufInj) != 0) {
+    if (strcmp(bufInj, last_bufInj) != 0)
+    {
       tv.setCursor(FUEL_X + FUEL_WIDTH + 150, FUEL_Y + 20);
       tv.setTextColor(0xFF, 0x00);
       tv.print(bufInj);
@@ -1637,33 +353,41 @@ void loop() {
   static int crank_r_count = 0;
 
   // Track resting voltage prior to cranking when current load is low
-  if (currentState != STATE_CRANKING && currentState != STATE_RUNNING) {
+  if (currentState != STATE_CRANKING && currentState != STATE_RUNNING)
+  {
     if (abs(local_current_A_filtered) < 15.0f &&
-        local_voltage_filtered > 10.0f) {
+        local_voltage_filtered > 10.0f)
+    {
       resting_voltage =
           0.05f * local_voltage_filtered + 0.95f * resting_voltage;
     }
   }
 
-  if (currentState == STATE_CRANKING && lastStateDisplay != STATE_CRANKING) {
+  if (currentState == STATE_CRANKING && lastStateDisplay != STATE_CRANKING)
+  {
     peak_crank_current = 0.0f;
     v_rest_frozen =
         (resting_voltage >= 10.0f) ? resting_voltage : local_voltage_filtered;
     crank_r_sum = 0.0f;
     crank_r_count = 0;
   }
-  if (currentState == STATE_CRANKING) {
-    if (local_current_A_filtered < peak_crank_current) {
+  if (currentState == STATE_CRANKING)
+  {
+    if (local_current_A_filtered < peak_crank_current)
+    {
       peak_crank_current = local_current_A_filtered;
     }
 
     // Accumulate internal resistance samples during heavy discharge (> 30A)
     float discharge_current = -local_current_A_filtered;
-    if (discharge_current > 30.0f) {
+    if (discharge_current > 30.0f)
+    {
       float v_drop = v_rest_frozen - local_voltage_filtered;
-      if (v_drop > 0.05f) {
+      if (v_drop > 0.05f)
+      {
         float r_inst_mOhm = (v_drop / discharge_current) * 1000.0f;
-        if (r_inst_mOhm >= 0.5f && r_inst_mOhm <= 100.0f) {
+        if (r_inst_mOhm >= 0.5f && r_inst_mOhm <= 100.0f)
+        {
           crank_r_sum += r_inst_mOhm;
           crank_r_count++;
         }
@@ -1671,33 +395,38 @@ void loop() {
     }
   }
 
-  if (currentState == STATE_RUNNING && lastStateDisplay == STATE_CRANKING) {
+  if (currentState == STATE_RUNNING && lastStateDisplay == STATE_CRANKING)
+  {
     startedRunningTime = now;
 
     // Calculate this crank event's average internal resistance
     float r_event = 0.0f;
-    if (crank_r_count > 0) {
+    if (crank_r_count > 0)
+    {
       r_event = crank_r_sum / (float)crank_r_count;
-    } else if (peak_crank_current < -30.0f) {
+    }
+    else if (peak_crank_current < -30.0f)
+    {
       float v_drop = v_rest_frozen - local_voltage_filtered;
-      if (v_drop > 0.05f) {
+      if (v_drop > 0.05f)
+      {
         r_event = (v_drop / (-peak_crank_current)) * 1000.0f;
       }
     }
 
     // Compound over time using Exponential Moving Average across crank events
-    if (r_event >= 0.5f && r_event <= 100.0f) {
-      if (compounded_r_int < 0.5f || isnan(compounded_r_int)) {
+    if (r_event >= 0.5f && r_event <= 100.0f)
+    {
+      if (compounded_r_int < 0.5f || isnan(compounded_r_int))
+      {
         compounded_r_int = r_event;
-      } else {
+      }
+      else
+      {
         compounded_r_int = 0.30f * r_event + 0.70f * compounded_r_int;
       }
 
-      Preferences prefs;
-      if (prefs.begin("trip_data", false)) {
-        prefs.putFloat("r_int", compounded_r_int);
-        prefs.end();
-      }
+      // Preferences write removed, saved in enterPowerDownSleep()
     }
   }
 
@@ -1705,22 +434,29 @@ void loop() {
       (currentState == STATE_RUNNING && startedRunningTime != 0 &&
        (now - startedRunningTime < 5000));
 
-  if (show_crank_amps) {
-    if (!was_cranking_amps_drawn) {
+  if (show_crank_amps)
+  {
+    if (!was_cranking_amps_drawn)
+    {
       tv.setCursor(5, 70);
       tv.setTextColor(0xFF, 0x00);
       char bufCA[24];
       float ca_val = (peak_crank_current < 0.0f) ? -peak_crank_current : 0.0f;
-      if (compounded_r_int > 0.1f) {
+      if (compounded_r_int > 0.1f)
+      {
         snprintf(bufCA, sizeof(bufCA), "CRK %4.0fA %4.1fm", ca_val,
                  compounded_r_int);
-      } else {
+      }
+      else
+      {
         snprintf(bufCA, sizeof(bufCA), "CRK %4.0fA", ca_val);
       }
       tv.print(bufCA);
       was_cranking_amps_drawn = true;
     }
-  } else if (was_cranking_amps_drawn) {
+  }
+  else if (was_cranking_amps_drawn)
+  {
     tv.setCursor(5, 70);
     tv.setTextColor(0xFF, 0x00);
     tv.print("                   "); // Erase with spaces
@@ -1733,8 +469,10 @@ void loop() {
   int current_rpm = (int)rpm;
   static int last_drawn_rpm = -1;
   static unsigned long lastRpmUpdateTime = 0;
-  if (now - lastRpmUpdateTime >= 500) {
-    if (current_rpm != last_drawn_rpm) {
+  if (now - lastRpmUpdateTime >= RPM_UPDATE_INTERVAL_MS)
+  {
+    if (current_rpm != last_drawn_rpm)
+    {
       // tv.setCursor(95, 190);
       tv.setCursor(FUEL_X + FUEL_WIDTH + 150, FUEL_Y + 60);
       tv.setTextColor(0xFF, 0x00);
@@ -1751,22 +489,28 @@ void loop() {
   temp_out = map((int)raw2, 250, 950, 40, 120);
   temp_out = constrain(temp_out, 40, 120);
 
-  if (now - lastPacketTime > 2000) {
+  if (now - lastPacketTime > FRONT_MCU_CAN_TIMEOUT_MS)
+  {
     rpm = 0;
   }
 
   // =========================== Send Dynamic data to display
   // ============================
-  if (now - lastTime >= 1000) {
+  if (now - lastTime >= FUEL_UPDATE_INTERVAL_MS)
+  {
     fill = map(percent, 0, 100, 0, FUEL_HEIGHT - 4); // ----------for fuel gauge
     fill = constrain(fill, 0, FUEL_HEIGHT - 4);
     v = FUEL_HEIGHT - 2 + FUEL_Y - fill;
-    if (percent <= LOW_FUEL_LEVEL) {
+    if (percent <= LOW_FUEL_LEVEL)
+    {
       fuel_color = 0xE0;
-    } else {
+    }
+    else
+    {
       fuel_color = 0xFF;
     }
-    if (last_v != v || lastTime == 0) {
+    if (last_v != v || lastTime == 0)
+    {
       tv.fillRect(FUEL_X + 2, FUEL_Y + 2, FUEL_WIDTH - 4, v - (FUEL_Y + 2),
                   0x00);
       tv.fillRect(FUEL_X + 2, v, FUEL_WIDTH - 4, fill, fuel_color);
@@ -1784,7 +528,8 @@ void loop() {
     int tick_y = 0;
     fill2 = constrain(fill2, 0, TEMP_HEIGHT);
     t = TEMP_HEIGHT + TEMP_Y - fill2;
-    if (last_t != t || lastTime == 0) {
+    if (last_t != t || lastTime == 0)
+    {
       // Erase previous needle only
       tv.fillRect(TEMP_X - 5, last_t - 2, TEMP_VALUE_TICK_WIDTH,
                   TEMP_VALUE_TICK_HEIGHT, 0x00);
@@ -1798,12 +543,6 @@ void loop() {
       // draw temp_value tick
       tv.fillRect(TEMP_X - 5, t - 2, TEMP_VALUE_TICK_WIDTH,
                   TEMP_VALUE_TICK_HEIGHT, 0xE0);
-
-      // tv.setCursor(TEMP_X - 10, TEMP_Y - 10);
-      // tv.setTextColor(0xFF, 0x00); // Erase text automatically
-      // char buf[4];
-      // snprintf(buf, sizeof(buf), "%3d", temp_out);
-      // tv.print(buf);
     }
 
     // --- Fuel Consumption Calculations ---
@@ -1818,11 +557,14 @@ void loop() {
 
     // Track the actual injection pulse width right before injDisable engages
     static float last_active_inj_pulse_us = 2500.0f;
-    if (injector_state == 0 && accumulated_inj_time_us > 0 && new_rpm > 0) {
+    if (injector_state == 0 && accumulated_inj_time_us > 0 && new_rpm > 0)
+    {
       float pulses = ((float)new_rpm / 30.0f) * elapsed_sec;
-      if (pulses > 0.0f) {
+      if (pulses > 0.0f)
+      {
         float current_pulse_us = (float)accumulated_inj_time_us / pulses;
-        if (current_pulse_us >= 1000.0f && current_pulse_us <= 25000.0f) {
+        if (current_pulse_us >= 1000.0f && current_pulse_us <= 25000.0f)
+        {
           last_active_inj_pulse_us = current_pulse_us;
         }
       }
@@ -1831,7 +573,8 @@ void loop() {
 
     total_fuel_liters += fuel_consumed_liters;
 
-    if (injector_state == 1 && new_rpm > 0) {
+    if (injector_state == 1 && new_rpm > 0)
+    {
       // Calculate fuel saved using the actual pre-cut off pulse width (or
       // 2500.0f fallback)
       float active_pulse_us = (last_active_inj_pulse_us >= 1000.0f)
@@ -1851,20 +594,26 @@ void loop() {
     total_distance_km += (speed_val / 3600.0f) * elapsed_sec;
 
     // Calculate instant consumption
-    if (speed_val > 0.0f) {
+    if (speed_val > 0.0f)
+    {
       // inst_val in L/100km
       inst_val =
           (fuel_consumed_liters / ((speed_val / 3600.0f) * elapsed_sec)) *
           100.0f;
-    } else {
+    }
+    else
+    {
       // stationary consumption in L/h
       inst_val = (fuel_consumed_liters / elapsed_sec) * 3600.0f;
     }
 
     // Calculate average consumption in L/100km
-    if (total_distance_km > 0.001f) {
+    if (total_distance_km > 0.001f)
+    {
       avg_l_100km = (total_fuel_liters / total_distance_km) * 100.0f;
-    } else {
+    }
+    else
+    {
       avg_l_100km = 0.0f;
     }
 
@@ -1872,9 +621,12 @@ void loop() {
     tv.setTextSize(2);
     tv.setTextColor(0xFF, 0x00);
     char bufInst[20];
-    if (speed_val > 0.0f) {
+    if (speed_val > 0.0f)
+    {
       snprintf(bufInst, sizeof(bufInst), "%5.1f L/100Km  ", inst_val);
-    } else {
+    }
+    else
+    {
       snprintf(bufInst, sizeof(bufInst), "%5.1f L/h       ", inst_val);
     }
     tv.fillRect(90, 210, 165, 16, 0x00); // Clear previous instant readout
@@ -1908,10 +660,13 @@ void loop() {
     tv.print(bufUsed);
 
     char bufSaved[20];
-    if (total_fuel_saved_liters < 1.0f) {
+    if (total_fuel_saved_liters < 1.0f)
+    {
       snprintf(bufSaved, sizeof(bufSaved), "SAVED:%5.3f L       ",
                total_fuel_saved_liters);
-    } else {
+    }
+    else
+    {
       snprintf(bufSaved, sizeof(bufSaved), "SAVED:%5.2f L       ",
                total_fuel_saved_liters);
     }
@@ -1922,11 +677,14 @@ void loop() {
     tv.print(bufSaved);
 
     char bufRem[20];
-    if (avg_l_100km > 0.001f) {
+    if (avg_l_100km > 0.001f)
+    {
       float rem_fuel_l = (percent / 100.0f) * FUEL_TANK_CAPACITY_LITERS;
       float rem_km = (rem_fuel_l / avg_l_100km) * 100.0f;
       snprintf(bufRem, sizeof(bufRem), "REM:%4.0fkm ", rem_km);
-    } else {
+    }
+    else
+    {
       snprintf(bufRem, sizeof(bufRem), "REM:---km ");
     }
     tv.fillRect(FUEL_X + FUEL_WIDTH + 150, FUEL_Y + 40, 60, 8,
@@ -1941,27 +699,6 @@ void loop() {
   }
   oil_level = (int)oil_level_t;
   warnings(percent, temp_out, spd, coolant_level, oil_level, now);
-
-  // --- Stack monitoring ---
-  // static uint32_t last_loop_stack_check = 0;
-  // static UBaseType_t loop_free_stack = 0;
-  // if (now - last_loop_stack_check >= 1000)
-  // {
-  //   loop_free_stack = uxTaskGetStackHighWaterMark(NULL);
-  //   last_loop_stack_check = now;
-  //   // Periodic debug output (once per second, not every frame)
-  //   Serial.print("RegStack: ");
-  //   Serial.print(free_stack);
-  //   Serial.print(" LoopStack: ");
-  //   Serial.println(loop_free_stack);
-  // }
-
-  // Serial.print("p_term: ");
-  // Serial.print(p_term);
-  // Serial.print(local_rpm);
-  // Serial.print(voltage_filtered);
-  // Serial.print("V   current: ");
-  // Serial.println(rpm);
 
   processPushStart();
   esp_task_wdt_reset();
