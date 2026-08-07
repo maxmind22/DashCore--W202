@@ -668,7 +668,7 @@ void loop()
     tv.setTextColor(0xFF, 0x00);
     tv.print(bufUsed);
 
-    char bufSaved[20];
+    char bufSaved[14];
     if (total_fuel_saved_liters < 1.0f)
     {
       snprintf(bufSaved, sizeof(bufSaved), "SAVED:%5.3f L       ",
@@ -680,7 +680,7 @@ void loop()
                total_fuel_saved_liters);
     }
     // tv.setCursor(FUEL_X + FUEL_WIDTH + 150, FUEL_Y + 20);
-    tv.fillRect(FUEL_X + FUEL_WIDTH + 130, FUEL_Y, 120, 8, 0xFF); // Clear previous SAVED readout
+    tv.fillRect(FUEL_X + FUEL_WIDTH + 130, FUEL_Y, 80, 8, 0x00); // Clear previous SAVED readout
     tv.setCursor(FUEL_X + FUEL_WIDTH + 130, FUEL_Y);
     // tv.setCursor(FUEL_X + FUEL_WIDTH + 5, FUEL_Y + 60);
     tv.setTextColor(0xFF, 0x00);
