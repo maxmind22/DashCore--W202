@@ -230,6 +230,7 @@ uint32_t accumulated_inj_time_us = 0;
 RTC_DATA_ATTR float total_fuel_liters = 0.0f;
 RTC_DATA_ATTR float total_distance_km = 0.0f;
 RTC_DATA_ATTR float compounded_r_int = 0.0f;
+RTC_DATA_ATTR float total_fuel_saved_liters = 0.0f;
 float inst_val = 0.0f;
 float avg_l_100km = 0.0f;
 
@@ -894,6 +895,7 @@ void resetFuelTripData()
 {
   total_fuel_liters = 0.0f;
   total_distance_km = 0.0f;
+  total_fuel_saved_liters = 0.0f;
   avg_l_100km = 0.0f;
   inst_val = 0.0f;
 
@@ -901,6 +903,7 @@ void resetFuelTripData()
   prefs.begin("trip_data", false);
   prefs.putFloat("fuel", 0.0f);
   prefs.putFloat("dist", 0.0f);
+  prefs.putFloat("saved", 0.0f);
   prefs.end();
   tv.setCursor(WARNING_X + 40, WARNING_Y + 50);
   tv.setTextColor(0xFF);
@@ -944,6 +947,7 @@ void enterPowerDownSleep()
   prefs.putFloat("fuel", total_fuel_liters);
   prefs.putFloat("dist", total_distance_km);
   prefs.putFloat("r_int", compounded_r_int);
+  prefs.putFloat("saved", total_fuel_saved_liters);
   prefs.end();
 
   // --- ORDERED SHUTDOWN: Stop everything safely before deep sleep ---
@@ -1512,13 +1516,14 @@ void setup()
   tv.begin();
   tv.copyAfterSwap = true;
 
-  if (rtc_trip_magic != RTC_TRIP_MAGIC_KEY || isnan(total_fuel_liters) || isnan(total_distance_km))
+  if (rtc_trip_magic != RTC_TRIP_MAGIC_KEY || isnan(total_fuel_liters) || isnan(total_distance_km) || isnan(total_fuel_saved_liters))
   {
     Preferences prefs;
     prefs.begin("trip_data", true); // Open in read-only mode
     total_fuel_liters = prefs.getFloat("fuel", 0.0f);
     total_distance_km = prefs.getFloat("dist", 0.0f);
     compounded_r_int = prefs.getFloat("r_int", 0.0f);
+    total_fuel_saved_liters = prefs.getFloat("saved", 0.0f);
     prefs.end();
 
     if (isnan(total_fuel_liters))
@@ -1527,6 +1532,8 @@ void setup()
       total_distance_km = 0.0f;
     if (isnan(compounded_r_int) || compounded_r_int < 0.0f)
       compounded_r_int = 0.0f;
+    if (isnan(total_fuel_saved_liters) || total_fuel_saved_liters < 0.0f)
+      total_fuel_saved_liters = 0.0f;
 
     rtc_trip_magic = RTC_TRIP_MAGIC_KEY;
   }
@@ -2112,14 +2119,35 @@ void loop()
     float fuel_consumed_liters = (accumulated_inj_time_us / 1000000.0f) *
                                  (INJECTOR_FLOW_RATE_CC_MIN / 60.0f / 1000.0f) *
                                  (float)NUM_INJECTORS;
+
+    // Track the actual injection pulse width right before injDisable engages
+    static float last_active_inj_pulse_us = 2500.0f;
+    if (injector_state == 0 && accumulated_inj_time_us > 0 && new_rpm > 0)
+    {
+      float pulses = ((float)new_rpm / 30.0f) * elapsed_sec;
+      if (pulses > 0.0f)
+      {
+        float current_pulse_us = (float)accumulated_inj_time_us / pulses;
+        if (current_pulse_us >= 1000.0f && current_pulse_us <= 25000.0f)
+        {
+          last_active_inj_pulse_us = current_pulse_us;
+        }
+      }
+    }
     accumulated_inj_time_us = 0; // Reset accumulator
 
-    // if (injector_state == 1)
-    // {
-    //   fuel_consumed_liters = 0.0f;
-    // }
-
     total_fuel_liters += fuel_consumed_liters;
+
+    if (injector_state == 1 && new_rpm > 0)
+    {
+      // Calculate fuel saved using the actual pre-cut off pulse width (or 2500.0f fallback)
+      float active_pulse_us = (last_active_inj_pulse_us >= 1000.0f) ? last_active_inj_pulse_us : 2500.0f;
+      float saved_inj_time_us = ((float)new_rpm / 30.0f) * active_pulse_us * elapsed_sec;
+      float fuel_saved_interval = (saved_inj_time_us / 1000000.0f) *
+                                  (INJECTOR_FLOW_RATE_CC_MIN / 60.0f / 1000.0f) *
+                                  (float)NUM_INJECTORS;
+      total_fuel_saved_liters += fuel_saved_interval;
+    }
 
     // Update trip distance (speed is in km/h, convert to km/sec and multiply by
     // elapsed seconds)
@@ -2149,43 +2177,6 @@ void loop()
     {
       avg_l_100km = 0.0f;
     }
-
-    // --- ECO Driving Evaluation ---
-    // static unsigned long last_eco_check = 0;
-    // static uint16_t last_eco_rpm = 0;
-    // static float last_eco_spd = 0.0f;
-    // static bool is_eco = true;
-
-    // float dt_eco =
-    //     (last_eco_check == 0) ? 0.5f : (now - last_eco_check) / 1000.0f;
-    // if (dt_eco <= 0.0f)
-    //   dt_eco = 0.5f;
-
-    // float rpm_rate = ((float)new_rpm - (float)last_eco_rpm) / dt_eco;
-    // float spd_accel = ((float)spd - last_eco_spd) / dt_eco;
-
-    // last_eco_rpm = new_rpm;
-    // last_eco_spd = (float)spd;
-    // last_eco_check = now;
-
-    // if (injector_state == 1)
-    // {
-    //   is_eco = true; // DFCO / fuel cut off is 100% ECO
-    // }
-    // else if (speed_val <= 0.0f)
-    // {
-    //   is_eco = (inst_val <= 1.2f); // Idle threshold (L/h)
-    // }
-    // else
-    // {
-    //   bool smooth_rpm_accel = (rpm_rate <= 500.0f);
-    //   bool smooth_spd_accel = (spd_accel <= 4.0f);
-    //   bool low_consumption = (inst_val <= 9.0f);
-    //   bool efficient_rpm_lvl = (new_rpm <= 2400);
-
-    //   is_eco = (smooth_rpm_accel && smooth_spd_accel && low_consumption &&
-    //             efficient_rpm_lvl);
-    // }
 
     // Render fuel and distance metrics to screen
     tv.setTextSize(2);
@@ -2227,6 +2218,21 @@ void loop()
     tv.setCursor(FUEL_X + FUEL_WIDTH + 5, FUEL_Y + 40);
     tv.setTextColor(0xFF, 0x00);
     tv.print(bufUsed);
+
+    char bufSaved[20];
+    if (total_fuel_saved_liters < 1.0f)
+    {
+      snprintf(bufSaved, sizeof(bufSaved), "SAVED:%5.3f L       ", total_fuel_saved_liters);
+    }
+    else
+    {
+      snprintf(bufSaved, sizeof(bufSaved), "SAVED:%5.2f L       ", total_fuel_saved_liters);
+    }
+    tv.fillRect(FUEL_X + FUEL_WIDTH + 5, FUEL_Y + 60, 120, 8,
+                0x00); // Clear previous SAVED readout
+    tv.setCursor(FUEL_X + FUEL_WIDTH + 5, FUEL_Y + 60);
+    tv.setTextColor(0xFF, 0x00);
+    tv.print(bufSaved);
 
     char bufRem[20];
     if (avg_l_100km > 0.001f)
