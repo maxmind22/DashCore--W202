@@ -16,36 +16,37 @@ static int toneBeepsRemaining = 0;
 static unsigned long toneOnMs = 0;
 static unsigned long toneOffMs = 0;
 
-void triggerLockPulse() {
+void triggerLockPulse(unsigned long now) {
   if (lockRelayState == LOCK_IDLE && !vehicleLockDisabled) {
     pinMode(PIN_RELAY_LOCK, OUTPUT);
     digitalWrite(PIN_RELAY_LOCK, HIGH);
-    lockRelayStartTime = millis();
+    lockRelayStartTime = (now != 0) ? now : millis();
     lockRelayState = LOCK_PULSE_ACTIVE;
   }
 }
 
-void updateLockRelay() {
+void updateLockRelay(unsigned long now) {
+  if (now == 0) now = millis();
   if (lockRelayState == LOCK_PULSE_ACTIVE &&
-      (millis() - lockRelayStartTime >= 200)) {
+      (now - lockRelayStartTime >= 200)) {
     digitalWrite(PIN_RELAY_LOCK, LOW);
     pinMode(PIN_RELAY_LOCK, INPUT); // Float pin to save power
     lockRelayState = LOCK_IDLE;
   }
 }
 
-void queueTone(int beeps, unsigned long onMs, unsigned long offMs) {
+void queueTone(int beeps, unsigned long onMs, unsigned long offMs, unsigned long now) {
   toneBeepsRemaining = beeps;
   toneOnMs = onMs;
   toneOffMs = offMs;
   digitalWriteFast(buzzer_pin, HIGH);
-  tonePhaseStart = millis();
+  tonePhaseStart = (now != 0) ? now : millis();
   toneState = TONE_ON;
 }
 
-void updateToneStateMachine() {
+void updateToneStateMachine(unsigned long now) {
   if (toneState == TONE_IDLE) return;
-  unsigned long now = millis();
+  if (now == 0) now = millis();
   if (toneState == TONE_ON && (now - tonePhaseStart >= toneOnMs)) {
     digitalWriteFast(buzzer_pin, LOW);
     toneBeepsRemaining--;
@@ -78,8 +79,8 @@ void playAuthWarningTone() {
   queueTone(2, 100, 100); // 2 quick beeps
 }
 
-void processUnlockSignals() {
-  unsigned long now = millis();
+void processUnlockSignals(unsigned long now) {
+  if (now == 0) now = millis();
   bool currentUnlockPinState = digitalRead(PIN_WAKE_UNLOCK);
 
   // Optocoupler output goes HIGH on unlock pulse (active high into ESP32)
@@ -273,16 +274,17 @@ void setupPushStartPins() {
   pinMode(PIN_WAKE_UNLOCK, INPUT);
 }
 
-void processPushStart() {
-  updateLockRelay();
-  unsigned long now = millis();
+void processPushStart(unsigned long now) {
+  if (now == 0) now = millis();
+  updateLockRelay(now);
+  updateToneStateMachine(now);
 
   static enum { CRANK_PRIME, CRANK_SOLENOID } crankStage = CRANK_PRIME;
   static unsigned long crankStageTime = 0;
 
   // Continuously monitor unlock pulses while engine is not running.
   if (currentState != STATE_RUNNING) {
-    processUnlockSignals();
+    processUnlockSignals(now);
   }
 
   // Edge detection for push button
@@ -308,7 +310,7 @@ void processPushStart() {
           spd == 0) {
 
         lastButtonPressTime = now; // avoid immediate short-press transition
-        resetFuelTripData();
+        resetFuelTripData(now);
       }
     }
   } else {
@@ -326,7 +328,7 @@ void processPushStart() {
       (currentState == STATE_ACC || currentState == STATE_IGNITION)) {
     if (now >= 120000) // 2 minutes after booting
     {
-      triggerLockPulse();
+      triggerLockPulse(now);
       bootLockDone = true;
     }
   }
@@ -344,7 +346,7 @@ void processPushStart() {
 
     if (driveLockTriggered && !driveLockDone &&
         (now - driveLockTime >= 10000)) {
-      triggerLockPulse();
+      triggerLockPulse(now);
       driveLockDone = true;
     }
   } else {

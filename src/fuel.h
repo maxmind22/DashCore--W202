@@ -3,4 +3,4 @@
 #include "globals.h"
 
 float getFuelPercent(float rawValue);
-void resetFuelTripData();
+void resetFuelTripData(unsigned long now = 0);

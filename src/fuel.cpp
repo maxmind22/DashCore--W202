@@ -20,7 +20,7 @@ float getFuelPercent(float rawValue) {
   return 0.0f;
 }
 
-void resetFuelTripData() {
+void resetFuelTripData(unsigned long now) {
   total_fuel_liters = 0.0f;
   total_distance_km = 0.0f;
   total_fuel_saved_liters = 0.0f;
@@ -36,5 +36,5 @@ void resetFuelTripData() {
   tv.setCursor(WARNING_X + 40, WARNING_Y + 50);
   tv.setTextColor(0xFF);
   tv.print("RESET DONE!");
-  resetPrintTime = millis();
+  resetPrintTime = (now != 0) ? now : millis();
 }

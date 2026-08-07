@@ -19,10 +19,9 @@ void checkCanErrors() {
   }
 }
 
-void drainCanRxBuffer() {
+void drainCanRxBuffer(unsigned long now) {
   for (int i = 0; i < 6; i++) {
     if (mcp2515.readMessage(&canMsg) != MCP2515::ERROR_OK) break;
-    unsigned long now = millis();
     if (canMsg.can_id == 0x02) {
       raw2 = (uint16_t)((canMsg.data[1] << 8) | canMsg.data[0]);
       spd_t = (uint16_t)(canMsg.data[3] << 8 | canMsg.data[2]);
