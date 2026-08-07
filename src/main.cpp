@@ -91,9 +91,14 @@ void setup()
   delay(50); // Let UART stabilize
 
   SPI.begin();
-  mcp2515.reset();
+  MCP2515::ERROR err = mcp2515.reset();
+  if (err != MCP2515::ERROR_OK) {
+    Serial.println("MCP2515 Reset FAILED! Check CS (GPIO5), SCK(18), MISO(19), MOSI(23) wiring.");
+  } else {
+    Serial.println("MCP2515 Reset SUCCESS!");
+  }
   mcp2515.setBitrate(CAN_500KBPS, MCP_8MHZ); // Match transmitter
-  mcp2515.setNormalOneShotMode();            // mcp2515.setNormalMode();
+  mcp2515.setNormalMode();                   // Standard CAN mode with auto-retry ACK
   esp_task_wdt_deinit();                     // De-init default core WDT config
   esp_task_wdt_init(1, true);                // 1s timeout with panic=true
   esp_task_wdt_add(nullptr);                 // Add current loop task
