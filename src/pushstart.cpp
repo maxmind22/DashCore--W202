@@ -146,7 +146,7 @@ void wakeupCANController() {
   SPI.begin();
   mcp2515.reset();
   mcp2515.setBitrate(CAN_500KBPS, MCP_8MHZ);
-  mcp2515.setNormalMode();
+  mcp2515.setNormalOneShotMode();
 }
 
 void enterPowerDownSleep() {

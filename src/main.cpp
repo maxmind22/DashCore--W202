@@ -98,7 +98,7 @@ void setup()
     Serial.println("MCP2515 Reset SUCCESS!");
   }
   mcp2515.setBitrate(CAN_500KBPS, MCP_8MHZ); // Match transmitter
-  mcp2515.setNormalMode();                   // Standard CAN mode with auto-retry ACK
+  mcp2515.setNormalOneShotMode();            // mcp2515.setNormalMode();
   esp_task_wdt_deinit();                     // De-init default core WDT config
   esp_task_wdt_init(1, true);                // 1s timeout with panic=true
   esp_task_wdt_add(nullptr);                 // Add current loop task
