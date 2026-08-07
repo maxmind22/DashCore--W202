@@ -91,18 +91,21 @@ void setup()
   delay(50); // Let UART stabilize
 
   SPI.begin();
-  MCP2515::ERROR err = mcp2515.reset();
-  if (err != MCP2515::ERROR_OK) {
-    Serial.println("MCP2515 Reset FAILED! Check CS (GPIO5), SCK(18), MISO(19), MOSI(23) wiring.");
-  } else {
-    Serial.println("MCP2515 Reset SUCCESS!");
-  }
+  mcp2515.reset();
   mcp2515.setBitrate(CAN_500KBPS, MCP_8MHZ); // Match transmitter
-  mcp2515.setNormalOneShotMode();            // mcp2515.setNormalMode();
-  esp_task_wdt_deinit();                     // De-init default core WDT config
-  esp_task_wdt_init(1, true);                // 1s timeout with panic=true
-  esp_task_wdt_add(nullptr);                 // Add current loop task
-  ledcSetup(0, 400, 10);                     // channel, freq, resolution
+  MCP2515::ERROR err = mcp2515.setNormalOneShotMode();
+  if (err != MCP2515::ERROR_OK)
+  {
+    Serial.println("MCP2515 Init FAILED! Check CS(5), SCK(18), MISO(19), MOSI(23) wiring.");
+  }
+  else
+  {
+    Serial.println("MCP2515 Init SUCCESS!");
+  }
+  esp_task_wdt_deinit();      // De-init default core WDT config
+  esp_task_wdt_init(1, true); // 1s timeout with panic=true
+  esp_task_wdt_add(nullptr);  // Add current loop task
+  ledcSetup(0, 400, 10);      // channel, freq, resolution
   ledcAttachPin(FIELD_PIN, 0);
 
   // Configure FreeRTOS task for regulator loop instead of hardware timer
@@ -165,7 +168,7 @@ void loop()
 
   // Drain CAN buffer before blocking for frame sync to prevent RX overflow
   checkCanErrors();
-  drainCanRxBuffer();
+  drainCanRxBuffer(now);
 
   tv.waitForFrame();
 
@@ -251,7 +254,7 @@ void loop()
   //==============================================//
 
   // Post-frame CAN drain (catch anything that arrived during frame sync)
-  drainCanRxBuffer();
+  drainCanRxBuffer(now);
 
   portENTER_CRITICAL(&dataMux);
   rpm = new_rpm;
@@ -479,7 +482,7 @@ void loop()
   {
     if (current_rpm != last_drawn_rpm)
     {
-      // tv.setCursor(95, 190);
+
       tv.setCursor(FUEL_X + FUEL_WIDTH + 150, FUEL_Y + 60);
       tv.setTextColor(0xFF, 0x00);
       tv.setTextSize(2);
@@ -676,9 +679,10 @@ void loop()
       snprintf(bufSaved, sizeof(bufSaved), "SAVED:%5.2f L       ",
                total_fuel_saved_liters);
     }
-    tv.fillRect(FUEL_X + FUEL_WIDTH + 5, FUEL_Y + 60, 120, 8,
-                0x00); // Clear previous SAVED readout
-    tv.setCursor(FUEL_X + FUEL_WIDTH + 5, FUEL_Y + 60);
+    // tv.setCursor(FUEL_X + FUEL_WIDTH + 150, FUEL_Y + 20);
+    tv.fillRect(FUEL_X + FUEL_WIDTH + 130, FUEL_Y, 120, 8, 0xFF); // Clear previous SAVED readout
+    tv.setCursor(FUEL_X + FUEL_WIDTH + 130, FUEL_Y);
+    // tv.setCursor(FUEL_X + FUEL_WIDTH + 5, FUEL_Y + 60);
     tv.setTextColor(0xFF, 0x00);
     tv.print(bufSaved);
 
@@ -706,6 +710,6 @@ void loop()
   oil_level = (int)oil_level_t;
   warnings(percent, temp_out, spd, coolant_level, oil_level, now);
 
-  processPushStart();
+  processPushStart(now);
   esp_task_wdt_reset();
 }

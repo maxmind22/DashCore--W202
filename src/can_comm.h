@@ -3,4 +3,4 @@
 #include "globals.h"
 
 void checkCanErrors();
-void drainCanRxBuffer();
+void drainCanRxBuffer(unsigned long now);
