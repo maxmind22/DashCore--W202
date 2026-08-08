@@ -39,15 +39,19 @@ void drainCanRxBuffer(unsigned long now) {
       if (pulse <= MAX_INJ_PULSE_PER_INTERVAL_US) {
         accumulated_inj_time_us += pulse;
         accumulated_inj_pulses += pulses;
-        // Front MCU sends 0x04 at a fixed 50ms interval, each packet carries
-        // exactly one interval's worth of injection time.
         // Subtract dead-time from pulses in this interval to calculate net duty cycle.
         float dead_time_us = getInjectorDeadTime(voltage_filtered);
         float net_pulse_us = (float)pulse - ((float)pulses * dead_time_us);
         if (net_pulse_us < 0.0f) net_pulse_us = 0.0f;
 
-        float raw_duty =
-            (net_pulse_us / (float)FRONT_MCU_CAN_SEND_INTERVAL_US) * 100.0f;
+        float raw_duty = 0.0f;
+        uint16_t current_rpm = (rpm > 0) ? rpm : new_rpm;
+        if (pulses > 0 && current_rpm > 0) {
+          float avg_net_pulse_us = net_pulse_us / (float)pulses;
+          // Engine cycle period for 1 injector (4-stroke: 1 injection per 2 revs = 120,000,000 / RPM us)
+          float cycle_period_us = 120000000.0f / (float)current_rpm;
+          raw_duty = (avg_net_pulse_us / cycle_period_us) * 100.0f;
+        }
         raw_duty = constrain(raw_duty, 0.0f, 100.0f);
         live_inj_duty_cycle =
             0.25f * raw_duty + 0.75f * live_inj_duty_cycle;

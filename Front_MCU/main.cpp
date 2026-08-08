@@ -336,7 +336,7 @@ void loop()
     uint32_t local_inj_time = 0;
     uint16_t local_inj_pulses = 0;
 
-    // Check flag so we avoid calling noInterrupts() while ISR is firing
+    // Check flag so we avoid calling noInterrupts() while ISR is still calculating injection time and pulses. This prevents reading partial values and ensures atomicity.
     if (!isr_firing)
     {
       noInterrupts();
