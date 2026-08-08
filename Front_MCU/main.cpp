@@ -62,6 +62,7 @@ volatile uint32_t last_inj_pulse_width = 0;
 volatile uint16_t inj_end_ticks = 0;
 volatile bool inj_active = false;
 volatile bool injDisable = false;
+volatile bool isr_firing = false;
 
 // These are only used in loop(), so they do NOT need to be volatile
 uint32_t rpm = 0;
@@ -94,9 +95,10 @@ void spdISR()
   spd_pulse_count++;
   spd_last_pulse_us = micros();
 }
-
+// injector ISR
 ISR(PCINT2_vect)
 {
+  isr_firing = true;
   uint16_t inj_now_ticks = TCNT1;
   if (!(PIND & _BV(PD7)))
   {
@@ -116,6 +118,7 @@ ISR(PCINT2_vect)
       total_inj_pulses++;
       inj_active = false;
       inj_end_ticks = inj_now_ticks;
+      isr_firing = false;
     }
   }
 }
@@ -330,13 +333,19 @@ void loop()
     canMsgTx.data[7] = oil_level;
     mcp2515.sendMessage(&canMsgTx);
 
-    // Atomically read and reset total_inj_time_us and total_inj_pulses
-    noInterrupts();
-    uint32_t local_inj_time = total_inj_time_us;
-    uint16_t local_inj_pulses = total_inj_pulses;
-    total_inj_time_us = 0;
-    total_inj_pulses = 0;
-    interrupts();
+    uint32_t local_inj_time = 0;
+    uint16_t local_inj_pulses = 0;
+
+    // Check flag so we avoid calling noInterrupts() while ISR is firing
+    if (!isr_firing)
+    {
+      noInterrupts();
+      local_inj_time = total_inj_time_us;
+      local_inj_pulses = total_inj_pulses;
+      total_inj_time_us = 0;
+      total_inj_pulses = 0;
+      interrupts();
+    }
 
     canMsgTx.can_id = 0x04;
     canMsgTx.can_dlc = 6;
