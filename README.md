@@ -85,3 +85,10 @@ The ESP32 codebase is fully modularized for clean separation of concerns:
 - `/src/main.cpp` - Clean ESP32 orchestrator containing `setup()` and `loop()`.
 - `/Front_MCU/main.cpp` - ATmega328P engine bay sensor acquisition, radiator fan PWM control, safety relays, and CAN broadcast loop.
 - `/platformio.ini` - PlatformIO build environments for `esp32dev` and `front_mcu`.
+
+---
+
+## 📜 License
+
+This project is licensed under the MIT License - see the [LICENSE](file:///Users/mac/Documents/PlatformIO/Projects/Dashboard/LICENSE) file for details.
+
