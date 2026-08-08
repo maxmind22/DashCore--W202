@@ -166,10 +166,6 @@ void loop()
     resetPrintTime = 0;
   }
 
-  // Drain CAN buffer before blocking for frame sync to prevent RX overflow
-  checkCanErrors();
-  drainCanRxBuffer(now);
-
   tv.waitForFrame();
 
   if (now - lastBlinkTime >= blinkInterval)
@@ -253,7 +249,8 @@ void loop()
   //================================ Read data from engine MCU
   //==============================================//
 
-  // Post-frame CAN drain (catch anything that arrived during frame sync)
+  // CAN drain (catch anything that arrived during frame sync)
+  checkCanErrors();
   drainCanRxBuffer(now);
 
   portENTER_CRITICAL(&dataMux);
