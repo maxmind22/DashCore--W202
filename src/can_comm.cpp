@@ -1,4 +1,5 @@
 #include "can_comm.h"
+#include "fuel.h"
 
 void checkCanErrors() {
   uint8_t errFlags = mcp2515.getErrorFlags();
@@ -33,14 +34,20 @@ void drainCanRxBuffer(unsigned long now) {
       uint32_t pulse =
           (uint32_t)canMsg.data[0] | ((uint32_t)canMsg.data[1] << 8) |
           ((uint32_t)canMsg.data[2] << 16) | ((uint32_t)canMsg.data[3] << 24);
+      uint16_t pulses =
+          (uint16_t)canMsg.data[4] | ((uint16_t)canMsg.data[5] << 8);
       if (pulse <= MAX_INJ_PULSE_PER_INTERVAL_US) {
         accumulated_inj_time_us += pulse;
+        accumulated_inj_pulses += pulses;
         // Front MCU sends 0x04 at a fixed 50ms interval, each packet carries
-        // exactly one interval's worth of injection time. Use the known constant
-        // instead of measuring read-to-read delta with micros() which suffers
-        // from ±16.6ms VSYNC jitter.
+        // exactly one interval's worth of injection time.
+        // Subtract dead-time from pulses in this interval to calculate net duty cycle.
+        float dead_time_us = getInjectorDeadTime(voltage_filtered);
+        float net_pulse_us = (float)pulse - ((float)pulses * dead_time_us);
+        if (net_pulse_us < 0.0f) net_pulse_us = 0.0f;
+
         float raw_duty =
-            ((float)pulse / (float)FRONT_MCU_CAN_SEND_INTERVAL_US) * 100.0f;
+            (net_pulse_us / (float)FRONT_MCU_CAN_SEND_INTERVAL_US) * 100.0f;
         raw_duty = constrain(raw_duty, 0.0f, 100.0f);
         live_inj_duty_cycle =
             0.25f * raw_duty + 0.75f * live_inj_duty_cycle;

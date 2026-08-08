@@ -44,6 +44,7 @@ int percent = 0;
 
 RTC_DATA_ATTR uint32_t rtc_trip_magic = 0;
 uint32_t accumulated_inj_time_us = 0;
+uint32_t accumulated_inj_pulses = 0;
 float live_inj_duty_cycle = 0.0f;
 RTC_DATA_ATTR float total_fuel_liters = 0.0f;
 RTC_DATA_ATTR float total_distance_km = 0.0f;
