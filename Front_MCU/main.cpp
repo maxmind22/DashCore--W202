@@ -11,7 +11,7 @@
 #define regulator_pin 9
 
 // W202 C200 instrument cluster speed pulse (205/55R16, 48 ABS teeth, falling edge)
-#define PULSES_PER_KM 24179 // 24080UL
+#define PULSES_PER_KM 24179
 #define SPD_WINDOW_MS 100UL
 #define SPD_STALE_TIMEOUT_US 500000UL
 
@@ -25,7 +25,7 @@ const int ac = A1;
 #define DFCO_DISENGAGE_RPM 1100
 #define DFCO_ENGAGE_DELAY_MS 1000
 #define DFCO_ENGINE_WARM_ADC 440
-#define DFCO_INJ_WINDOW_TICKS 8000  // 8000 ticks @ 0.5us/tick = 4000us
+#define DFCO_INJ_WINDOW_TICKS 8000 // 8000 ticks @ 0.5us/tick = 4000us
 
 // --- Failsafe ---
 #define HEARTBEAT_TIMEOUT_MS 1000
@@ -113,7 +113,7 @@ ISR(PCINT2_vect)
       last_inj_pulse_width = pulse_ticks >> 1; // Convert 0.5us ticks (Prescaler 8) to us
       total_inj_time_us += last_inj_pulse_width;
       inj_active = false;
-      inj_end_ticks = inj_now_ticks; 
+      inj_end_ticks = inj_now_ticks;
     }
   }
 }
@@ -318,8 +318,8 @@ void loop()
     uint16_t temp_s = (uint16_t)temp_avg;
     canMsgTx.can_id = 0x02;
     canMsgTx.can_dlc = 8;
-    canMsgTx.data[0] = temp_s & 0xFF; // lowByte(temp_s);
-    canMsgTx.data[1] = temp_s >> 8;   // highByte(temp_s);
+    canMsgTx.data[0] = temp_s & 0xFF;
+    canMsgTx.data[1] = temp_s >> 8;
     canMsgTx.data[2] = spd_s & 0xFF;
     canMsgTx.data[3] = spd_s >> 8;
     canMsgTx.data[4] = injDisable_s;
@@ -349,7 +349,8 @@ void loop()
   static uint8_t regFailCount = 0;
   if (alive != 100)
   {
-    if (++regFailCount >= REGULATOR_FAIL_THRESHOLD) {
+    if (++regFailCount >= REGULATOR_FAIL_THRESHOLD)
+    {
       digitalWriteFast(regulator_pin, LOW);
     }
   }
@@ -358,8 +359,5 @@ void loop()
     regFailCount = 0;
     digitalWriteFast(regulator_pin, HIGH);
   }
-  // uint32_t runtime = micros() - currentMicros;
-  // Serial.print("Loop runtime: ");
-  // Serial.println(runtime);
   wdt_reset();
 }
