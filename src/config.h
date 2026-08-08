@@ -18,15 +18,15 @@
 #include <soc/i2s_struct.h>
 
 // --- PUSH START PIN DEFINITIONS ---
-#define PIN_RELAY_ACC 16   // Terminal 15R (Accessory)
-#define PIN_RELAY_IGN 26   // Terminal 15 (POS2/Ignition)
-#define PIN_RELAY_START 13 // Terminal 50 (Starter)
-#define PIN_BTN_START 33   // Push Button (Active Low, Pull-Up, RTC-capable)
-#define PIN_INPUT_BRAKE 36 // Brake Light Sensor (Active High, Opto-isolated, Input-only)
-#define PIN_WAKE_UNLOCK 35 // Unlock Pulse Input (Active Low, Opto-isolated, RTC Input-only)
-#define PIN_5V_GATE 27 // Controls the 5V Relay (via ULN2003)
+#define PIN_RELAY_ACC 16        // Terminal 15R (Accessory)
+#define PIN_RELAY_IGN 26        // Terminal 15 (POS2/Ignition)
+#define PIN_RELAY_START 13      // Terminal 50 (Starter)
+#define PIN_BTN_START 33        // Push Button (Active Low, Pull-Up, RTC-capable)
+#define PIN_INPUT_BRAKE 36      // Brake Light Sensor (Active High, Opto-isolated, Input-only)
+#define PIN_WAKE_UNLOCK 35      // Unlock Pulse Input (Active Low, Opto-isolated, RTC Input-only)
+#define PIN_5V_GATE 27          // Controls the 5V Relay (via ULN2003)
 #define PIN_3V3_DIGITAL_GATE 17 // Powers the Level Shifter LV and digital 3.3V pull-ups
-#define PIN_RELAY_LOCK 32 // Controls the vehicle lock relay (Active High)
+#define PIN_RELAY_LOCK 32       // Controls the vehicle lock relay (Active High)
 #define buzzer_pin 4
 #define coolant_level_pin 34
 #define FIELD_PIN 12
@@ -74,18 +74,19 @@ const int LOW_FUEL_LEVEL = 10;
 const float INJECTOR_FLOW_RATE_CC_MIN = 206.0f;
 const int NUM_INJECTORS = 4;
 const float FUEL_TANK_CAPACITY_LITERS = 62.0f;
-const uint32_t MAX_INJ_PULSE_PER_INTERVAL_US = 60000;
+const uint32_t MAX_INJ_PULSE_PER_INTERVAL_US = 1000000; // 1,000,000us (1s): handles multiple deferred CAN sends if Front MCU skips sending for up to 1 second
 #define RTC_TRIP_MAGIC_KEY 0xCAFE4567
 
 // Timeout Constants
-const unsigned long STANDBY_TIMEOUT_MS = 120000; // 2 Minute
+const unsigned long STANDBY_TIMEOUT_MS = 120000;    // 2 Minute
 const unsigned long ACCESSORY_TIMEOUT_MS = 3600000; // 1 Hour
 const unsigned long BUTTON_COOLDOWN_MS = 500;
 const unsigned long BUTTON_LONGPRESS_RESET_MS = 3000;
 const unsigned long MAX_CRANK_TIME_MS = 5000;
 
 // --- SYSTEM STATES ---
-enum SystemState {
+enum SystemState
+{
   STATE_SLEEP,
   STATE_STANDBY,
   STATE_ACC,
@@ -94,10 +95,20 @@ enum SystemState {
   STATE_RUNNING
 };
 
-enum ToneState { TONE_IDLE, TONE_ON, TONE_OFF };
-enum LockRelayState { LOCK_IDLE, LOCK_PULSE_ACTIVE };
+enum ToneState
+{
+  TONE_IDLE,
+  TONE_ON,
+  TONE_OFF
+};
+enum LockRelayState
+{
+  LOCK_IDLE,
+  LOCK_PULSE_ACTIVE
+};
 
-struct CalibrationPoint {
+struct CalibrationPoint
+{
   int rawValue;
   float percent;
 };
