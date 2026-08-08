@@ -5,8 +5,7 @@ void drawStaticGauge()
   tv.drawRect(FUEL_X, FUEL_Y, FUEL_WIDTH, FUEL_HEIGHT, 0xFF);
 }
 
-void warnings(int percent, int temp_out, int spd, int coolant_level,
-              int oil_level, unsigned long now)
+void warnings(unsigned long now)
 {
   buzzer_state = 0;
   static int priority = 0;

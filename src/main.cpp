@@ -559,19 +559,31 @@ void loop()
     if (elapsed_sec <= 0.0f)
       elapsed_sec = 1.0f;
 
+    // --- Dead-time compensation ---
+    // Injector dead-time is the solenoid opening delay where no fuel flows.
+    // It varies with battery voltage: lower voltage = longer dead-time.
+    float dead_time_us = getInjectorDeadTime(local_voltage_filtered);
+    float one_inj_pulses = ((float)new_rpm / 120.0f) * elapsed_sec;
+
+    // Subtract dead-time from accumulated injection time (one injector)
+    float corrected_inj_us = (float)accumulated_inj_time_us -
+                             (one_inj_pulses * dead_time_us);
+    if (corrected_inj_us < 0.0f)
+      corrected_inj_us = 0.0f;
+
     // Fuel consumed during the interval (in liters)
-    float fuel_consumed_liters = (accumulated_inj_time_us / 1000000.0f) *
+    float fuel_consumed_liters = (corrected_inj_us / 1000000.0f) *
                                  (INJECTOR_FLOW_RATE_CC_MIN / 60.0f / 1000.0f) *
                                  (float)NUM_INJECTORS;
 
-    // Track the actual injection pulse width right before injDisable engages
+    // Track the actual injection pulse width right before injDisable engages.
+    // Uses RPM/120 = one injector's events/sec (4-cyl 4-stroke, 1 fire per 2 revs)
     static float last_active_inj_pulse_us = 2500.0f;
     if (injector_state == 0 && accumulated_inj_time_us > 0 && new_rpm > 0)
     {
-      float pulses = ((float)new_rpm / 30.0f) * elapsed_sec;
-      if (pulses > 0.0f)
+      if (one_inj_pulses > 0.0f)
       {
-        float current_pulse_us = (float)accumulated_inj_time_us / pulses;
+        float current_pulse_us = (float)accumulated_inj_time_us / one_inj_pulses;
         if (current_pulse_us >= 1000.0f && current_pulse_us <= 25000.0f)
         {
           last_active_inj_pulse_us = current_pulse_us;
@@ -584,13 +596,16 @@ void loop()
 
     if (injector_state == 1 && new_rpm > 0)
     {
-      // Calculate fuel saved using the actual pre-cut off pulse width (or
-      // 2500.0f fallback)
+      // Calculate fuel saved using the actual pre-cutoff pulse width (or
+      // 2500.0f fallback), minus dead-time since that portion doesn't flow
       float active_pulse_us = (last_active_inj_pulse_us >= 1000.0f)
                                   ? last_active_inj_pulse_us
                                   : 2500.0f;
+      float corrected_pulse = active_pulse_us - dead_time_us;
+      if (corrected_pulse < 0.0f)
+        corrected_pulse = 0.0f;
       float saved_inj_time_us =
-          ((float)new_rpm / 30.0f) * active_pulse_us * elapsed_sec;
+          ((float)new_rpm / 120.0f) * corrected_pulse * elapsed_sec;
       float fuel_saved_interval =
           (saved_inj_time_us / 1000000.0f) *
           (INJECTOR_FLOW_RATE_CC_MIN / 60.0f / 1000.0f) * (float)NUM_INJECTORS;
@@ -708,7 +723,7 @@ void loop()
     last_t = t;
   }
   oil_level = (int)oil_level_t;
-  warnings(percent, temp_out, spd, coolant_level, oil_level, now);
+  warnings(now);
 
   processPushStart(now);
   esp_task_wdt_reset();

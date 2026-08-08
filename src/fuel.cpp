@@ -38,3 +38,32 @@ void resetFuelTripData(unsigned long now) {
   tv.print("RESET DONE!");
   resetPrintTime = (now != 0) ? now : millis();
 }
+
+float getInjectorDeadTime(float voltage) {
+  // Typical Bosch low-impedance injector dead-time (opening delay) vs voltage.
+  // During dead-time the solenoid is energizing but the pintle hasn't opened,
+  // so no fuel flows. Adjust these values if you bench-test your injectors.
+  struct DTPoint {
+    float voltage;
+    float us;
+  };
+  static const DTPoint dt[] = {
+      {10.0f, 1800.0f}, {11.0f, 1600.0f}, {12.0f, 1400.0f}, {13.0f, 1100.0f},
+      {13.5f, 1000.0f}, {14.0f, 900.0f},  {15.0f, 750.0f},  {16.0f, 650.0f},
+  };
+  static const int N = sizeof(dt) / sizeof(dt[0]);
+
+  if (voltage <= dt[0].voltage)
+    return dt[0].us;
+  if (voltage >= dt[N - 1].voltage)
+    return dt[N - 1].us;
+
+  for (int i = 0; i < N - 1; i++) {
+    if (voltage >= dt[i].voltage && voltage <= dt[i + 1].voltage) {
+      float x0 = dt[i].voltage, x1 = dt[i + 1].voltage;
+      float y0 = dt[i].us, y1 = dt[i + 1].us;
+      return y0 + (voltage - x0) * (y1 - y0) / (x1 - x0);
+    }
+  }
+  return 1000.0f; // Fallback
+}
