@@ -35,18 +35,15 @@ void drainCanRxBuffer(unsigned long now) {
           ((uint32_t)canMsg.data[2] << 16) | ((uint32_t)canMsg.data[3] << 24);
       if (pulse <= MAX_INJ_PULSE_PER_INTERVAL_US) {
         accumulated_inj_time_us += pulse;
-        static unsigned long last_0x04_time = 0;
-        unsigned long now_us = micros();
-        if (last_0x04_time > 0) {
-          uint32_t delta_us = now_us - last_0x04_time;
-          if (delta_us >= 20000 && delta_us <= 150000) {
-            float raw_duty = ((float)pulse / (float)delta_us) * 100.0f;
-            raw_duty = constrain(raw_duty, 0.0f, 100.0f);
-            live_inj_duty_cycle =
-                0.25f * raw_duty + 0.75f * live_inj_duty_cycle;
-          }
-        }
-        last_0x04_time = now_us;
+        // Front MCU sends 0x04 at a fixed 50ms interval, each packet carries
+        // exactly one interval's worth of injection time. Use the known constant
+        // instead of measuring read-to-read delta with micros() which suffers
+        // from ±16.6ms VSYNC jitter.
+        float raw_duty =
+            ((float)pulse / (float)FRONT_MCU_CAN_SEND_INTERVAL_US) * 100.0f;
+        raw_duty = constrain(raw_duty, 0.0f, 100.0f);
+        live_inj_duty_cycle =
+            0.25f * raw_duty + 0.75f * live_inj_duty_cycle;
       }
     }
   }
