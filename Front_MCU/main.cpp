@@ -55,6 +55,7 @@ volatile uint32_t period = 0;
 volatile uint16_t spd_pulse_count = 0;
 volatile uint32_t spd_last_pulse_us = 0;
 volatile uint32_t total_inj_time_us = 0;
+volatile uint16_t total_inj_pulses = 0;
 volatile uint16_t inj_start_ticks = 0;
 volatile uint32_t last_inj_pulse_width = 0;
 // volatile uint32_t inj_now = 0;
@@ -112,6 +113,7 @@ ISR(PCINT2_vect)
       uint16_t pulse_ticks = inj_now_ticks - inj_start_ticks;
       last_inj_pulse_width = pulse_ticks >> 1; // Convert 0.5us ticks (Prescaler 8) to us
       total_inj_time_us += last_inj_pulse_width;
+      total_inj_pulses++;
       inj_active = false;
       inj_end_ticks = inj_now_ticks;
     }
@@ -328,18 +330,22 @@ void loop()
     canMsgTx.data[7] = oil_level;
     mcp2515.sendMessage(&canMsgTx);
 
-    // Atomically read and reset total_inj_time_us
+    // Atomically read and reset total_inj_time_us and total_inj_pulses
     noInterrupts();
     uint32_t local_inj_time = total_inj_time_us;
+    uint16_t local_inj_pulses = total_inj_pulses;
     total_inj_time_us = 0;
+    total_inj_pulses = 0;
     interrupts();
 
     canMsgTx.can_id = 0x04;
-    canMsgTx.can_dlc = 4;
+    canMsgTx.can_dlc = 6;
     canMsgTx.data[0] = local_inj_time & 0xFF;
     canMsgTx.data[1] = (local_inj_time >> 8) & 0xFF;
     canMsgTx.data[2] = (local_inj_time >> 16) & 0xFF;
     canMsgTx.data[3] = (local_inj_time >> 24) & 0xFF;
+    canMsgTx.data[4] = local_inj_pulses & 0xFF;
+    canMsgTx.data[5] = (local_inj_pulses >> 8) & 0xFF;
     mcp2515.sendMessage(&canMsgTx);
 
     lastCanSendTime = currentMillis;

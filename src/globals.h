@@ -46,6 +46,7 @@ extern int percent;
 
 extern RTC_DATA_ATTR uint32_t rtc_trip_magic;
 extern uint32_t accumulated_inj_time_us;
+extern uint32_t accumulated_inj_pulses;
 extern float live_inj_duty_cycle;
 extern RTC_DATA_ATTR float total_fuel_liters;
 extern RTC_DATA_ATTR float total_distance_km;

@@ -498,6 +498,7 @@ void loop()
   if (now - lastPacketTime > FRONT_MCU_CAN_TIMEOUT_MS)
   {
     rpm = 0;
+    spd = 0;
   }
 
   // =========================== Send Dynamic data to display
@@ -560,11 +561,10 @@ void loop()
     // Injector dead-time is the solenoid opening delay where no fuel flows.
     // It varies with battery voltage: lower voltage = longer dead-time.
     float dead_time_us = getInjectorDeadTime(local_voltage_filtered);
-    float one_inj_pulses = ((float)new_rpm / 120.0f) * elapsed_sec;
 
-    // Subtract dead-time from accumulated injection time (one injector)
+    // Subtract dead-time from each physical pulse received (one injector)
     float corrected_inj_us = (float)accumulated_inj_time_us -
-                             (one_inj_pulses * dead_time_us);
+                             ((float)accumulated_inj_pulses * dead_time_us);
     if (corrected_inj_us < 0.0f)
       corrected_inj_us = 0.0f;
 
@@ -573,36 +573,29 @@ void loop()
                                  (INJECTOR_FLOW_RATE_CC_MIN / 60.0f / 1000.0f) *
                                  (float)NUM_INJECTORS;
 
-    // Track the actual injection pulse width right before injDisable engages.
-    // Uses RPM/120 = one injector's events/sec (4-cyl 4-stroke, 1 fire per 2 revs)
-    static float last_active_inj_pulse_us = 2500.0f;
-    if (injector_state == 0 && accumulated_inj_time_us > 0 && new_rpm > 0)
+    // Track the actual net injection pulse width (effective fuel delivery duration per pulse)
+    // right before injDisable engages.
+    static float last_active_inj_pulse_us = 1500.0f; // Net pulse width fallback (~1.5ms net open time)
+    if (injector_state == 0 && accumulated_inj_time_us > 0 && accumulated_inj_pulses > 0)
     {
-      if (one_inj_pulses > 0.0f)
+      float current_net_pulse_us = corrected_inj_us / (float)accumulated_inj_pulses;
+      if (current_net_pulse_us > 0.0f)
       {
-        float current_pulse_us = (float)accumulated_inj_time_us / one_inj_pulses;
-        if (current_pulse_us >= 1000.0f && current_pulse_us <= 25000.0f)
-        {
-          last_active_inj_pulse_us = current_pulse_us;
-        }
+        last_active_inj_pulse_us = current_net_pulse_us;
       }
     }
     accumulated_inj_time_us = 0; // Reset accumulator
+    accumulated_inj_pulses = 0;  // Reset pulse accumulator
 
     total_fuel_liters += fuel_consumed_liters;
 
-    if (injector_state == 1 && new_rpm > 0)
+    if (injector_state == 1 && rpm > 0)
     {
-      // Calculate fuel saved using the actual pre-cutoff pulse width (or
-      // 2500.0f fallback), minus dead-time since that portion doesn't flow
-      float active_pulse_us = (last_active_inj_pulse_us >= 1000.0f)
-                                  ? last_active_inj_pulse_us
-                                  : 2500.0f;
-      float corrected_pulse = active_pulse_us - dead_time_us;
-      if (corrected_pulse < 0.0f)
-        corrected_pulse = 0.0f;
+      // Calculate fuel saved using pre-cutoff net pulse width
+      float corrected_pulse = last_active_inj_pulse_us;
+
       float saved_inj_time_us =
-          ((float)new_rpm / 120.0f) * corrected_pulse * elapsed_sec;
+          ((float)rpm / 120.0f) * corrected_pulse * elapsed_sec;
       float fuel_saved_interval =
           (saved_inj_time_us / 1000000.0f) *
           (INJECTOR_FLOW_RATE_CC_MIN / 60.0f / 1000.0f) * (float)NUM_INJECTORS;
