@@ -1,4 +1,4 @@
-# 🔌 Hardware Schematics & Component Breakdown
+# 🔌 Comprehensive Hardware Schematics & Component Breakdown
 
 This document provides a **complete, component-by-component hardware schematic and netlist specification** for both the **ESP32 Cabin Controller** and the **ATmega328P Front MCU**.
 
@@ -12,30 +12,31 @@ flowchart TD
         direction TB
 
         %% Microcontroller Core
-        ESP32Core["ESP32 Core\nCore 0: PID Regulator & ADS1115 Read\nCore 1: Composite Video, Push-Start & CAN"]
+        ESP32Core["ESP32 Core<br/>Core 0: PID Regulator & ADS1115 Read<br/>Core 1: Composite Video, Push-Start & CAN"]
 
         %% Analog Sensing Subsystem (ADS1115 16-bit I2C ADC @ 0x48)
-        ADS["ADS1115 ADC (I2C 0x48)\nAddress Pin ADDR -> GND"]
-        ADS -- "Channel A0" --> VoltDiv["Alternator Voltage Divider\n(Resistor Divider to 13.6V Ceiling)"]
-        ADS -- "Channel A1" --> HallSensor["FS500E2T Hall Current Sensor\n(2.5V Offset, 4mV/A Scale)"]
-        ADS -- "Channel A2" --> FuelSender["Fuel Level Sender Tank Unit\n(Resistor Divider / Calibration Table)"]
-        ADS <== "I2C (SDA: GPIO21, SCL: GPIO22)" ==> ESP32Core
+        ADS["ADS1115 ADC (I2C 0x48)<br/>Address Pin ADDR -> GND"]
+        ADS -->|"Channel A0"| VoltDiv["Alternator Voltage Divider<br/>(Resistor Divider to 13.6V Ceiling)"]
+        ADS -->|"Channel A1"| HallSensor["FS500E2T Hall Current Sensor<br/>(2.5V Offset, 4mV/A Scale)"]
+        ADS -->|"Channel A2"| FuelSender["Fuel Level Sender Tank Unit<br/>(Resistor Divider / Calibration Table)"]
+        ADS <==>|"I2C (SDA: GPIO21, SCL: GPIO22)"| ESP32Core
 
         %% Alternator Field Drive Subsystem (IR2110PBF High/Low Driver)
-        ESP32Core -- "GPIO12 (FIELD_PIN - 10-bit PWM)" --> IR2110["IR2110PBF Gate Driver IC\nVDD: 3.3V | VCC: 12V | LIN: GPIO12"]
-        IR2110 -- "LO (Pin 1) via 10Ω Resistor" --> GateMOS["IRLZ44N / IRF3205 N-Ch MOSFET"]
-        GateMOS -- "Drain" --> FieldCoilNeg["Field Coil (-) Terminal"]
-        ESP32Core -- "GPIO14 (field_relay_pin)" --> FieldRelayDriver["ULN2003 Driver Ch 6"] --> FieldRelay["Emergency Field Disconnect Relay"]
-        FieldRelay -- "Switched +12V" --> FieldCoilPos["Field Coil (+) Terminal"]
-        FieldCoilPos <== "UF5408 High-Speed Flyback Diode" ==> FieldCoilNeg
+        ESP32Core -->|"GPIO12 (FIELD_PIN - 10-bit PWM)"| IR2110["IR2110PBF Gate Driver IC<br/>VDD: 3.3V | VCC: 12V | LIN: GPIO12"]
+        IR2110 -->|"LO (Pin 1) via 10Ω Resistor"| GateMOS["IRLZ44N / IRF3205 N-Ch MOSFET"]
+        GateMOS -->|"Drain"| FieldCoilNeg["Field Coil (-) Terminal"]
+        ESP32Core -->|"GPIO14 (field_relay_pin)"| FieldRelayDriver["ULN2003 Driver Ch 6"]
+        FieldRelayDriver --> FieldRelay["Emergency Field Disconnect Relay"]
+        FieldRelay -->|"Switched +12V"| FieldCoilPos["Field Coil (+) Terminal"]
+        FieldCoilPos <==>|"UF5408 High-Speed Flyback Diode"| FieldCoilNeg
 
         %% Push-Start & Power Management Outputs (ULN2003 Relay Transistor Array)
-        ESP32Core -- "GPIO16 (PIN_RELAY_ACC)" --> ULN["ULN2003 Transistor Array"]
-        ESP32Core -- "GPIO26 (PIN_RELAY_IGN)" --> ULN
-        ESP32Core -- "GPIO13 (PIN_RELAY_START)" --> ULN
-        ESP32Core -- "GPIO27 (PIN_5V_GATE)" --> ULN
-        ESP32Core -- "GPIO32 (PIN_RELAY_LOCK)" --> ULN
-        ESP32Core -- "GPIO17 (PIN_3V3_DIGITAL_GATE)" --> LevelShifterGate["P-Ch MOSFET Power Switch"]
+        ESP32Core -->|"GPIO16 (PIN_RELAY_ACC)"| ULN["ULN2003 Transistor Array"]
+        ESP32Core -->|"GPIO26 (PIN_RELAY_IGN)"| ULN
+        ESP32Core -->|"GPIO13 (PIN_RELAY_START)"| ULN
+        ESP32Core -->|"GPIO27 (PIN_5V_GATE)"| ULN
+        ESP32Core -->|"GPIO32 (PIN_RELAY_LOCK)"| ULN
+        ESP32Core -->|"GPIO17 (PIN_3V3_DIGITAL_GATE)"| LevelShifterGate["P-Ch MOSFET Power Switch"]
 
         ULN --> RelayACC["Terminal 15R (Accessory Relay)"]
         ULN --> RelayIGN["Terminal 15 (Ignition POS2 Relay)"]
@@ -44,40 +45,45 @@ flowchart TD
         ULN --> RelayLock["Vehicle Lock Relay"]
 
         %% Isolated Inputs
-        OptoBrake["Brake Switch (+12V Line)"] --> PC817_1["PC817 Optocoupler #1"] --> ESP32Core -- "GPIO36 (VP - Brake Input)"
-        OptoUnlock["Central Lock Unlock (+12V Line)"] --> PC817_2["PC817 Optocoupler #2"] --> ESP32Core -- "GPIO35 (RTC Wake Trigger)"
-        StartBtn["Push Start Button (Active Low)"] -- "10kΩ Pull-Up & 100nF Cap" --> ESP32Core -- "GPIO33 (RTC Wake Button)"
-        CoolantSen["Coolant Level Switch"] -- "Pull-Down Resistor" --> ESP32Core -- "GPIO34 (coolant_level_pin)"
+        OptoBrake["Brake Switch (+12V Line)"] --> PC817_1["PC817 Optocoupler #1"]
+        PC817_1 -->|"GPIO36 (VP - Brake Input)"| ESP32Core
+        OptoUnlock["Central Lock Unlock (+12V Line)"] --> PC817_2["PC817 Optocoupler #2"]
+        PC817_2 -->|"GPIO35 (RTC Wake Trigger)"| ESP32Core
+        StartBtn["Push Start Button (Active Low)"] -->|"GPIO33 (RTC Wake Button)<br/>10kΩ Pull-Up & 100nF Cap"| ESP32Core
+        CoolantSen["Coolant Level Switch"] -->|"GPIO34 (coolant_level_pin)<br/>Pull-Down Resistor"| ESP32Core
 
         %% CAN Communication Interface
-        ESP32Core <== "SPI (CS: 5, SCK: 18, MISO: 19, MOSI: 23)" ==> MCP2515_Cabin["MCP2515 SPI CAN Controller"]
-        MCP2515_Cabin <== "TxD / RxD" ==> TJA1050_Cabin["TJA1050 CAN Transceiver (with 120Ω Term Resistor)"]
+        ESP32Core <==>|"SPI (CS: 5, SCK: 18, MISO: 19, MOSI: 23)"| MCP2515_Cabin["MCP2515 SPI CAN Controller"]
+        MCP2515_Cabin <==>|"TxD / RxD"| TJA1050_Cabin["TJA1050 CAN Transceiver (with 120Ω Term Resistor)"]
 
         %% Audio & Video Peripherals
-        ESP32Core -- "GPIO25 (DAC1)" --> RCAJack["Composite Video RCA (PAL/NTSC - 75Ω Impedance)"]
-        ESP32Core -- "GPIO4 (buzzer_pin)" --> BuzzerDriver["NPN Transistor Driver"] --> Buzzer["Audible Alarm Buzzer"]
+        ESP32Core -->|"GPIO25 (DAC1)"| RCAJack["Composite Video RCA (PAL/NTSC - 75Ω Impedance)"]
+        ESP32Core -->|"GPIO4 (buzzer_pin)"| BuzzerDriver["NPN Transistor Driver"]
+        BuzzerDriver --> Buzzer["Audible Alarm Buzzer"]
     end
 
     subgraph CANBus["500 kbps Differential CAN Bus"]
-        TJA1050_Cabin <== "CAN_H / CAN_L Twisted Pair" ==> TJA1050_Front["TJA1050 CAN Transceiver (Front MCU)"]
+        TJA1050_Cabin <==>|"CAN_H / CAN_L Twisted Pair"| TJA1050_Front["TJA1050 CAN Transceiver (Front MCU)"]
     end
 
     subgraph FrontMCU["Engine Bay Controller (ATmega328P / Arduino Nano)"]
-        TJA1050_Front <==> MCP2515_Front["MCP2515 CAN Controller"] <== "SPI (CS: D10)" ==> NanoCore["ATmega328P"]
+        TJA1050_Front <==> MCP2515_Front["MCP2515 CAN Controller"]
+        MCP2515_Front <==>|"SPI (CS: D10)"| NanoCore["ATmega328P"]
         
         %% Inputs
-        RPM_In["Engine RPM Signal"] -->|Opto / Zener Clamp| NanoCore -- "Pin D2 (INT0)"
-        Speed_In["ABS Speed Pulse"] -->|Opto / Zener Clamp| NanoCore -- "Pin D3 (INT1)"
-        Throttle_In["Throttle Closed Idle Switch"] -->|10k Pull-Up| NanoCore -- "Pin D4 (th_pin)"
-        Inj_In["ECU Injector Signal"] -->|PC817 Opto| NanoCore -- "Pin D7 (PCINT23)"
-        AC_In["Automatic A/C Signal"] -->|Resistor Divider| NanoCore -- "Pin A1 (ac)"
-        Temp_In["Engine Temp NTC"] -->|Divider| NanoCore -- "Pin A0 (tempPin)"
-        Oil_In["Oil Level Sensor"] --> NanoCore -- "Pin D6 (oil_level_pin)"
+        RPM_In["Engine RPM Signal"] -->|"Opto / Zener Clamp<br/>Pin D2 (INT0)"| NanoCore
+        Speed_In["ABS Speed Pulse"] -->|"Opto / Zener Clamp<br/>Pin D3 (INT1)"| NanoCore
+        Throttle_In["Throttle Closed Idle Switch"] -->|"10k Pull-Up<br/>Pin D4 (th_pin)"| NanoCore
+        Inj_In["ECU Injector Signal"] -->|"PC817 Opto<br/>Pin D7 (PCINT23)"| NanoCore
+        AC_In["Automatic A/C Signal"] -->|"Resistor Divider<br/>Pin A1 (ac)"| NanoCore
+        Temp_In["Engine Temp NTC"] -->|"Divider<br/>Pin A0 (tempPin)"| NanoCore
+        Oil_In["Oil Level Sensor"] -->|"Pin D6 (oil_level_pin)"| NanoCore
 
         %% Outputs
-        NanoCore -- "Pin D5 PWM Signal" --> ToyotaPWMModule["Toyota OEM Cooling Fan PWM Driver Module"] --> RadFan["Radiator Fan Motor"]
-        NanoCore -- "Pin D8 Output" --> DFCO_Relay["High-Side Injector Cutoff Relay"]
-        NanoCore -- "Pin D9 Output" --> FrontFieldFailsafe["Safety Field Disconnect Line"]
+        NanoCore -->|"Pin D5 PWM Signal"| ToyotaPWMModule["Toyota OEM Cooling Fan PWM Driver Module"]
+        ToyotaPWMModule --> RadFan["Radiator Fan Motor"]
+        NanoCore -->|"Pin D8 Output"| DFCO_Relay["High-Side Injector Cutoff Relay"]
+        NanoCore -->|"Pin D9 Output"| FrontFieldFailsafe["Safety Field Disconnect Line"]
     end
 ```
 
@@ -192,7 +198,7 @@ The ATmega328P Pin D5 outputs a 500Hz PWM signal mapped from engine coolant temp
 
   GPIO16 (ACC)    --------------------------->  IN 1  (Pin 1) ----- OUT 1 (Pin 16) ------->  Terminal 15R Relay
   GPIO26 (IGN)    --------------------------->  IN 2  (Pin 2) ----- OUT 2 (Pin 15) ------->  Terminal 15 Relay
-  GPIO13 (START)  --------------------------->  IN 3  (Pin 3) ----- OUT 3 (Pin 14) ------->  Terminal 50 Starter Relay
+  GPIO13 (START)  --------------------------->  IN 3  (Pin 3) ----- OUT 3 (Pin 14) ------->  Starter Solenoid Relay
   GPIO27 (5V GATE)--------------------------->  IN 4  (Pin 4) ----- OUT 4 (Pin 13) ------->  5V Power Gate Relay
   GPIO32 (LOCK)   --------------------------->  IN 5  (Pin 5) ----- OUT 5 (Pin 12) ------->  Vehicle Lock Relay
   GPIO14 (FIELD)  --------------------------->  IN 6  (Pin 6) ----- OUT 6 (Pin 11) ------->  Field Safety Relay
