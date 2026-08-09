@@ -98,12 +98,13 @@ void spdISR()
 // injector ISR
 ISR(PCINT2_vect)
 {
-  isr_firing = true;
+
   uint16_t inj_now_ticks = TCNT1;
   if (!(PIND & _BV(PD7)))
   {
     if (!inj_active)
     {
+      isr_firing = true;
       inj_start_ticks = inj_now_ticks;
       inj_active = true;
     }
@@ -314,7 +315,19 @@ void loop()
   {
     alive = 0;
   }
+  // Check flag so we avoid calling noInterrupts() while ISR is still calculating injection time and pulses. This prevents reading partial values and ensures atomicity.
+  static uint32_t local_inj_time = 0;
+  static uint16_t local_inj_pulses = 0;
+  if (!isr_firing)
+  {
+    noInterrupts();
+    local_inj_time += total_inj_time_us;
+    local_inj_pulses += total_inj_pulses;
+    total_inj_time_us = 0;
+    total_inj_pulses = 0;
 
+    interrupts();
+  }
   uint8_t injDisable_s = (uint8_t)injDisable;
   uint16_t rpm_s = (uint16_t)(rpm);
   //================= Send to Display MCU (Every 50ms) ===============//
@@ -333,20 +346,6 @@ void loop()
     canMsgTx.data[7] = oil_level;
     mcp2515.sendMessage(&canMsgTx);
 
-    uint32_t local_inj_time = 0;
-    uint16_t local_inj_pulses = 0;
-
-    // Check flag so we avoid calling noInterrupts() while ISR is still calculating injection time and pulses. This prevents reading partial values and ensures atomicity.
-    if (!isr_firing)
-    {
-      noInterrupts();
-      local_inj_time = total_inj_time_us;
-      local_inj_pulses = total_inj_pulses;
-      total_inj_time_us = 0;
-      total_inj_pulses = 0;
-      interrupts();
-    }
-
     canMsgTx.can_id = 0x04;
     canMsgTx.can_dlc = 6;
     canMsgTx.data[0] = local_inj_time & 0xFF;
@@ -356,7 +355,8 @@ void loop()
     canMsgTx.data[4] = local_inj_pulses & 0xFF;
     canMsgTx.data[5] = (local_inj_pulses >> 8) & 0xFF;
     mcp2515.sendMessage(&canMsgTx);
-
+    local_inj_time = 0;
+    local_inj_pulses = 0;
     lastCanSendTime = currentMillis;
   }
 
