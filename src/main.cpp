@@ -332,9 +332,9 @@ void loop()
     }
 
     // Injector Duty Cycle (%)
-    char bufInj[12];
-    snprintf(bufInj, sizeof(bufInj), "INJ:%3.0f%% ", live_inj_duty_cycle);
-    static char last_bufInj[12] = "";
+    char bufInj[16];
+    snprintf(bufInj, sizeof(bufInj), "INJ:%4.1f%% ", live_inj_duty_cycle);
+    static char last_bufInj[16] = "";
     if (strcmp(bufInj, last_bufInj) != 0)
     {
       tv.setCursor(FUEL_X + FUEL_WIDTH + 150, FUEL_Y + 20);
