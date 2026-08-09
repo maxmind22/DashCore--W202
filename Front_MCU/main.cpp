@@ -58,11 +58,9 @@ volatile uint32_t total_inj_time_us = 0;
 volatile uint16_t total_inj_pulses = 0;
 volatile uint16_t inj_start_ticks = 0;
 volatile uint32_t last_inj_pulse_width = 0;
-// volatile uint32_t inj_now = 0;
 volatile uint16_t inj_end_ticks = 0;
 volatile bool inj_active = false;
 volatile bool injDisable = false;
-volatile bool isr_firing = false;
 
 // These are only used in loop(), so they do NOT need to be volatile
 uint32_t rpm = 0;
@@ -104,7 +102,6 @@ ISR(PCINT2_vect)
   {
     if (!inj_active)
     {
-      isr_firing = true;
       inj_start_ticks = inj_now_ticks;
       inj_active = true;
     }
@@ -119,7 +116,6 @@ ISR(PCINT2_vect)
       total_inj_pulses++;
       inj_active = false;
       inj_end_ticks = inj_now_ticks;
-      isr_firing = false;
     }
   }
 }
@@ -318,7 +314,7 @@ void loop()
   // Check flag so we avoid calling noInterrupts() while ISR is still calculating injection time and pulses. This prevents reading partial values and ensures atomicity.
   static uint32_t local_inj_time = 0;
   static uint16_t local_inj_pulses = 0;
-  if (!isr_firing)
+  if (!inj_active)
   {
     noInterrupts();
     local_inj_time += total_inj_time_us;
