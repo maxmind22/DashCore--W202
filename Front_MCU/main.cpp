@@ -61,6 +61,7 @@ volatile uint32_t last_inj_pulse_width = 0;
 volatile uint16_t inj_end_ticks = 0;
 volatile bool inj_active = false;
 volatile bool injDisable = false;
+volatile bool inj_has_data = false;
 
 // These are only used in loop(), so they do NOT need to be volatile
 uint32_t rpm = 0;
@@ -115,6 +116,7 @@ ISR(PCINT2_vect)
       total_inj_time_us += last_inj_pulse_width;
       total_inj_pulses++;
       inj_active = false;
+      inj_has_data = true;
       inj_end_ticks = inj_now_ticks;
     }
   }
@@ -262,10 +264,7 @@ void loop()
     injDisable = false;
     digitalWriteFast(inj_pin, LOW);
   }
-  else if (injDisable)
-  {
-    digitalWriteFast(inj_pin, HIGH);
-  }
+
 
   //==================== Calculate Vehicle Speed (Every 100ms) ====================//
   if (currentMillis - lastSpdCalculationTime >= SPD_WINDOW_MS)
@@ -311,17 +310,21 @@ void loop()
   {
     alive = 0;
   }
-  // Check flag so we avoid calling noInterrupts() while ISR is still calculating injection time and pulses. This prevents reading partial values and ensures atomicity.
+  // 1-byte atomic guard: Checking inj_has_data is a single 8-bit CPU instruction (atomic on AVR).
+  // Avoids multi-byte tearing and avoids calling noInterrupts() 10,000x/sec.
   static uint32_t local_inj_time = 0;
   static uint16_t local_inj_pulses = 0;
-  if (!inj_active)
+  if (inj_has_data)
   {
     noInterrupts();
-    local_inj_time += total_inj_time_us;
-    local_inj_pulses += total_inj_pulses;
-    total_inj_time_us = 0;
-    total_inj_pulses = 0;
-
+    if (!inj_active)
+    {
+      local_inj_time += total_inj_time_us;
+      local_inj_pulses += total_inj_pulses;
+      total_inj_time_us = 0;
+      total_inj_pulses = 0;
+      inj_has_data = false;
+    }
     interrupts();
   }
   uint8_t injDisable_s = (uint8_t)injDisable;
