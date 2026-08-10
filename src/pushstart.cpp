@@ -391,22 +391,20 @@ void processPushStart(unsigned long now) {
 
     if (standbyBrakeCheckPending) {
       setRelays(true, true, false); // Turn on ACC & IGN to power brake circuit
-      if (now - standbyBrakeCheckTime >= 50) {
+      if (digitalRead(PIN_INPUT_BRAKE) == LOW) {
         standbyBrakeCheckPending = false;
-        bool brakeIsHeldNow = (digitalRead(PIN_INPUT_BRAKE) == LOW);
-        if (brakeIsHeldNow) {
-          if (!engineStartDisabled) {
-            currentState = STATE_CRANKING;
-          } else {
-            // Serial.println("[LOCKDOWN] Engine start blocked! PLZ AUTHENTICATE");
-            playAuthWarningTone();
-            currentState = STATE_STANDBY;
-          }
+        if (!engineStartDisabled) {
+          currentState = STATE_CRANKING;
         } else {
-          currentState = STATE_ACC; // 1st press (without brake) goes to ACC (POS1)
-          standbyStartTime = now; // Reset 2-min timeout
-          stoppedToAcc = false;   // Reset flag as we didn't stop from a running engine to ACC
+          // Serial.println("[LOCKDOWN] Engine start blocked! PLZ AUTHENTICATE");
+          playAuthWarningTone();
+          currentState = STATE_STANDBY;
         }
+      } else if (now - standbyBrakeCheckTime >= BRAKE_CHECK_SETTLE_MS) {
+        standbyBrakeCheckPending = false;
+        currentState = STATE_ACC; // 1st press (without brake) goes to ACC (POS1)
+        standbyStartTime = now; // Reset 2-min timeout
+        stoppedToAcc = false;   // Reset flag as we didn't stop from a running engine to ACC
       }
     } else {
       setRelays(false, false, false);
@@ -425,34 +423,32 @@ void processPushStart(unsigned long now) {
   case STATE_ACC: {
     // Serial.println("ACC");
     // Relays: ACC ON, IGN OFF, START OFF (POS1)
-    // Non-blocking brake check: after button press, IGN turns on for 50ms
-    // to let relay/optocoupler settle, then brake is read without blocking the main loop
+    // Non-blocking brake check: after button press, IGN turns on
+    // to let relay/optocoupler settle, then brake is read continuously during BRAKE_CHECK_SETTLE_MS window
     static bool accBrakeCheckPending = false;
     static unsigned long accBrakeCheckTime = 0;
 
     if (accBrakeCheckPending) {
       setRelays(true, true, false); // Keep IGN on during settle wait
-      if (now - accBrakeCheckTime >= 50) {
+      if (digitalRead(PIN_INPUT_BRAKE) == LOW) {
         accBrakeCheckPending = false;
-        bool brakeIsHeldNow = (digitalRead(PIN_INPUT_BRAKE) == LOW);
-        if (brakeIsHeldNow) {
-          if (!engineStartDisabled) {
-            currentState = STATE_CRANKING;
-            stoppedToAcc = false;
-          } else {
-            Serial.println("[LOCKDOWN] Engine start blocked! PLZ AUTHENTICATE");
-            playAuthWarningTone();
-            currentState = STATE_ACC;
-          }
+        if (!engineStartDisabled) {
+          currentState = STATE_CRANKING;
+          stoppedToAcc = false;
         } else {
-          if (stoppedToAcc) {
-            currentState = STATE_STANDBY; // Go to OFF (standby)
-            stoppedToAcc = false;
-          } else {
-            currentState = STATE_IGNITION; // 2nd press (without brake) goes to POS2 (IGNITION)
-          }
-          standbyStartTime = now; // Reset 2-min timeout
+          Serial.println("[LOCKDOWN] Engine start blocked! PLZ AUTHENTICATE");
+          playAuthWarningTone();
+          currentState = STATE_ACC;
         }
+      } else if (now - accBrakeCheckTime >= BRAKE_CHECK_SETTLE_MS) {
+        accBrakeCheckPending = false;
+        if (stoppedToAcc) {
+          currentState = STATE_STANDBY; // Go to OFF (standby)
+          stoppedToAcc = false;
+        } else {
+          currentState = STATE_IGNITION; // 2nd press (without brake) goes to POS2 (IGNITION)
+        }
+        standbyStartTime = now; // Reset 2-min timeout
       }
     } else {
       setRelays(true, false, false);

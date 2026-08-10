@@ -71,7 +71,7 @@
 
 // Fuel/Trip Constants
 const int LOW_FUEL_LEVEL = 10;
-const float INJECTOR_FLOW_RATE_CC_MIN = 206.0f;
+const float INJECTOR_FLOW_RATE_CC_MIN = 228.0f; // Rated 228 cc/min @ 3.8 bar OEM regulator pressure
 const int NUM_INJECTORS = 4;
 const float FUEL_TANK_CAPACITY_LITERS = 62.0f;
 const uint32_t MAX_INJ_PULSE_PER_INTERVAL_US = 1000000; // 1,000,000us (1s): handles multiple deferred CAN sends if Front MCU skips sending for up to 1 second
@@ -83,6 +83,7 @@ const unsigned long ACCESSORY_TIMEOUT_MS = 3600000; // 1 Hour
 const unsigned long BUTTON_COOLDOWN_MS = 500;
 const unsigned long BUTTON_LONGPRESS_RESET_MS = 3000;
 const unsigned long MAX_CRANK_TIME_MS = 5000;
+const unsigned long BRAKE_CHECK_SETTLE_MS = 100; // Window (ms) to energize and continuously sample brake circuit
 
 // --- SYSTEM STATES ---
 enum SystemState
