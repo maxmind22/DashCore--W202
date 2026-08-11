@@ -714,7 +714,7 @@ void loop()
   }
   oil_level = (int)oil_level_t;
   warnings(now);
-
   processPushStart(now);
+
   esp_task_wdt_reset();
 }
