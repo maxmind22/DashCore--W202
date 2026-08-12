@@ -42,13 +42,7 @@ void setup()
   Wire.setClock(100000); // Slower clock for better noise immunity in engine bay
   Wire.setTimeOut(20);   // Abort I2C transaction if it takes > 20ms
   bool adcReady = adc.begin();
-  if (!adcReady)
-  {
-    Serial.println("Failed to initialize ADS1115!");
-    // We don't block here because the UI might still be useful,
-    // but the regulatorTask will likely fail/crash on ADC reads.
-  }
-  else
+  if (adcReady)
   {
     adc.setGain(GAIN_ONE); // 1x gain for ±4.096V range, adjust if your input
                            // exceeds this
@@ -93,15 +87,7 @@ void setup()
   SPI.begin();
   mcp2515.reset();
   mcp2515.setBitrate(CAN_500KBPS, MCP_8MHZ); // Match transmitter
-  MCP2515::ERROR err = mcp2515.setNormalOneShotMode();
-  if (err != MCP2515::ERROR_OK)
-  {
-    Serial.println("MCP2515 Init FAILED! Check CS(5), SCK(18), MISO(19), MOSI(23) wiring.");
-  }
-  else
-  {
-    Serial.println("MCP2515 Init SUCCESS!");
-  }
+  mcp2515.setNormalOneShotMode();
   esp_task_wdt_deinit();      // De-init default core WDT config
   esp_task_wdt_init(1, true); // 1s timeout with panic=true
   esp_task_wdt_add(nullptr);  // Add current loop task

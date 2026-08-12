@@ -22,7 +22,7 @@ const int ac = A1;
 
 // --- DFCO Configuration ---
 #define DFCO_ENGAGE_RPM 1500
-#define DFCO_DISENGAGE_RPM 1100
+#define DFCO_DISENGAGE_RPM 1000
 #define DFCO_ENGAGE_DELAY_MS 1000
 #define DFCO_ENGINE_WARM_ADC 440
 #define DFCO_INJ_WINDOW_TICKS 8000 // 8000 ticks @ 0.5us/tick = 4000us
@@ -264,7 +264,6 @@ void loop()
     injDisable = false;
     digitalWriteFast(inj_pin, LOW);
   }
-
 
   //==================== Calculate Vehicle Speed (Every 100ms) ====================//
   if (currentMillis - lastSpdCalculationTime >= SPD_WINDOW_MS)
