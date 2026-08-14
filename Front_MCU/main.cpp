@@ -143,8 +143,19 @@ void checkCanErrors()
   }
 }
 
+// Disable watchdog timer immediately after reset (before C runtime init) to prevent bootloops on ATmega328P
+void wdt_init(void) __attribute__((naked)) __attribute__((section(".init3")));
+void wdt_init(void)
+{
+  MCUSR = 0;
+  wdt_disable();
+}
+
 void setup()
 {
+  MCUSR = 0;
+  wdt_disable();
+
   pinMode(fan, OUTPUT);
   pinMode(tempPin, INPUT);
   pinModeFast(rpm_pin, INPUT);
@@ -156,8 +167,6 @@ void setup()
   pinModeFast(regulator_pin, OUTPUT);
   digitalWrite(regulator_pin, HIGH);
   Serial.begin(115200);
-  wdt_disable();
-  wdt_enable(WDTO_120MS);
 
   // Attach interrupts
   attachInterrupt(digitalPinToInterrupt(rpm_pin), rpmISR, FALLING);
@@ -174,9 +183,12 @@ void setup()
   TCCR1A = 0;
   TCCR1B = _BV(CS11); // Normal mode, Prescaler 8
 
+  SPI.begin();
   mcp2515.reset();
   mcp2515.setBitrate(CAN_500KBPS, MCP_8MHZ);
   mcp2515.setNormalOneShotMode();
+
+  wdt_enable(WDTO_500MS);
 }
 
 void loop()
