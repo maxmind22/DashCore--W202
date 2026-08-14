@@ -245,37 +245,10 @@ void loop()
 
   // Front MCU sends km/h directly (pulse-counted from instrument cluster VSS)
   spd_l = constrain((int)spd_t, 0, 220);
-  int spd_in = spd_l;
-
-  // --------------- filter SPD ----------------
-  if (lastTime == 0)
-  {
-    last_spd = spd_in;
-  }
-  if (abs(spd_in - last_spd) <= 3)
-  { // sample accepted
-    spd = spd_in;
-    goodSamples2++;
-  }
-  else
-  {
-    spd = last_spd; // sample rejected, set it to previous good value
-    badSamples2++;
-  }
-  if (now - last_spd_correction >= 5000)
-  { // sample error correction
-    if (goodSamples2 < badSamples2)
-    {
-      spd = spd_in;
-    }
-    goodSamples2 = 0;
-    badSamples2 = 0;
-    last_spd_correction = now;
-  }
+  spd = spd_l;
 
   if (spd != last_spd || lastTime == 0)
   {
-
     tv.setCursor(72, 150);
     tv.setTextColor(0xFF, 0x00);
     tv.setTextSize(5);
