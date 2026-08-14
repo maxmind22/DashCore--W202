@@ -1,4 +1,5 @@
 #include "display.h"
+#include "pushstart.h"
 
 void drawStaticGauge()
 {
@@ -174,7 +175,7 @@ void warnings(unsigned long now)
     chg = 0;
   }
   if (local_charge_state == 2 && lowBlinkState &&
-      now - local_last_charge > BATTERY_LOW_DELAY_MS && priority == 0 && local_rpm > ENGINE_ACTIVE_RPM_THRESHOLD)
+      now - local_last_charge > BATTERY_LOW_DELAY_MS && priority == 0 && rpm > ENGINE_ACTIVE_RPM_THRESHOLD)
   {
     if (chg2 == 0)
     {
@@ -219,7 +220,7 @@ void warnings(unsigned long now)
   {
     digitalWriteFast(buzzer_pin, HIGH);
   }
-  else
+  else if (!isTonePlaying())
   {
     digitalWriteFast(buzzer_pin, LOW);
   }

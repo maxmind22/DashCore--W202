@@ -18,7 +18,6 @@ bool stoppedToAcc = false;
 volatile bool regulatorTaskRunning = true;
 
 unsigned long lastTime = 0;
-unsigned long last_spd_correction = 0;
 unsigned long lastSpeedTime = 0;
 
 bool lowBlinkState = false;
@@ -35,9 +34,7 @@ float smoothVal = 0;
 int lastValue = 0;
 int raw = 0;
 int goodSamples = 0;
-int goodSamples2 = 0;
 int badSamples = 0;
-int badSamples2 = 0;
 unsigned long last_fuel_correction = 0;
 int temp_out = 0;
 int percent = 0;
