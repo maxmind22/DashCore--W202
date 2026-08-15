@@ -252,7 +252,7 @@ void loop()
   {
     last_spd = spd_in;
   }
-  if (abs(spd_in - last_spd) <= 3)
+  if (abs(spd_in - last_spd) <= 10)
   { // sample accepted
     spd = spd_in;
     goodSamples2++;
