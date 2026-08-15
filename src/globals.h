@@ -20,6 +20,7 @@ extern bool stoppedToAcc;
 extern volatile bool regulatorTaskRunning;
 
 extern unsigned long lastTime;
+extern unsigned long last_spd_correction;
 extern unsigned long lastSpeedTime;
 
 extern bool lowBlinkState;
@@ -36,7 +37,9 @@ extern float smoothVal;
 extern int lastValue;
 extern int raw;
 extern int goodSamples;
+extern int goodSamples2;
 extern int badSamples;
+extern int badSamples2;
 extern unsigned long last_fuel_correction;
 extern int temp_out;
 extern int percent;
