@@ -559,17 +559,6 @@ void loop()
                                  (INJECTOR_FLOW_RATE_CC_MIN / 60.0f / 1000.0f) *
                                  (float)NUM_INJECTORS;
 
-    // Track the actual net injection pulse width (effective fuel delivery duration per pulse)
-    // right before injDisable engages.
-    static float last_active_inj_pulse_us = 1500.0f; // Net pulse width fallback (~1.5ms net open time)
-    if (injector_state == 0 && accumulated_inj_time_us > 0 && accumulated_inj_pulses > 0)
-    {
-      float current_net_pulse_us = corrected_inj_us / (float)accumulated_inj_pulses;
-      if (current_net_pulse_us > 0.0f)
-      {
-        last_active_inj_pulse_us = current_net_pulse_us;
-      }
-    }
     accumulated_inj_time_us = 0; // Reset accumulator
     accumulated_inj_pulses = 0;  // Reset pulse accumulator
 
@@ -577,11 +566,9 @@ void loop()
 
     if (injector_state == 1 && rpm > 0)
     {
-      // Calculate fuel saved using pre-cutoff net pulse width
-      float corrected_pulse = last_active_inj_pulse_us;
-
+      // Calculate fuel saved using the 1-second pre-cutoff average net pulse width
       float saved_inj_time_us =
-          ((float)rpm / 120.0f) * corrected_pulse * elapsed_sec;
+          ((float)rpm / 120.0f) * last_active_inj_pulse_us * elapsed_sec;
       float fuel_saved_interval =
           (saved_inj_time_us / 1000000.0f) *
           (INJECTOR_FLOW_RATE_CC_MIN / 60.0f / 1000.0f) * (float)NUM_INJECTORS;
