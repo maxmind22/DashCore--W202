@@ -52,6 +52,7 @@ extern RTC_DATA_ATTR float total_fuel_liters;
 extern RTC_DATA_ATTR float total_distance_km;
 extern RTC_DATA_ATTR float compounded_r_int;
 extern RTC_DATA_ATTR float total_fuel_saved_liters;
+extern float last_active_inj_pulse_us;
 extern float inst_val;
 extern float avg_l_100km;
 

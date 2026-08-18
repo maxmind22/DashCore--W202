@@ -20,13 +20,35 @@ void checkCanErrors() {
   }
 }
 
+#define INJ_HISTORY_SAMPLES 20 // 20 samples @ 50ms = 1000ms rolling window
+
+static float inj_history_net_us[INJ_HISTORY_SAMPLES] = {0};
+static uint16_t inj_history_pulses[INJ_HISTORY_SAMPLES] = {0};
+static uint8_t history_idx = 0;
+
 void drainCanRxBuffer(unsigned long now) {
   for (int i = 0; i < 6; i++) {
     if (mcp2515.readMessage(&canMsg) != MCP2515::ERROR_OK) break;
     if (canMsg.can_id == 0x02) {
       raw2 = (uint16_t)((canMsg.data[1] << 8) | canMsg.data[0]);
       spd_t = (uint16_t)(canMsg.data[3] << 8 | canMsg.data[2]);
-      injector_state = canMsg.data[4];
+      uint8_t new_inj_state = canMsg.data[4];
+
+      // Transition 0 -> 1: injDisable just engaged (DFCO cutoff starts).
+      // Calculate and latch the average net injector pulse width over the 1 second before cutoff.
+      if (injector_state == 0 && new_inj_state == 1) {
+        float total_net_us = 0.0f;
+        uint32_t total_p = 0;
+        for (int k = 0; k < INJ_HISTORY_SAMPLES; k++) {
+          total_net_us += inj_history_net_us[k];
+          total_p += inj_history_pulses[k];
+        }
+        if (total_p > 0 && total_net_us > 0.0f) {
+          last_active_inj_pulse_us = total_net_us / (float)total_p;
+        }
+      }
+
+      injector_state = new_inj_state;
       new_rpm = (uint16_t)((canMsg.data[6] << 8) | canMsg.data[5]);
       oil_level_t = (uint8_t)canMsg.data[7];
       lastPacketTime = now;
@@ -43,6 +65,13 @@ void drainCanRxBuffer(unsigned long now) {
         float dead_time_us = getInjectorDeadTime(voltage_filtered);
         float net_pulse_us = (float)pulse - ((float)pulses * dead_time_us);
         if (net_pulse_us < 0.0f) net_pulse_us = 0.0f;
+
+        // Record into rolling 1-sec buffer while injectors are actively firing
+        if (injector_state == 0) {
+          inj_history_net_us[history_idx] = net_pulse_us;
+          inj_history_pulses[history_idx] = pulses;
+          history_idx = (history_idx + 1) % INJ_HISTORY_SAMPLES;
+        }
 
         float raw_duty = 0.0f;
         uint16_t current_rpm = (rpm > 0) ? rpm : new_rpm;
