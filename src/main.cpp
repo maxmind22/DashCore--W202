@@ -576,18 +576,21 @@ void loop()
     }
 
     // Update trip distance from cumulative speed sensor pulses (lossless, exact)
-    total_distance_km += (float)spd_delta_pulses / PULSES_PER_KM_F;
+    float interval_dist_km = (float)spd_delta_pulses / PULSES_PER_KM_F;
+    total_distance_km += interval_dist_km;
     spd_delta_pulses = 0;
 
     float speed_val = (float)spd;
+    bool is_moving = (interval_dist_km > 0.0001f || speed_val > 0.0f);
 
     // Calculate instant consumption
-    if (speed_val > 0.0f)
+    if (is_moving)
     {
+      float dist_for_calc = (interval_dist_km > 0.0001f)
+                                ? interval_dist_km
+                                : ((speed_val / 3600.0f) * elapsed_sec);
       // inst_val in L/100km
-      inst_val =
-          (fuel_consumed_liters / ((speed_val / 3600.0f) * elapsed_sec)) *
-          100.0f;
+      inst_val = (fuel_consumed_liters / dist_for_calc) * 100.0f;
     }
     else
     {
@@ -609,7 +612,7 @@ void loop()
     tv.setTextSize(2);
     tv.setTextColor(0xFF, 0x00);
     char bufInst[20];
-    if (speed_val > 0.0f)
+    if (is_moving)
     {
       snprintf(bufInst, sizeof(bufInst), "%5.1f L/100Km  ", inst_val);
     }
@@ -676,7 +679,7 @@ void loop()
     {
       snprintf(bufRem, sizeof(bufRem), "REM:---km ");
     }
-    tv.fillRect(FUEL_X + FUEL_WIDTH + 150, FUEL_Y + 40, 60, 8,
+    tv.fillRect(FUEL_X + FUEL_WIDTH + 150, FUEL_Y + 40, 57, 8,
                 0x00); // Clear previous REM readout
     tv.setCursor(FUEL_X + FUEL_WIDTH + 150, FUEL_Y + 40);
     tv.setTextColor(0xFF, 0x00);
