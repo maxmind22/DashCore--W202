@@ -327,8 +327,6 @@ void loop()
   if (currentMillis - lastCanSendTime >= CAN_SEND_INTERVAL_MS)
   {
     static uint8_t seq_02 = 0;
-    static uint8_t seq_04 = 0;
-    static uint8_t seq_05 = 0;
 
     uint8_t injDisable_s = (uint8_t)injDisable;
     uint16_t rpm_s = (uint16_t)(rpm);
@@ -354,17 +352,17 @@ void loop()
     // defers the fuel to the next 50ms packet — seamless with cumulative counters).
     static uint32_t inj_time_snap = 0;
     static uint16_t inj_pulses_snap = 0;
-    uint32_t spd_pulses_snap;
+    uint16_t spd_pulses_snap;
     noInterrupts();
     if (!inj_active)
     {
       inj_time_snap = total_inj_time_us;
       inj_pulses_snap = total_inj_pulses;
     }
-    spd_pulses_snap = total_spd_pulses;
+    spd_pulses_snap = (uint16_t)total_spd_pulses;
     interrupts();
 
-    // CAN ID 0x04: Cumulative Injector Telemetry (DLC 8)
+    // CAN ID 0x04: Cumulative Injector & Speed Telemetry (DLC 8)
     canMsgTx.can_id = 0x04;
     canMsgTx.can_dlc = 8;
     canMsgTx.data[0] = inj_time_snap & 0xFF;
@@ -373,19 +371,8 @@ void loop()
     canMsgTx.data[3] = (inj_time_snap >> 24) & 0xFF;
     canMsgTx.data[4] = inj_pulses_snap & 0xFF;
     canMsgTx.data[5] = (inj_pulses_snap >> 8) & 0xFF;
-    canMsgTx.data[6] = 0; // reserved
-    canMsgTx.data[7] = seq_04++;
-    mcp2515.sendMessage(&canMsgTx);
-
-    // CAN ID 0x05: Cumulative Speed Sensor Pulses (DLC 6)
-    canMsgTx.can_id = 0x05;
-    canMsgTx.can_dlc = 6;
-    canMsgTx.data[0] = spd_pulses_snap & 0xFF;
-    canMsgTx.data[1] = (spd_pulses_snap >> 8) & 0xFF;
-    canMsgTx.data[2] = (spd_pulses_snap >> 16) & 0xFF;
-    canMsgTx.data[3] = (spd_pulses_snap >> 24) & 0xFF;
-    canMsgTx.data[4] = seq_05++;
-    canMsgTx.data[5] = 0; // reserved
+    canMsgTx.data[6] = spd_pulses_snap & 0xFF;
+    canMsgTx.data[7] = (spd_pulses_snap >> 8) & 0xFF;
     mcp2515.sendMessage(&canMsgTx);
 
     lastCanSendTime = currentMillis;
