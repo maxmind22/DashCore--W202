@@ -53,6 +53,7 @@ unsigned long last_check = 0;
 volatile uint32_t lastTime = 0;
 volatile uint32_t period = 0;
 volatile uint16_t spd_pulse_count = 0;
+volatile uint32_t total_spd_pulses = 0;
 volatile uint32_t spd_last_pulse_us = 0;
 volatile uint32_t total_inj_time_us = 0;
 volatile uint16_t total_inj_pulses = 0;
@@ -92,6 +93,7 @@ void rpmISR()
 void spdISR()
 {
   spd_pulse_count++;
+  total_spd_pulses++;
   spd_last_pulse_us = micros();
 }
 // injector ISR
@@ -321,52 +323,71 @@ void loop()
   {
     alive = 0;
   }
-  // 1-byte atomic guard: Checking inj_has_data is a single 8-bit CPU instruction (atomic on AVR).
-  // Avoids multi-byte tearing and avoids calling noInterrupts() 10,000x/sec.
-  static uint32_t local_inj_time = 0;
-  static uint16_t local_inj_pulses = 0;
-  if (inj_has_data)
-  {
-    noInterrupts();
-    if (!inj_active)
-    {
-      local_inj_time += total_inj_time_us;
-      local_inj_pulses += total_inj_pulses;
-      total_inj_time_us = 0;
-      total_inj_pulses = 0;
-      inj_has_data = false;
-    }
-    interrupts();
-  }
-  uint8_t injDisable_s = (uint8_t)injDisable;
-  uint16_t rpm_s = (uint16_t)(rpm);
   //================= Send to Display MCU (Every 50ms) ===============//
   if (currentMillis - lastCanSendTime >= CAN_SEND_INTERVAL_MS)
   {
+    static uint8_t seq_02 = 0;
+    static uint8_t seq_04 = 0;
+    static uint8_t seq_05 = 0;
+
+    uint8_t injDisable_s = (uint8_t)injDisable;
+    uint16_t rpm_s = (uint16_t)(rpm);
     uint16_t temp_s = (uint16_t)temp_avg;
+
+    // CAN ID 0x02: Instantaneous Status (DLC 8)
     canMsgTx.can_id = 0x02;
     canMsgTx.can_dlc = 8;
     canMsgTx.data[0] = temp_s & 0xFF;
     canMsgTx.data[1] = temp_s >> 8;
     canMsgTx.data[2] = spd_s & 0xFF;
     canMsgTx.data[3] = spd_s >> 8;
-    canMsgTx.data[4] = injDisable_s;
-    canMsgTx.data[5] = rpm_s & 0xFF;
-    canMsgTx.data[6] = rpm_s >> 8;
-    canMsgTx.data[7] = oil_level;
+    canMsgTx.data[4] = rpm_s & 0xFF;
+    canMsgTx.data[5] = rpm_s >> 8;
+    canMsgTx.data[6] = (injDisable_s & 0x01) | ((oil_level & 0x01) << 1);
+    canMsgTx.data[7] = seq_02++;
     mcp2515.sendMessage(&canMsgTx);
 
+    // Atomic snapshot of cumulative counters.
+    // Only update injector snapshot when injector is not mid-fire (!inj_active)
+    // to guarantee inj_time and inj_pulses reflect only complete pulses.
+    // If mid-fire, re-send last snapshot (Display MCU computes delta=0 and
+    // defers the fuel to the next 50ms packet — seamless with cumulative counters).
+    static uint32_t inj_time_snap = 0;
+    static uint16_t inj_pulses_snap = 0;
+    uint32_t spd_pulses_snap;
+    noInterrupts();
+    if (!inj_active)
+    {
+      inj_time_snap = total_inj_time_us;
+      inj_pulses_snap = total_inj_pulses;
+    }
+    spd_pulses_snap = total_spd_pulses;
+    interrupts();
+
+    // CAN ID 0x04: Cumulative Injector Telemetry (DLC 8)
     canMsgTx.can_id = 0x04;
-    canMsgTx.can_dlc = 6;
-    canMsgTx.data[0] = local_inj_time & 0xFF;
-    canMsgTx.data[1] = (local_inj_time >> 8) & 0xFF;
-    canMsgTx.data[2] = (local_inj_time >> 16) & 0xFF;
-    canMsgTx.data[3] = (local_inj_time >> 24) & 0xFF;
-    canMsgTx.data[4] = local_inj_pulses & 0xFF;
-    canMsgTx.data[5] = (local_inj_pulses >> 8) & 0xFF;
+    canMsgTx.can_dlc = 8;
+    canMsgTx.data[0] = inj_time_snap & 0xFF;
+    canMsgTx.data[1] = (inj_time_snap >> 8) & 0xFF;
+    canMsgTx.data[2] = (inj_time_snap >> 16) & 0xFF;
+    canMsgTx.data[3] = (inj_time_snap >> 24) & 0xFF;
+    canMsgTx.data[4] = inj_pulses_snap & 0xFF;
+    canMsgTx.data[5] = (inj_pulses_snap >> 8) & 0xFF;
+    canMsgTx.data[6] = 0; // reserved
+    canMsgTx.data[7] = seq_04++;
     mcp2515.sendMessage(&canMsgTx);
-    local_inj_time = 0;
-    local_inj_pulses = 0;
+
+    // CAN ID 0x05: Cumulative Speed Sensor Pulses (DLC 6)
+    canMsgTx.can_id = 0x05;
+    canMsgTx.can_dlc = 6;
+    canMsgTx.data[0] = spd_pulses_snap & 0xFF;
+    canMsgTx.data[1] = (spd_pulses_snap >> 8) & 0xFF;
+    canMsgTx.data[2] = (spd_pulses_snap >> 16) & 0xFF;
+    canMsgTx.data[3] = (spd_pulses_snap >> 24) & 0xFF;
+    canMsgTx.data[4] = seq_05++;
+    canMsgTx.data[5] = 0; // reserved
+    mcp2515.sendMessage(&canMsgTx);
+
     lastCanSendTime = currentMillis;
   }
 

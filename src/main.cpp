@@ -575,10 +575,11 @@ void loop()
       total_fuel_saved_liters += fuel_saved_interval;
     }
 
-    // Update trip distance (speed is in km/h, convert to km/sec and multiply by
-    // elapsed seconds)
+    // Update trip distance from cumulative speed sensor pulses (lossless, exact)
+    total_distance_km += (float)spd_delta_pulses / PULSES_PER_KM_F;
+    spd_delta_pulses = 0;
+
     float speed_val = (float)spd;
-    total_distance_km += (speed_val / 3600.0f) * elapsed_sec;
 
     // Calculate instant consumption
     if (speed_val > 0.0f)

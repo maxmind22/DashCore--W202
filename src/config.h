@@ -71,6 +71,8 @@ const unsigned long MIN_CRANK_TIME_MS = 600; // Blind crank duration to ignore R
 #define WARNING_Y 20
 
 // Fuel/Trip Constants
+#define PULSES_PER_KM 24179
+const float PULSES_PER_KM_F = 24179.0f;
 const int LOW_FUEL_LEVEL = 10;
 const float INJECTOR_FLOW_RATE_CC_MIN = 228.0f; // Rated 228 cc/min @ 3.8 bar OEM regulator pressure
 const int NUM_INJECTORS = 4;
