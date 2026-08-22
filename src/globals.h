@@ -13,11 +13,19 @@ extern struct can_frame canMsgTx;
 extern RTC_DATA_ATTR SystemState currentState;
 extern RTC_DATA_ATTR bool vehicleLockDisabled;
 extern RTC_DATA_ATTR bool engineStartDisabled;
+extern RTC_DATA_ATTR bool autoStartStopDisabled;
 
 extern unsigned long standbyStartTime;
 extern unsigned long lastButtonPressTime;
 extern bool stoppedToAcc;
 extern volatile bool regulatorTaskRunning;
+
+extern bool isEcoRestart;
+extern bool ecoInjCutActive;
+extern unsigned long lastEngineStartTime;
+extern unsigned long autoStopStartTime;
+extern unsigned long standstillStartTime;
+extern int peakSpeedSinceLastStart;
 
 extern unsigned long lastTime;
 extern unsigned long last_spd_correction;

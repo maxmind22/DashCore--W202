@@ -69,6 +69,8 @@ uint32_t rpm = 0;
 uint32_t last_rpm = 0;
 uint32_t spd = 0;
 uint16_t spd_s = 0;
+bool eco_inj_cut_cmd = false;
+bool eco_inj_cut_active = false;
 
 float temp_avg = 0.0f;    // Float for EMA temp
 float acState_avg = 0.0f; // Float for EMA AC
@@ -276,7 +278,50 @@ void loop()
   if ((th_Pos == 0 || rpm < DFCO_DISENGAGE_RPM) && injDisable == true)
   {
     injDisable = false;
-    digitalWriteFast(inj_pin, LOW);
+    // Only bring pin LOW if Auto Start-Stop is not actively cutting injectors
+    if (!eco_inj_cut_cmd && !eco_inj_cut_active)
+    {
+      digitalWriteFast(inj_pin, LOW);
+    }
+  }
+
+  //=================== Auto Start-Stop Safe Injector Cut =====================//
+  if (eco_inj_cut_cmd)
+  {
+    if (!eco_inj_cut_active)
+    {
+      // Safe window check: never cut mid-injection pulse
+      bool inj_state = false;
+      uint16_t inj_end_ticks_t = 0;
+      noInterrupts();
+      inj_end_ticks_t = inj_end_ticks;
+      inj_state = inj_active;
+      interrupts();
+      uint16_t elapsed_ticks = (uint16_t)(TCNT1 - inj_end_ticks_t);
+
+      // Only cut when injector is not mid-fire and we are in the inter-pulse window or stopped
+      if (!inj_state && (rpm == 0 || elapsed_ticks < DFCO_INJ_WINDOW_TICKS))
+      {
+        digitalWriteFast(inj_pin, HIGH);
+        eco_inj_cut_active = true;
+      }
+    }
+    else
+    {
+      // Hold pin HIGH while eco cut is commanded
+      digitalWriteFast(inj_pin, HIGH);
+    }
+  }
+  else
+  {
+    if (eco_inj_cut_active)
+    {
+      eco_inj_cut_active = false;
+      if (!injDisable)
+      {
+        digitalWriteFast(inj_pin, LOW);
+      }
+    }
   }
 
   //==================== Calculate Vehicle Speed (Every 100ms) ====================//
@@ -314,6 +359,7 @@ void loop()
     if (canMsgRx.can_id == 0x03)
     {
       alive = canMsgRx.data[0];
+      eco_inj_cut_cmd = (canMsgRx.data[1] & 0x01) != 0;
       last_check = currentMillis;
     }
   }

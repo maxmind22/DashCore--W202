@@ -11,11 +11,19 @@ struct can_frame canMsgTx;
 RTC_DATA_ATTR SystemState currentState = STATE_SLEEP;
 RTC_DATA_ATTR bool vehicleLockDisabled = false;
 RTC_DATA_ATTR bool engineStartDisabled = false;
+RTC_DATA_ATTR bool autoStartStopDisabled = false;
 
 unsigned long standbyStartTime = 0;
 unsigned long lastButtonPressTime = 0;
 bool stoppedToAcc = false;
 volatile bool regulatorTaskRunning = true;
+
+bool isEcoRestart = false;
+bool ecoInjCutActive = false;
+unsigned long lastEngineStartTime = 0;
+unsigned long autoStopStartTime = 0;
+unsigned long standstillStartTime = 0;
+int peakSpeedSinceLastStart = 0;
 
 unsigned long lastTime = 0;
 unsigned long last_spd_correction = 0;
