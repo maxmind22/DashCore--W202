@@ -87,6 +87,7 @@ const unsigned long BUTTON_COOLDOWN_MS = 500;
 const unsigned long BUTTON_LONGPRESS_RESET_MS = 3000;
 const unsigned long MAX_CRANK_TIME_MS = 5000;
 const unsigned long BRAKE_CHECK_SETTLE_MS = 100; // Window (ms) to energize and continuously sample brake circuit
+const unsigned long CRANK_PRIME_MS = 500;        // ECU boot & fuel rail prime delay (ms)
 
 // --- SYSTEM STATES ---
 enum SystemState

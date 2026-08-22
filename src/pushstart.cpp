@@ -597,14 +597,13 @@ void processPushStart(unsigned long now)
 
     if (crankStage == CRANK_PRIME)
     {
-      // Serial.println("prime");
-      // Step 1: Go to POS2 (ACC & IGN ON) for fuel pump prime (50ms)
+      // Step 1: Go to POS2 (ACC & IGN ON) for fuel pump/ECU prime (500ms)
       setRelays(true, true, false);
       if (crankStageTime == 0)
       {
         crankStageTime = now;
       }
-      if (now - crankStageTime >= 50)
+      if (now - crankStageTime >= CRANK_PRIME_MS)
       {
         crankStage = CRANK_SOLENOID;
         crankStageTime = now; // Reset timer for max crank limit
