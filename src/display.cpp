@@ -210,6 +210,24 @@ void warnings(unsigned long now)
     authWarningDrawn = false;
   }
 
+  // -------- Auto Start-Stop Active Indicator --------//
+  static bool ecoStopDrawn = false;
+  if (currentState == STATE_AUTO_STOP)
+  {
+    if (!ecoStopDrawn)
+    {
+      tv.setCursor(WARNING_X + 35, WARNING_Y + 60);
+      tv.setTextColor(0x1C); // Green in 8-bit palette
+      tv.print("[A] ECO STOP");
+      ecoStopDrawn = true;
+    }
+  }
+  else if (ecoStopDrawn)
+  {
+    tv.fillRect(WARNING_X + 35, WARNING_Y + 60, 90, 8, 0x00);
+    ecoStopDrawn = false;
+  }
+
   //---------- ring boot chime  ---------
   if (now >= 1000 && boot_chime <= 70)
   {

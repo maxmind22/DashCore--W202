@@ -127,7 +127,7 @@ void loop()
     canMsgTx.can_id = 0x03;
     canMsgTx.can_dlc = 8;
     canMsgTx.data[0] = health_state;
-    canMsgTx.data[1] = 0;
+    canMsgTx.data[1] = ecoInjCutActive ? 1 : 0;
     canMsgTx.data[2] = 0;
     canMsgTx.data[3] = 0;
     canMsgTx.data[4] = 0;
@@ -572,6 +572,13 @@ void loop()
       float fuel_saved_interval =
           (saved_inj_time_us / 1000000.0f) *
           (INJECTOR_FLOW_RATE_CC_MIN / 60.0f / 1000.0f) * (float)NUM_INJECTORS;
+      total_fuel_saved_liters += fuel_saved_interval;
+    }
+    else if (currentState == STATE_AUTO_STOP)
+    {
+      // Calculate fuel saved during Auto Start-Stop based on baseline idle rate
+      float fuel_saved_interval =
+          (BASELINE_IDLE_FUEL_L_PER_HR / 3600.0f) * elapsed_sec;
       total_fuel_saved_liters += fuel_saved_interval;
     }
 

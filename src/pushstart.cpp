@@ -96,6 +96,14 @@ void playLockdownToggleTone(bool lockdownActive)
     queueTone(1, 400, 0); // 1 long beep
 }
 
+void playStartStopToggleTone(bool disabled)
+{
+  if (disabled)
+    queueTone(2, 150, 150); // 2 short beeps
+  else
+    queueTone(1, 350, 0); // 1 long beep
+}
+
 void playAuthWarningTone()
 {
   queueTone(2, 100, 100); // 2 quick beeps
@@ -139,6 +147,11 @@ void processUnlockSignals(unsigned long now)
       {
         engineStartDisabled = !engineStartDisabled;
         playLockdownToggleTone(engineStartDisabled);
+      }
+      else if (unlockPulseCount == 5)
+      {
+        autoStartStopDisabled = !autoStartStopDisabled;
+        playStartStopToggleTone(autoStartStopDisabled);
       }
     }
 
@@ -591,20 +604,22 @@ void processPushStart(unsigned long now)
       playAuthWarningTone();
       crankStage = CRANK_PRIME;
       crankStageTime = 0;
+      isEcoRestart = false;
+      ecoInjCutActive = false;
       break;
     }
     // Non-blocking stage machine for cranking sequence
 
     if (crankStage == CRANK_PRIME)
     {
-      // Serial.println("prime");
-      // Step 1: Go to POS2 (ACC & IGN ON) for fuel pump prime (50ms)
+      // Step 1: Go to POS2 (ACC & IGN ON) for fuel pump/ECU prime
       setRelays(true, true, false);
       if (crankStageTime == 0)
       {
         crankStageTime = now;
       }
-      if (now - crankStageTime >= 50)
+      unsigned long requiredPrime = isEcoRestart ? ECO_CRANK_PRIME_MS : COLD_CRANK_PRIME_MS;
+      if (now - crankStageTime >= requiredPrime)
       {
         crankStage = CRANK_SOLENOID;
         crankStageTime = now; // Reset timer for max crank limit
@@ -621,6 +636,11 @@ void processPushStart(unsigned long now)
         // Engine started successfully
         currentState = STATE_RUNNING;
         setRelays(true, true, false); // Disengage starter, keep ACC/IGN on
+        lastEngineStartTime = now;    // Record start time for cooldown tracking
+        peakSpeedSinceLastStart = 0;  // Reset speed gate
+        standstillStartTime = 0;
+        isEcoRestart = false;
+        ecoInjCutActive = false;
         crankStage = CRANK_PRIME;     // Reset stages
         crankStageTime = 0;
       }
@@ -631,6 +651,8 @@ void processPushStart(unsigned long now)
         setRelays(true, false, false); // Disengage starter to ACC for another try (w202 prevent double starting)
         currentState = STATE_ACC;
         standbyStartTime = now; // Reset 2-min timeout
+        isEcoRestart = false;
+        ecoInjCutActive = false;
         crankStage = CRANK_PRIME;
         crankStageTime = 0;
         stoppedToAcc = false; // Reset flag on crank timeout
@@ -642,6 +664,48 @@ void processPushStart(unsigned long now)
     // Relays: ACC ON, IGN ON, START OFF (Engine running)
     setRelays(true, true, false);
 
+    // Track peak speed reached since last start
+    if (spd > peakSpeedSinceLastStart)
+    {
+      peakSpeedSinceLastStart = spd;
+    }
+
+    // Track continuous standstill duration (spd == 0 with brake held)
+    if (spd == 0 && brakeHeld)
+    {
+      if (standstillStartTime == 0)
+      {
+        standstillStartTime = now;
+      }
+    }
+    else
+    {
+      standstillStartTime = 0;
+    }
+
+    // Auto Start-Stop evaluation with aggressive wear-protection gates
+    {
+      bool autoStopPermitted = !autoStartStopDisabled &&
+                               !engineStartDisabled &&
+                               (lastEngineStartTime != 0) &&
+                               (now - lastEngineStartTime >= AUTO_STOP_COOLDOWN_MS) &&
+                               (peakSpeedSinceLastStart >= AUTO_STOP_MIN_SPEED_KMH) &&
+                               (temp_out >= AUTO_STOP_MIN_TEMP_C) &&
+                               (temp_out <= AUTO_STOP_MAX_TEMP_C) &&
+                               (voltage_filtered >= AUTO_STOP_MIN_VOLTAGE) &&
+                               (now - lastPacketTime < FRONT_MCU_TIMEOUT_MS);
+
+      if (autoStopPermitted && standstillStartTime != 0 &&
+          (now - standstillStartTime >= AUTO_STOP_STANDSTILL_DELAY_MS))
+      {
+        currentState = STATE_AUTO_STOP;
+        autoStopStartTime = now;
+        ecoInjCutActive = true; // Signal Front MCU over CAN 0x03 to cut injectors
+        standstillStartTime = 0;
+        break;
+      }
+    }
+
     // Handle Engine Stall Safety
     // Only treat rpm==0 as stall if CAN packets are still being received
     // (prevents ignition cut on CAN bus failure at highway speed)
@@ -650,6 +714,9 @@ void processPushStart(unsigned long now)
       currentState = STATE_ACC;
       standbyStartTime = now;
       stoppedToAcc = false;
+      standstillStartTime = 0;
+      isEcoRestart = false;
+      ecoInjCutActive = false;
     }
 
     // Handle Engine Stop Button Press (Only if vehicle is stationary)
@@ -658,6 +725,9 @@ void processPushStart(unsigned long now)
       if (spd == 0)
       { // Safety check: speed must be zero
         lastButtonPressTime = now;
+        standstillStartTime = 0;
+        isEcoRestart = false;
+        ecoInjCutActive = false;
         bool brakeHeld = (digitalRead(PIN_INPUT_BRAKE) == LOW);
         if (brakeHeld)
         {
@@ -675,5 +745,52 @@ void processPushStart(unsigned long now)
       }
     }
     break;
+
+  case STATE_AUTO_STOP:
+  {
+    // Relays: ACC ON, IGN ON, START OFF (ECU awake, fuel cut via Front MCU CAN)
+    setRelays(true, true, false);
+
+    // Keep eco injector cut active over CAN
+    ecoInjCutActive = true;
+
+    // Check manual button press: Driver shuts down car completely
+    if (btnPressed && (now - lastButtonPressTime >= BUTTON_COOLDOWN_MS))
+    {
+      lastButtonPressTime = now;
+      ecoInjCutActive = false;
+      isEcoRestart = false;
+      setRelays(false, false, false); // Turn off all relays
+      currentState = STATE_STANDBY;
+      standbyStartTime = now;
+      stoppedToAcc = false;
+      break;
+    }
+
+    // Restart triggers:
+    // 1. Primary restart trigger: Driver releases foot from brake
+    bool brakeReleased = (digitalRead(PIN_INPUT_BRAKE) == HIGH);
+
+    // 2. Safety restart triggers:
+    // - Battery drops below restart threshold (11.6V)
+    // - Max auto-stop duration exceeded (90s)
+    // - Engine coolant temp creeping high (> 95°C)
+    // - Front MCU communication loss
+    bool maxDurationExceeded = (now - autoStopStartTime >= AUTO_STOP_MAX_DURATION_MS);
+    bool batteryLow = (voltage_filtered < AUTO_STOP_RESTART_VOLTAGE);
+    bool tempCreep = (temp_out > AUTO_STOP_MAX_TEMP_C);
+    bool canLoss = (now - lastPacketTime > FRONT_MCU_TIMEOUT_MS);
+
+    if (brakeReleased || maxDurationExceeded || batteryLow || tempCreep || canLoss)
+    {
+      // Restore injectors immediately over CAN
+      ecoInjCutActive = false;
+      isEcoRestart = true;
+      currentState = STATE_CRANKING;
+      crankStage = CRANK_PRIME;
+      crankStageTime = 0;
+    }
+    break;
+  }
   }
 }

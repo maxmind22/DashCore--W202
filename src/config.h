@@ -88,6 +88,19 @@ const unsigned long BUTTON_LONGPRESS_RESET_MS = 3000;
 const unsigned long MAX_CRANK_TIME_MS = 5000;
 const unsigned long BRAKE_CHECK_SETTLE_MS = 100; // Window (ms) to energize and continuously sample brake circuit
 
+// Auto Start-Stop Constants & Wear-Protection Thresholds
+const unsigned long AUTO_STOP_STANDSTILL_DELAY_MS = 10000; // 10s standstill before stop
+const unsigned long AUTO_STOP_COOLDOWN_MS = 90000;        // 90s engine runtime cooldown between stops
+const int AUTO_STOP_MIN_SPEED_KMH = 25;                   // Must exceed 25 km/h between stops
+const int AUTO_STOP_MIN_TEMP_C = 82;                      // Coolant temp >= 82°C
+const int AUTO_STOP_MAX_TEMP_C = 95;                      // Coolant temp <= 95°C
+const float AUTO_STOP_MIN_VOLTAGE = 12.00f;               // Min battery voltage to allow stop
+const float AUTO_STOP_RESTART_VOLTAGE = 11.60f;           // Battery floor triggering auto-restart
+const unsigned long AUTO_STOP_MAX_DURATION_MS = 90000;    // 90s max stop duration before restart
+const unsigned long COLD_CRANK_PRIME_MS = 500;            // ECU cold boot & trigger sync delay (ms)
+const unsigned long ECO_CRANK_PRIME_MS = 30;              // Fast warm restart prime delay (ms)
+const float BASELINE_IDLE_FUEL_L_PER_HR = 0.90f;          // Idle fuel consumption baseline (L/h)
+
 // --- SYSTEM STATES ---
 enum SystemState
 {
@@ -96,7 +109,8 @@ enum SystemState
   STATE_ACC,
   STATE_IGNITION,
   STATE_CRANKING,
-  STATE_RUNNING
+  STATE_RUNNING,
+  STATE_AUTO_STOP
 };
 
 enum ToneState
