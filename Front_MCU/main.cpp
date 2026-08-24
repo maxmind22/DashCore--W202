@@ -11,7 +11,7 @@
 #define regulator_pin 9
 
 // W202 C200 instrument cluster speed pulse (205/55R16, 48 ABS teeth, falling edge)
-#define PULSES_PER_KM 24179
+#define PULSES_PER_KM 24714
 #define SPD_WINDOW_MS 100UL
 #define SPD_STALE_TIMEOUT_US 500000UL
 

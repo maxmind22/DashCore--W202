@@ -567,8 +567,11 @@ void loop()
     if (injector_state == 1 && rpm > 0)
     {
       // Calculate fuel saved using the 1-second pre-cutoff average net pulse width
+      float net_saved_pulse_us = last_active_inj_pulse_us - dead_time_us;
+      if (net_saved_pulse_us < 0.0f)
+        net_saved_pulse_us = 0.0f;
       float saved_inj_time_us =
-          ((float)rpm / 120.0f) * last_active_inj_pulse_us * elapsed_sec;
+          ((float)rpm / 120.0f) * net_saved_pulse_us * elapsed_sec;
       float fuel_saved_interval =
           (saved_inj_time_us / 1000000.0f) *
           (INJECTOR_FLOW_RATE_CC_MIN / 60.0f / 1000.0f) * (float)NUM_INJECTORS;
@@ -657,7 +660,7 @@ void loop()
     tv.setTextColor(0xFF, 0x00);
     tv.print(bufUsed);
 
-    char bufSaved[14];
+    char bufSaved[24];
     if (total_fuel_saved_liters < 1.0f)
     {
       snprintf(bufSaved, sizeof(bufSaved), "SAVED:%5.3f L       ",
