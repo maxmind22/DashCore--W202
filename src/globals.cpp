@@ -23,7 +23,6 @@ bool ecoInjCutActive = false;
 unsigned long lastEngineStartTime = 0;
 unsigned long autoStopStartTime = 0;
 unsigned long standstillStartTime = 0;
-int peakSpeedSinceLastStart = 0;
 
 unsigned long lastTime = 0;
 unsigned long last_spd_correction = 0;

@@ -624,19 +624,19 @@ void loop()
     char bufInst[20];
     if (is_moving)
     {
-      snprintf(bufInst, sizeof(bufInst), "%5.1f L/100Km  ", inst_val);
+      snprintf(bufInst, sizeof(bufInst), "%5.1f L/100km", inst_val);
     }
     else
     {
-      snprintf(bufInst, sizeof(bufInst), "%5.1f L/h       ", inst_val);
+      snprintf(bufInst, sizeof(bufInst), "%5.1f L/h", inst_val);
     }
-    tv.fillRect(90, 210, 165, 16, 0x00); // Clear previous instant readout
+    tv.fillRect(90, 210, 160, 16, 0x00); // Clear previous instant readout
     tv.setCursor(90, 210);
     tv.print(bufInst);
     tv.setTextSize(1);
 
     char bufAvg[20];
-    snprintf(bufAvg, sizeof(bufAvg), "AVG:%5.1f L/100km  ", avg_l_100km);
+    snprintf(bufAvg, sizeof(bufAvg), "AVG:%5.1f L/100km", avg_l_100km);
     tv.fillRect(FUEL_X + FUEL_WIDTH + 5, FUEL_Y, 120, 8,
                 0x00); // Clear previous AVG readout
     tv.setCursor(FUEL_X + FUEL_WIDTH + 5, FUEL_Y);
@@ -644,7 +644,7 @@ void loop()
     tv.print(bufAvg);
 
     char bufTrip[20];
-    snprintf(bufTrip, sizeof(bufTrip), "TRIP:%6.1f km     ", total_distance_km);
+    snprintf(bufTrip, sizeof(bufTrip), "TRIP:%6.1f km", total_distance_km);
     tv.fillRect(FUEL_X + FUEL_WIDTH + 5, FUEL_Y + 20, 120, 8,
                 0x00); // Clear previous TRIP readout
     tv.setCursor(FUEL_X + FUEL_WIDTH + 5, FUEL_Y + 20);
@@ -652,7 +652,7 @@ void loop()
     tv.print(bufTrip);
 
     char bufUsed[20];
-    snprintf(bufUsed, sizeof(bufUsed), "USED:%5.1f L       ",
+    snprintf(bufUsed, sizeof(bufUsed), "USED:%5.1f L",
              total_fuel_liters);
     tv.fillRect(FUEL_X + FUEL_WIDTH + 5, FUEL_Y + 40, 120, 8,
                 0x00); // Clear previous USED readout
@@ -660,21 +660,19 @@ void loop()
     tv.setTextColor(0xFF, 0x00);
     tv.print(bufUsed);
 
-    char bufSaved[24];
+    char bufSaved[16];
     if (total_fuel_saved_liters < 1.0f)
     {
-      snprintf(bufSaved, sizeof(bufSaved), "SAVED:%5.3f L       ",
+      snprintf(bufSaved, sizeof(bufSaved), "SAVED:%5.3f L",
                total_fuel_saved_liters);
     }
     else
     {
-      snprintf(bufSaved, sizeof(bufSaved), "SAVED:%5.2f L       ",
+      snprintf(bufSaved, sizeof(bufSaved), "SAVED:%5.2f L",
                total_fuel_saved_liters);
     }
-    // tv.setCursor(FUEL_X + FUEL_WIDTH + 150, FUEL_Y + 20);
     tv.fillRect(FUEL_X + FUEL_WIDTH + 130, FUEL_Y, 80, 8, 0x00); // Clear previous SAVED readout
     tv.setCursor(FUEL_X + FUEL_WIDTH + 130, FUEL_Y);
-    // tv.setCursor(FUEL_X + FUEL_WIDTH + 5, FUEL_Y + 60);
     tv.setTextColor(0xFF, 0x00);
     tv.print(bufSaved);
 
@@ -683,13 +681,13 @@ void loop()
     {
       float rem_fuel_l = (percent / 100.0f) * FUEL_TANK_CAPACITY_LITERS;
       float rem_km = (rem_fuel_l / avg_l_100km) * 100.0f;
-      snprintf(bufRem, sizeof(bufRem), "REM:%4.0fkm ", rem_km);
+      snprintf(bufRem, sizeof(bufRem), "REM:%4.0fkm", rem_km);
     }
     else
     {
-      snprintf(bufRem, sizeof(bufRem), "REM:---km ");
+      snprintf(bufRem, sizeof(bufRem), "REM:---km");
     }
-    tv.fillRect(FUEL_X + FUEL_WIDTH + 150, FUEL_Y + 40, 57, 8,
+    tv.fillRect(FUEL_X + FUEL_WIDTH + 150, FUEL_Y + 40, 60, 8,
                 0x00); // Clear previous REM readout
     tv.setCursor(FUEL_X + FUEL_WIDTH + 150, FUEL_Y + 40);
     tv.setTextColor(0xFF, 0x00);
