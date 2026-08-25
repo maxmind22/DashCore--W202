@@ -25,7 +25,6 @@ extern bool ecoInjCutActive;
 extern unsigned long lastEngineStartTime;
 extern unsigned long autoStopStartTime;
 extern unsigned long standstillStartTime;
-extern int peakSpeedSinceLastStart;
 
 extern unsigned long lastTime;
 extern unsigned long last_spd_correction;

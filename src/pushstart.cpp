@@ -637,7 +637,6 @@ void processPushStart(unsigned long now)
         currentState = STATE_RUNNING;
         setRelays(true, true, false); // Disengage starter, keep ACC/IGN on
         lastEngineStartTime = now;    // Record start time for cooldown tracking
-        peakSpeedSinceLastStart = 0;  // Reset speed gate
         standstillStartTime = 0;
         isEcoRestart = false;
         ecoInjCutActive = false;
@@ -664,12 +663,6 @@ void processPushStart(unsigned long now)
     // Relays: ACC ON, IGN ON, START OFF (Engine running)
     setRelays(true, true, false);
 
-    // Track peak speed reached since last start
-    if (spd > peakSpeedSinceLastStart)
-    {
-      peakSpeedSinceLastStart = spd;
-    }
-
     // Track continuous standstill duration (spd == 0 with brake held)
     if (spd == 0 && brakeHeld)
     {
@@ -689,7 +682,6 @@ void processPushStart(unsigned long now)
                                !engineStartDisabled &&
                                (lastEngineStartTime != 0) &&
                                (now - lastEngineStartTime >= AUTO_STOP_COOLDOWN_MS) &&
-                               (peakSpeedSinceLastStart >= AUTO_STOP_MIN_SPEED_KMH) &&
                                (temp_out >= AUTO_STOP_MIN_TEMP_C) &&
                                (temp_out <= AUTO_STOP_MAX_TEMP_C) &&
                                (voltage_filtered >= AUTO_STOP_MIN_VOLTAGE) &&
