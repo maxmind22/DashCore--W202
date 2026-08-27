@@ -20,7 +20,7 @@
 
 // 3. Authorized Android Phone MAC Addresses (case-insensitive string list)
 static const char *const BLE_AUTHORIZED_MACS[] = {
-    "00:00:00:00:00:00" // Example: "0c:48:85:56:35:b0"
+    "00:00:00:00:00:00" // Example: "aa:bb:cc:dd:ee:ff"
 };
 static const size_t NUM_AUTHORIZED_MACS = sizeof(BLE_AUTHORIZED_MACS) / sizeof(BLE_AUTHORIZED_MACS[0]);
 
