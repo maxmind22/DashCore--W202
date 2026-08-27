@@ -14,6 +14,8 @@ extern RTC_DATA_ATTR SystemState currentState;
 extern RTC_DATA_ATTR bool vehicleLockDisabled;
 extern RTC_DATA_ATTR bool engineStartDisabled;
 extern RTC_DATA_ATTR bool autoStartStopDisabled;
+extern volatile bool phoneAuthorized;
+extern RTC_DATA_ATTR bool phoneAuthBypassed;
 
 extern unsigned long standbyStartTime;
 extern unsigned long lastButtonPressTime;

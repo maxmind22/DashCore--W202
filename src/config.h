@@ -88,17 +88,39 @@ const unsigned long BUTTON_LONGPRESS_RESET_MS = 3000;
 const unsigned long MAX_CRANK_TIME_MS = 5000;
 const unsigned long BRAKE_CHECK_SETTLE_MS = 100; // Window (ms) to energize and continuously sample brake circuit
 
+// --- BLE PHONE KEY SECURITY ---
+#define BLE_SCAN_TIMEOUT_MS 10000          // Initial boot/wake scan duration (10s)
+#define BLE_RESCAN_TIMEOUT_MS 5000         // Quick on-demand scan on start button press (5s)
+#define BLE_MIN_RSSI -95                   // Minimum RSSI filter in dBm (-128 to disable)
+
+#if __has_include("secrets.h")
+#include "secrets.h"
+#else
+// Fallback defaults if secrets.h is not created yet (copy from secrets.example.h)
+#define BLE_DEVICE_NAME "MB-BT-Audio"
+#define BLE_PAIRING_PIN 123456
+static const char *const BLE_AUTHORIZED_MACS[] = {
+    "00:00:00:00:00:00"
+};
+static const size_t NUM_AUTHORIZED_MACS = sizeof(BLE_AUTHORIZED_MACS) / sizeof(BLE_AUTHORIZED_MACS[0]);
+static const uint8_t BLE_AUTHORIZED_IRKS[][16] = {
+    {0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+     0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00}
+};
+static const size_t NUM_AUTHORIZED_IRKS = sizeof(BLE_AUTHORIZED_IRKS) / sizeof(BLE_AUTHORIZED_IRKS[0]);
+#endif
+
 // Auto Start-Stop Constants & Wear-Protection Thresholds
 const unsigned long AUTO_STOP_STANDSTILL_DELAY_MS = 10000; // 10s standstill before stop
-const unsigned long AUTO_STOP_COOLDOWN_MS = 90000;        // 90s engine runtime cooldown between stops
-const int AUTO_STOP_MIN_TEMP_C = 82;                      // Coolant temp >= 82°C
-const int AUTO_STOP_MAX_TEMP_C = 95;                      // Coolant temp <= 95°C
-const float AUTO_STOP_MIN_VOLTAGE = 12.00f;               // Min battery voltage to allow stop
-const float AUTO_STOP_RESTART_VOLTAGE = 11.60f;           // Battery floor triggering auto-restart
-const unsigned long AUTO_STOP_MAX_DURATION_MS = 90000;    // 90s max stop duration before restart
-const unsigned long COLD_CRANK_PRIME_MS = 500;            // ECU cold boot & trigger sync delay (ms)
-const unsigned long ECO_CRANK_PRIME_MS = 30;              // Fast warm restart prime delay (ms)
-const float BASELINE_IDLE_FUEL_L_PER_HR = 0.90f;          // Idle fuel consumption baseline (L/h)
+const unsigned long AUTO_STOP_COOLDOWN_MS = 90000;         // 90s engine runtime cooldown between stops
+const int AUTO_STOP_MIN_TEMP_C = 82;                       // Coolant temp >= 82°C
+const int AUTO_STOP_MAX_TEMP_C = 95;                       // Coolant temp <= 95°C
+const float AUTO_STOP_MIN_VOLTAGE = 12.00f;                // Min battery voltage to allow stop
+const float AUTO_STOP_RESTART_VOLTAGE = 11.60f;            // Battery floor triggering auto-restart
+const unsigned long AUTO_STOP_MAX_DURATION_MS = 90000;     // 90s max stop duration before restart
+const unsigned long COLD_CRANK_PRIME_MS = 500;             // ECU cold boot & trigger sync delay (ms)
+const unsigned long ECO_CRANK_PRIME_MS = 30;               // Fast warm restart prime delay (ms)
+const float BASELINE_IDLE_FUEL_L_PER_HR = 0.90f;           // Idle fuel consumption baseline (L/h)
 
 // --- SYSTEM STATES ---
 enum SystemState
