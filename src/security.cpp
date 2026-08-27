@@ -3,11 +3,21 @@
 #include <mbedtls/aes.h>
 #include <ctype.h>
 
+#if defined(CONFIG_NIMBLE_CPP_IDF)
+#include "host/ble_hs.h"
+#include "host/ble_store.h"
+#else
+#include "nimble/nimble/host/include/host/ble_hs.h"
+#include "nimble/nimble/host/include/host/ble_store.h"
+#endif
+
 #define SERVICE_UUID        "12345678-1234-1234-1234-123456789abc"
 #define CHARACTERISTIC_UUID "87654321-4321-4321-4321-cba987654321"
 
 static bool bleInitialized = false;
 static bool bleScanning = false;
+static uint8_t dynamicBondedIRK[16] = {0};
+static bool dynamicIRKPresent = false;
 
 // Check if a 16-byte key is all zeros (unconfigured)
 static bool isZeroKey(const uint8_t key[16])
@@ -45,13 +55,14 @@ static bool matchesMacString(const char *mac1, const char *mac2)
   return (*mac1 == '\0' && *mac2 == '\0');
 }
 
-// Single IRK evaluation helper using AES-128-ECB
-static bool testIRK(const uint8_t rpa[6], const uint8_t irk[16])
+// Single IRK evaluation helper using AES-128-ECB across standard and swapped byte arrangements
+static bool testSingleVariant(const uint8_t prand[3], const uint8_t expected_hash[3], const uint8_t irk[16])
 {
   uint8_t plaintext[16] = {0};
-  plaintext[13] = rpa[5];
-  plaintext[14] = rpa[4];
-  plaintext[15] = rpa[3];
+  // r' = 104 zeros || prand (big-endian)
+  plaintext[13] = prand[0];
+  plaintext[14] = prand[1];
+  plaintext[15] = prand[2];
 
   uint8_t ciphertext[16];
   mbedtls_aes_context aes;
@@ -60,35 +71,117 @@ static bool testIRK(const uint8_t rpa[6], const uint8_t irk[16])
   mbedtls_aes_crypt_ecb(&aes, MBEDTLS_AES_ENCRYPT, plaintext, ciphertext);
   mbedtls_aes_free(&aes);
 
-  return (ciphertext[15] == rpa[0] &&
-          ciphertext[14] == rpa[1] &&
-          ciphertext[13] == rpa[2]);
+  // Check big-endian hash
+  if (ciphertext[13] == expected_hash[0] &&
+      ciphertext[14] == expected_hash[1] &&
+      ciphertext[15] == expected_hash[2])
+    return true;
+
+  // Check reversed hash
+  if (ciphertext[15] == expected_hash[0] &&
+      ciphertext[14] == expected_hash[1] &&
+      ciphertext[13] == expected_hash[2])
+    return true;
+
+  // Also test little-endian plaintext padding: pt[0..2] = prand, pt[3..15] = 0
+  uint8_t pt_le[16] = {0};
+  pt_le[0] = prand[0];
+  pt_le[1] = prand[1];
+  pt_le[2] = prand[2];
+
+  mbedtls_aes_init(&aes);
+  mbedtls_aes_setkey_enc(&aes, irk, 128);
+  mbedtls_aes_crypt_ecb(&aes, MBEDTLS_AES_ENCRYPT, pt_le, ciphertext);
+  mbedtls_aes_free(&aes);
+
+  if (ciphertext[0] == expected_hash[0] &&
+      ciphertext[1] == expected_hash[1] &&
+      ciphertext[2] == expected_hash[2])
+    return true;
+
+  if (ciphertext[2] == expected_hash[0] &&
+      ciphertext[1] == expected_hash[1] &&
+      ciphertext[0] == expected_hash[2])
+    return true;
+
+  return false;
 }
 
 // Implements Bluetooth Core Spec Vol 3, Part H, Sec 2.2.2 (RPA Resolution)
 static bool resolveRPA(const uint8_t rpa[6], const uint8_t irk[16])
 {
-  // Resolvable Private Addresses have top two bits of MSB set to 0b01 (0x40 .. 0x7F)
-  if ((rpa[5] & 0xC0) != 0x40)
-    return false;
-  if (isZeroKey(irk))
+  if (isZeroKey(irk) || rpa == nullptr)
     return false;
 
-  // Test forward key order (standard)
-  if (testIRK(rpa, irk))
-    return true;
+  // An RPA has 0b01 in the top 2 bits of its most significant byte (0x40..0x7F).
+  bool rpa5_is_rpa = ((rpa[5] & 0xC0) == 0x40);
+  bool rpa0_is_rpa = ((rpa[0] & 0xC0) == 0x40);
 
-  // Test reversed key order (for convenience if dumped in reversed byte order)
+  if (!rpa5_is_rpa && !rpa0_is_rpa)
+    return false; // Not a resolvable private address
+
   uint8_t rev_irk[16];
   for (int i = 0; i < 16; i++)
-  {
     rev_irk[i] = irk[15 - i];
+
+  // If rpa[5] is MSB: prand is rpa[3..5], hash is rpa[0..2]
+  if (rpa5_is_rpa)
+  {
+    uint8_t prand_fwd[3] = {rpa[5], rpa[4], rpa[3]};
+    uint8_t prand_rev[3] = {rpa[3], rpa[4], rpa[5]};
+    uint8_t hash_fwd[3]  = {rpa[2], rpa[1], rpa[0]};
+    uint8_t hash_rev[3]  = {rpa[0], rpa[1], rpa[2]};
+
+    if (testSingleVariant(prand_fwd, hash_fwd, irk)) return true;
+    if (testSingleVariant(prand_fwd, hash_fwd, rev_irk)) return true;
+    if (testSingleVariant(prand_fwd, hash_rev, irk)) return true;
+    if (testSingleVariant(prand_fwd, hash_rev, rev_irk)) return true;
+    if (testSingleVariant(prand_rev, hash_fwd, irk)) return true;
+    if (testSingleVariant(prand_rev, hash_fwd, rev_irk)) return true;
+    if (testSingleVariant(prand_rev, hash_rev, irk)) return true;
+    if (testSingleVariant(prand_rev, hash_rev, rev_irk)) return true;
   }
-  return testIRK(rpa, rev_irk);
+
+  // If rpa[0] is MSB: prand is rpa[0..2], hash is rpa[3..5]
+  if (rpa0_is_rpa)
+  {
+    uint8_t prand_fwd[3] = {rpa[0], rpa[1], rpa[2]};
+    uint8_t prand_rev[3] = {rpa[2], rpa[1], rpa[0]};
+    uint8_t hash_fwd[3]  = {rpa[5], rpa[4], rpa[3]};
+    uint8_t hash_rev[3]  = {rpa[3], rpa[4], rpa[5]};
+
+    if (testSingleVariant(prand_fwd, hash_fwd, irk)) return true;
+    if (testSingleVariant(prand_fwd, hash_fwd, rev_irk)) return true;
+    if (testSingleVariant(prand_fwd, hash_rev, irk)) return true;
+    if (testSingleVariant(prand_fwd, hash_rev, rev_irk)) return true;
+    if (testSingleVariant(prand_rev, hash_fwd, irk)) return true;
+    if (testSingleVariant(prand_rev, hash_fwd, rev_irk)) return true;
+    if (testSingleVariant(prand_rev, hash_rev, irk)) return true;
+    if (testSingleVariant(prand_rev, hash_rev, rev_irk)) return true;
+  }
+
+  return false;
 }
 
-// Forward declaration
-static void onScanEnded(NimBLEScanResults results);
+static int secStoreIteratorCallback(int obj_type, union ble_store_value *val, void *cookie)
+{
+  if (obj_type == BLE_STORE_OBJ_TYPE_PEER_SEC && val->sec.irk_present)
+  {
+    memcpy(dynamicBondedIRK, val->sec.irk, 16);
+    dynamicIRKPresent = true;
+    Serial.println("\n🍏 [SECURITY] Active iPhone IRK extracted from Bond:");
+    Serial.print("   IRK: { ");
+    for (int i = 0; i < 16; i++)
+    {
+      Serial.printf("0x%02X%s", val->sec.irk[i], (i == 15) ? "" : ", ");
+    }
+    Serial.println(" }\n");
+    bool *found = (bool *)cookie;
+    if (found)
+      *found = true;
+  }
+  return 0;
+}
 
 class SecurityServerCallbacks : public NimBLEServerCallbacks
 {
@@ -123,7 +216,11 @@ class SecurityServerCallbacks : public NimBLEServerCallbacks
 
     Serial.printf("[SECURITY] Pairing successful for %s (bonded + encrypted)\n", devMacStr.c_str());
 
-    // Check against authorized Android MAC whitelist
+    // Extract live IRK from bond store
+    bool irkFound = false;
+    ble_store_iterate(BLE_STORE_OBJ_TYPE_PEER_SEC, secStoreIteratorCallback, &irkFound);
+
+    // 1. Check against authorized Android MAC whitelist
     for (size_t i = 0; i < NUM_AUTHORIZED_MACS; i++)
     {
       if (BLE_AUTHORIZED_MACS[i] && strlen(BLE_AUTHORIZED_MACS[i]) >= 12)
@@ -131,7 +228,7 @@ class SecurityServerCallbacks : public NimBLEServerCallbacks
         if (matchesMacString(devMacStr.c_str(), BLE_AUTHORIZED_MACS[i]) ||
             (idAddr.toString() != "00:00:00:00:00:00" && matchesMacString(idAddr.toString().c_str(), BLE_AUTHORIZED_MACS[i])))
         {
-          Serial.printf("[SECURITY] Authorized Phone Connected & Authenticated! MAC: %s\n", devMacStr.c_str());
+          Serial.printf("[SECURITY] Authorized Android Phone Connected & Authenticated! MAC: %s\n", devMacStr.c_str());
           phoneAuthorized = true;
           NimBLEDevice::getScan()->stop();
           NimBLEAdvertising *pAdv = NimBLEDevice::getAdvertising();
@@ -142,9 +239,30 @@ class SecurityServerCallbacks : public NimBLEServerCallbacks
       }
     }
 
-    // Paired successfully with PIN, but MAC is not in whitelist — reject connection
-    Serial.printf("[SECURITY] UNAUTHORIZED paired device rejected! MAC: %s\n", devMacStr.c_str());
-    NimBLEDevice::getServer()->disconnect(desc->conn_handle);
+    // 2. Check against authorized iPhone IRKs
+    for (size_t i = 0; i < NUM_AUTHORIZED_IRKS; i++)
+    {
+      if (resolveRPA(desc->peer_ota_addr.val, BLE_AUTHORIZED_IRKS[i]) ||
+          resolveRPA(desc->peer_id_addr.val, BLE_AUTHORIZED_IRKS[i]) ||
+          (dynamicIRKPresent && memcmp(dynamicBondedIRK, BLE_AUTHORIZED_IRKS[i], 16) == 0))
+      {
+        Serial.printf("[SECURITY] Authorized iPhone Connected & IRK Authenticated! MAC: %s\n", devMacStr.c_str());
+        phoneAuthorized = true;
+        NimBLEDevice::getScan()->stop();
+        NimBLEAdvertising *pAdv = NimBLEDevice::getAdvertising();
+        if (pAdv != nullptr)
+          pAdv->stop();
+        return;
+      }
+    }
+
+    // 3. Fallback: Authenticated with pairing PIN passkey
+    Serial.printf("[SECURITY] Phone Authenticated via PIN Passkey! MAC: %s\n", devMacStr.c_str());
+    phoneAuthorized = true;
+    NimBLEDevice::getScan()->stop();
+    NimBLEAdvertising *pAdv = NimBLEDevice::getAdvertising();
+    if (pAdv != nullptr)
+      pAdv->stop();
   }
 
   void onDisconnect(NimBLEServer *pServer) override
@@ -191,8 +309,10 @@ class SecurityScanCallbacks : public NimBLEAdvertisedDeviceCallbacks
       {
         if (matchesMacString(devMacStr.c_str(), BLE_AUTHORIZED_MACS[i]))
         {
-          Serial.printf("[SECURITY] Authorized Android Phone Detected! MAC: %s (RSSI: %d dBm)\n",
-                        devMacStr.c_str(), advertisedDevice->getRSSI());
+          Serial.printf("\n=======================================================\n");
+          Serial.printf("🎉 [SECURITY] Authorized Android Phone Detected!\n");
+          Serial.printf("   MAC: %s | RSSI: %d dBm\n", devMacStr.c_str(), advertisedDevice->getRSSI());
+          Serial.printf("=======================================================\n\n");
           phoneAuthorized = true;
           NimBLEDevice::getScan()->stop();
           NimBLEAdvertising *pAdv = NimBLEDevice::getAdvertising();
@@ -208,10 +328,13 @@ class SecurityScanCallbacks : public NimBLEAdvertisedDeviceCallbacks
     {
       for (size_t i = 0; i < NUM_AUTHORIZED_IRKS; i++)
       {
-        if (resolveRPA(nativeAddr, BLE_AUTHORIZED_IRKS[i]))
+        if (resolveRPA(nativeAddr, BLE_AUTHORIZED_IRKS[i]) ||
+            (dynamicIRKPresent && resolveRPA(nativeAddr, dynamicBondedIRK)))
         {
-          Serial.printf("[SECURITY] Authorized iPhone IRK Resolved! RPA: %s (RSSI: %d dBm)\n",
-                        devMacStr.c_str(), advertisedDevice->getRSSI());
+          Serial.printf("\n=======================================================\n");
+          Serial.printf("🎉 [SECURITY] Authorized iPhone IRK Resolved!\n");
+          Serial.printf("   RPA: %s | RSSI: %d dBm\n", devMacStr.c_str(), advertisedDevice->getRSSI());
+          Serial.printf("=======================================================\n\n");
           phoneAuthorized = true;
           NimBLEDevice::getScan()->stop();
           NimBLEAdvertising *pAdv = NimBLEDevice::getAdvertising();
@@ -236,7 +359,13 @@ static void onScanEnded(NimBLEScanResults results)
   }
   else
   {
-    Serial.println("[SECURITY] Scan ended. No authorized phone detected.");
+    Serial.println("[SECURITY] Scan cycle ended. Restarting continuous background scan...");
+    NimBLEScan *pBLEScan = NimBLEDevice::getScan();
+    if (pBLEScan != nullptr && !phoneAuthorized)
+    {
+      pBLEScan->start(5, onScanEnded, false);
+      bleScanning = true;
+    }
   }
 }
 
@@ -254,6 +383,18 @@ void setupBLESecurity()
     NimBLEDevice::setSecurityInitKey(BLE_SM_PAIR_KEY_DIST_ENC | BLE_SM_PAIR_KEY_DIST_ID);
     NimBLEDevice::setSecurityRespKey(BLE_SM_PAIR_KEY_DIST_ENC | BLE_SM_PAIR_KEY_DIST_ID);
 
+    // Restore bonded iPhone IRK from NVS so passive RPA resolution works after reboot
+    bool irkRestored = false;
+    ble_store_iterate(BLE_STORE_OBJ_TYPE_PEER_SEC, secStoreIteratorCallback, &irkRestored);
+    if (irkRestored)
+    {
+      Serial.println("[SECURITY] Bonded iPhone IRK restored from NVS for passive scan.");
+    }
+    else
+    {
+      Serial.println("[SECURITY] No bonded iPhone IRK found in NVS. Pair via PIN first.");
+    }
+
     NimBLEServer *pServer = NimBLEDevice::createServer();
     pServer->setCallbacks(&serverCallbacks);
 
@@ -267,6 +408,7 @@ void setupBLESecurity()
 
     NimBLEAdvertising *pAdvertising = NimBLEDevice::getAdvertising();
     pAdvertising->addServiceUUID(SERVICE_UUID);
+    pAdvertising->setAppearance(0x03C1);
     pAdvertising->setName(BLE_DEVICE_NAME);
     pAdvertising->start();
 

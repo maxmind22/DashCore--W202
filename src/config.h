@@ -89,9 +89,9 @@ const unsigned long MAX_CRANK_TIME_MS = 5000;
 const unsigned long BRAKE_CHECK_SETTLE_MS = 100; // Window (ms) to energize and continuously sample brake circuit
 
 // --- BLE PHONE KEY SECURITY ---
-#define BLE_SCAN_TIMEOUT_MS 10000          // Initial boot/wake scan duration (10s)
-#define BLE_RESCAN_TIMEOUT_MS 5000         // Quick on-demand scan on start button press (5s)
-#define BLE_MIN_RSSI -95                   // Minimum RSSI filter in dBm (-128 to disable)
+#define BLE_SCAN_TIMEOUT_MS 10000  // Initial boot/wake scan duration (10s)
+#define BLE_RESCAN_TIMEOUT_MS 5000 // Quick on-demand scan on start button press (5s)
+#define BLE_MIN_RSSI -95           // Minimum RSSI filter in dBm (-128 to disable)
 
 #if __has_include("secrets.h")
 #include "secrets.h"
@@ -100,13 +100,11 @@ const unsigned long BRAKE_CHECK_SETTLE_MS = 100; // Window (ms) to energize and 
 #define BLE_DEVICE_NAME "MB-BT-Audio"
 #define BLE_PAIRING_PIN 123456
 static const char *const BLE_AUTHORIZED_MACS[] = {
-    "00:00:00:00:00:00"
-};
+    "00:00:00:00:00:00"};
 static const size_t NUM_AUTHORIZED_MACS = sizeof(BLE_AUTHORIZED_MACS) / sizeof(BLE_AUTHORIZED_MACS[0]);
 static const uint8_t BLE_AUTHORIZED_IRKS[][16] = {
     {0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-     0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00}
-};
+     0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00}};
 static const size_t NUM_AUTHORIZED_IRKS = sizeof(BLE_AUTHORIZED_IRKS) / sizeof(BLE_AUTHORIZED_IRKS[0]);
 #endif
 
