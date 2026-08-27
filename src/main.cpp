@@ -5,6 +5,7 @@
 #include "pushstart.h"
 #include "can_comm.h"
 #include "fuel.h"
+#include "security.h"
 
 //=================== setup ===============//
 void setup()
@@ -17,6 +18,8 @@ void setup()
   digitalWrite(PIN_3V3_DIGITAL_GATE, HIGH); // Power 3.3V pull-ups/level shifter
 
   delay(30); // Allow voltage rails to stabilize
+  Serial.begin(250000);
+  delay(20); // Let UART stabilize
 
   // Release any GPIO holds from previous deep sleep
   gpio_hold_dis((gpio_num_t)PIN_RELAY_ACC);
@@ -50,7 +53,7 @@ void setup()
   }
   WiFi.mode(WIFI_OFF);
   WiFi.disconnect(true);
-  btStop();
+  setupBLESecurity(); // Initialize BLE scanner to detect phone (auto-shuts down upon detection)
   tv.begin();
   tv.copyAfterSwap = true;
 
@@ -81,8 +84,6 @@ void setup()
   pinModeFast(coolant_level_pin, INPUT);
   pinMode(field_relay_pin, OUTPUT);
   digitalWriteFast(field_relay_pin, LOW); // Start with field relay off
-  Serial.begin(250000);
-  delay(50); // Let UART stabilize
 
   SPI.begin();
   mcp2515.reset();

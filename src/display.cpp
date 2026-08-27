@@ -1,5 +1,6 @@
 #include "display.h"
 #include "pushstart.h"
+#include "security.h"
 
 void drawStaticGauge()
 {
@@ -208,6 +209,29 @@ void warnings(unsigned long now)
   {
     tv.fillRect(WARNING_X + 15, WARNING_Y + 50, 160, 8, 0x00);
     authWarningDrawn = false;
+  }
+
+  // -------- Phone Key Detection Warning --------//
+  static bool phoneKeyWarningDrawn = false;
+  if (!isPhoneAuthorized() && !engineStartDisabled)
+  {
+    if (lowBlinkState)
+    {
+      tv.setCursor(WARNING_X + 25, WARNING_Y + 42);
+      tv.setTextColor(0xFF);
+      tv.setTextSize(1);
+      tv.print("NO KEY DETECTED");
+      phoneKeyWarningDrawn = true;
+    }
+    else if (phoneKeyWarningDrawn)
+    {
+      tv.fillRect(WARNING_X + 25, WARNING_Y + 42, 100, 8, 0x00);
+    }
+  }
+  else if (phoneKeyWarningDrawn)
+  {
+    tv.fillRect(WARNING_X + 25, WARNING_Y + 42, 100, 8, 0x00);
+    phoneKeyWarningDrawn = false;
   }
 
   // -------- Auto Start-Stop Active Indicator --------//

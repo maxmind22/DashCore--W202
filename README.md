@@ -53,6 +53,14 @@ The ESP32 manages a smart, keyless push-to-start system designed to replicate an
   - **Auto-Disengage:** Disengages once engine RPM exceeds **400 RPM**, or cuts out after a **5-second safety limit** if starting fails.
   - **Stall Safety:** Stall detection requires CAN connectivity verification (`lastPacketTime < 2000ms`), ensuring a transient CAN signal loss at highway speed will never cut engine ignition.
 - **Double Starting Prevention:** If cranking times out, the system automatically falls back to `STATE_ACC` to prevent gear grinding on a running engine.
+- **📱 BLE Phone-as-Keyfob Engine Immobilizer:**
+  - **Passive BLE Proximity Detection:** ESP32 scans for authorized phones on boot/wake and on start button presses. No app needed on the phone — standard Bluetooth advertising is used.
+  - **Multi-Device Support:**
+    - **Android:** Verified via static Bluetooth MAC address matching (`BLE_AUTHORIZED_MACS`).
+    - **iPhone:** Verified via **IRK (Identity Resolving Key)** cryptographic resolution of rotating Resolvable Private Addresses (`BLE_AUTHORIZED_IRKS` using AES-128-ECB).
+  - **Zero-Interference Auto Radio Shutdown:** The BLE stack and radio are **immediately powered off** once authorization is granted, preventing RF interference with the closed-loop PID alternator regulator or composite video DMA rendering.
+  - **HUD Status & Audio Feedback:** Displays `"NO KEY DETECTED"` warning and emits warning beeps when starting is attempted without an authorized phone.
+  - **Emergency Bypass:** 6 pulses on the central unlock line temporarily bypasses phone authorization for the current session (confirmed via 800ms chime).
 
 ---
 
@@ -80,12 +88,14 @@ The ESP32 codebase is fully modularized for clean separation of concerns:
 - `/src/display.h` / `/src/display.cpp` - Composite video HUD graphics routines (`drawStaticGauge()`, `warnings()`).
 - `/src/regulator.h` / `/src/regulator.cpp` - Closed-loop PID alternator field regulator task (Core 0) & I2C bus recovery logic.
 - `/src/pushstart.h` / `/src/pushstart.cpp` - Keyless push-to-start state machine, non-blocking lock/buzzer timers, unlock handler, and deep sleep management.
+- `/src/security.h` / `/src/security.cpp` - BLE phone-as-keyfob scanner, iPhone IRK cryptographic resolution, Android MAC matching, and auto-shutdown.
 - `/src/can_comm.h` / `/src/can_comm.cpp` - CAN frame buffer drain (`drainCanRxBuffer`), error flag diagnostic clearing, and heartbeat transmitter.
 - `/src/fuel.h` / `/src/fuel.cpp` - Non-linear fuel tank volume interpolation (`getFuelPercent()`) & trip data reset routines.
 - `/src/main.cpp` - Clean ESP32 orchestrator containing `setup()` and `loop()`.
+- `/tools/get_irk/main.cpp` - One-time setup tool to extract iPhone IRKs and scan Android Bluetooth MAC addresses (`pio run -e get_irk`).
 - `/Front_MCU/main.cpp` - ATmega328P engine bay sensor acquisition, radiator fan PWM control, safety relays, and CAN broadcast loop.
 - `/HARDWARE.md` - Complete hardware block diagram, netlist, and pinout schematics.
-- `/platformio.ini` - PlatformIO build environments for `esp32dev` and `front_mcu`.
+- `/platformio.ini` - PlatformIO build environments for `esp32dev`, `front_mcu`, and `get_irk`.
 
 ---
 

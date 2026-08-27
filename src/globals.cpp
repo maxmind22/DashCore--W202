@@ -12,6 +12,8 @@ RTC_DATA_ATTR SystemState currentState = STATE_SLEEP;
 RTC_DATA_ATTR bool vehicleLockDisabled = false;
 RTC_DATA_ATTR bool engineStartDisabled = false;
 RTC_DATA_ATTR bool autoStartStopDisabled = false;
+volatile bool phoneAuthorized = false;
+RTC_DATA_ATTR bool phoneAuthBypassed = false;
 
 unsigned long standbyStartTime = 0;
 unsigned long lastButtonPressTime = 0;

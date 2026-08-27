@@ -1,4 +1,5 @@
 #include "pushstart.h"
+#include "security.h"
 #include "fuel.h" // For resetFuelTripData
 
 static LockRelayState lockRelayState = LOCK_IDLE;
@@ -153,6 +154,18 @@ void processUnlockSignals(unsigned long now)
         autoStartStopDisabled = !autoStartStopDisabled;
         playStartStopToggleTone(autoStartStopDisabled);
       }
+      else if (unlockPulseCount == 6)
+      {
+        phoneAuthBypassed = !phoneAuthBypassed;
+        if (phoneAuthBypassed)
+        {
+          queueTone(1, 800, 0, now); // 1 long beep (800ms) = phone auth bypassed
+        }
+        else
+        {
+          queueTone(4, 150, 100, now); // 4 short beeps = bypass disabled
+        }
+      }
     }
 
     // Reset for next burst
@@ -248,6 +261,11 @@ void enterPowerDownSleep()
   // 4. Stop TV display (I2S DMA) — must stop before deep sleep or DMA crash
   stopTVDisplay();
   delay(10); // Let DMA finish any in-flight transfer
+
+  // 4.1 Ensure BLE scanner is completely shut down and reset session auth
+  teardownBLESecurity();
+  phoneAuthorized = false;
+  phoneAuthBypassed = false;
 
   // 5. Put MCP2515 CAN controller to sleep (SPI device)
   sleepCANController();
@@ -475,13 +493,17 @@ void processPushStart(unsigned long now)
       if (digitalRead(PIN_INPUT_BRAKE) == LOW)
       {
         standbyBrakeCheckPending = false;
-        if (!engineStartDisabled)
+        if (!engineStartDisabled && isPhoneAuthorized())
         {
           currentState = STATE_CRANKING;
         }
         else
         {
-          // Serial.println("[LOCKDOWN] Engine start blocked! PLZ AUTHENTICATE");
+          if (!engineStartDisabled && !isPhoneAuthorized() && !isBLEScanning())
+          {
+            triggerBLERescan(BLE_RESCAN_TIMEOUT_MS);
+          }
+          // Serial.println("[LOCKDOWN/SECURITY] Engine start blocked! PLZ AUTHENTICATE");
           playAuthWarningTone();
           currentState = STATE_STANDBY;
         }
@@ -501,6 +523,10 @@ void processPushStart(unsigned long now)
       if (btnPressed && (now - lastButtonPressTime >= BUTTON_COOLDOWN_MS))
       {
         lastButtonPressTime = now;
+        if (!isPhoneAuthorized() && !isBLEScanning())
+        {
+          triggerBLERescan(BLE_RESCAN_TIMEOUT_MS);
+        }
         // Temporarily turn on ACC & IGN to power the brake switch circuit
         setRelays(true, true, false);
         standbyBrakeCheckPending = true;
@@ -525,14 +551,18 @@ void processPushStart(unsigned long now)
       if (digitalRead(PIN_INPUT_BRAKE) == LOW)
       {
         accBrakeCheckPending = false;
-        if (!engineStartDisabled)
+        if (!engineStartDisabled && isPhoneAuthorized())
         {
           currentState = STATE_CRANKING;
           stoppedToAcc = false;
         }
         else
         {
-          Serial.println("[LOCKDOWN] Engine start blocked! PLZ AUTHENTICATE");
+          if (!engineStartDisabled && !isPhoneAuthorized() && !isBLEScanning())
+          {
+            triggerBLERescan(BLE_RESCAN_TIMEOUT_MS);
+          }
+          Serial.println("[LOCKDOWN/SECURITY] Engine start blocked! PLZ AUTHENTICATE");
           playAuthWarningTone();
           currentState = STATE_ACC;
         }
@@ -560,6 +590,10 @@ void processPushStart(unsigned long now)
       if (btnPressed && (now - lastButtonPressTime >= BUTTON_COOLDOWN_MS))
       {
         lastButtonPressTime = now;
+        if (!isPhoneAuthorized() && !isBLEScanning())
+        {
+          triggerBLERescan(BLE_RESCAN_TIMEOUT_MS);
+        }
         // Temporarily turn on IGN to power the brake switch circuit
         setRelays(true, true, false);
         accBrakeCheckPending = true;
@@ -576,9 +610,13 @@ void processPushStart(unsigned long now)
     if (btnPressed && (now - lastButtonPressTime >= BUTTON_COOLDOWN_MS))
     {
       lastButtonPressTime = now;
+      if (!isPhoneAuthorized() && !isBLEScanning())
+      {
+        triggerBLERescan(BLE_RESCAN_TIMEOUT_MS);
+      }
       if (brakeHeld)
       {
-        if (!engineStartDisabled)
+        if (!engineStartDisabled && isPhoneAuthorized())
         {
           currentState = STATE_CRANKING;
         }
@@ -596,9 +634,9 @@ void processPushStart(unsigned long now)
     break;
 
   case STATE_CRANKING:
-    if (engineStartDisabled)
+    if (engineStartDisabled || !isPhoneAuthorized())
     {
-      // Serial.println("[DEBUG] Cranking aborted: Engine start disabled (Lockdown)");
+      // Serial.println("[DEBUG] Cranking aborted: Engine start not authorized");
       setRelays(true, false, false); // Abort cranking immediately
       currentState = STATE_ACC;
       playAuthWarningTone();

@@ -16,3 +16,8 @@ mercedes-dashboard/
 include/
 lib/
 test/
+
+# Private credentials and security keys
+secrets.h
+src/secrets.h
+**/secrets.h
