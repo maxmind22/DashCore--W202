@@ -237,8 +237,8 @@ void loop()
   //==============================================//
 
   // CAN drain (catch anything that arrived during frame sync)
-  checkCanErrors();
   drainCanRxBuffer(now);
+  checkCanErrors(now);
 
   portENTER_CRITICAL(&dataMux);
   rpm = new_rpm;

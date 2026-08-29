@@ -1,22 +1,31 @@
 #include "can_comm.h"
 #include "fuel.h"
 
-void checkCanErrors() {
+void checkCanErrors(unsigned long now) {
   uint8_t errFlags = mcp2515.getErrorFlags();
   if (errFlags != 0) {
-    // Clear overflow flags to resume reception
+    // Clear overflow flags in EFLG without wiping CANINTF unread interrupt flags
     if (errFlags & (MCP2515::EFLG_RX0OVR | MCP2515::EFLG_RX1OVR)) {
-      mcp2515.clearRXnOVR();
+      mcp2515.clearRXnOVRFlags();
     }
 
-    // Only completely reset the chip if it goes into Bus-Off (fatal state).
-    // Do NOT interfere if it's just in Error Passive (TXEP/RXEP); it will
-    // self-recover.
-    if (errFlags & MCP2515::EFLG_TXBO) {
+    // Reset the chip if in Bus-Off or stuck in Error Passive (TXEP)
+    if (errFlags & (MCP2515::EFLG_TXBO | MCP2515::EFLG_TXEP)) {
       mcp2515.reset();
       mcp2515.setBitrate(CAN_500KBPS, MCP_8MHZ);
       mcp2515.setNormalOneShotMode();
     }
+  }
+
+  // Auto-recovery for stale/disconnected communication:
+  // If no packets received for > 2000ms, periodically reset and re-initialize MCP2515 every 1000ms
+  // to clear any silicon lockup or stuck buffer states without requiring an ESP32 power cycle.
+  static unsigned long lastResetAttempt = 0;
+  if ((now - lastPacketTime > 2000) && (now - lastResetAttempt >= 1000)) {
+    mcp2515.reset();
+    mcp2515.setBitrate(CAN_500KBPS, MCP_8MHZ);
+    mcp2515.setNormalOneShotMode();
+    lastResetAttempt = now;
   }
 }
 
