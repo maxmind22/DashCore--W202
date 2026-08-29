@@ -200,10 +200,10 @@ void setup()
   pChar->setValue("DashCore Auth Setup");
   pService->start();
 
-  // Start Advertising (Set appearance 0x03C1 / Keyboard so it shows up in iOS Settings -> Bluetooth)
+  // Start Advertising
   NimBLEAdvertising *pAdvertising = NimBLEDevice::getAdvertising();
   pAdvertising->addServiceUUID(SERVICE_UUID);
-  pAdvertising->setAppearance(0x03C1);
+  pAdvertising->setScanResponse(true);
   pAdvertising->setName(SETUP_DEVICE_NAME);
   pAdvertising->start();
 

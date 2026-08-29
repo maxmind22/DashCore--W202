@@ -52,11 +52,13 @@ static void grantPhoneAuthorization(const char *reason, const char *deviceInfo)
   Serial.printf("=======================================================\n\n");
 
   phoneAuthorized = true;
+  bleScanning = false;
 
   NimBLEScan *pScan = NimBLEDevice::getScan();
   if (pScan != nullptr && pScan->isScanning())
   {
     pScan->stop();
+    pScan->clearResults();
   }
 
   NimBLEAdvertising *pAdv = NimBLEDevice::getAdvertising();
@@ -70,7 +72,7 @@ static void grantPhoneAuthorization(const char *reason, const char *deviceInfo)
 static void loadPersistedIRKs()
 {
   Preferences prefs;
-  prefs.begin(NVS_IRK_NAMESPACE, true); // read-only
+  prefs.begin(NVS_IRK_NAMESPACE, false); // read-write so namespace is created if absent
   persistedIRKCount = prefs.getUChar("count", 0);
   if (persistedIRKCount > MAX_PERSISTED_IRKS)
     persistedIRKCount = MAX_PERSISTED_IRKS;
@@ -87,13 +89,18 @@ static void loadPersistedIRKs()
     }
     else
     {
-      Serial.printf("[SECURITY] Loaded persisted IRK #%u [REDACTED]\n", i);
+      Serial.printf("[SECURITY] Loaded persisted IRK #%u: { ", i);
+      for (int k = 0; k < 16; k++)
+        Serial.printf("0x%02X%s", persistedIRKs[i][k], (k == 15) ? "" : ", ");
+      Serial.println(" }");
     }
   }
   prefs.end();
 
   if (persistedIRKCount > 0)
-    Serial.printf("[SECURITY] %u persisted IRK(s) loaded from NVS.\n", persistedIRKCount);
+    Serial.printf("[SECURITY] %u dynamic IRK(s) loaded from NVS.\n", persistedIRKCount);
+  else if (NUM_AUTHORIZED_IRKS > 0)
+    Serial.printf("[SECURITY] %u compile-time IRK(s) configured in secrets.h.\n", (unsigned int)NUM_AUTHORIZED_IRKS);
   else
     Serial.println("[SECURITY] No persisted IRKs in NVS. Pair a phone to auto-save its IRK.");
 }
@@ -169,7 +176,15 @@ static bool persistNewIRK(const uint8_t irk[16])
   }
   prefs.end();
 
-  Serial.printf("\n🔐 [SECURITY] NEW IRK auto-persisted to NVS (slot #%u) [REDACTED]\n", persistedIRKCount - 1);
+  Serial.printf("\n🔐 [SECURITY] NEW IRK auto-persisted to NVS (slot #%u):\n", persistedIRKCount - 1);
+  Serial.print("   { ");
+  for (int i = 0; i < 16; i++)
+  {
+    Serial.printf("0x%02X%s", irk[i], (i == 15) ? "" : ", ");
+    if (i == 7)
+      Serial.print("\n     ");
+  }
+  Serial.println(" }");
   Serial.println("   ✅ This phone will be detected passively from now on — no more pairing needed!\n");
 
   return true;
@@ -280,12 +295,69 @@ static int secStoreIteratorCallback(int obj_type, union ble_store_value *val, vo
     persistNewIRK(val->sec.irk);
     memcpy(dynamicBondedIRK, val->sec.irk, 16);
     dynamicIRKPresent = true;
-    Serial.println("\n🔑 [SECURITY] Active Bonded Phone IRK extracted from Bond Store [REDACTED]\n");
+    Serial.println("\n🔑 [SECURITY] Active Bonded Phone IRK extracted from Bond Store:");
+    Serial.print("   { ");
+    for (int i = 0; i < 16; i++)
+    {
+      Serial.printf("0x%02X%s", val->sec.irk[i], (i == 15) ? "" : ", ");
+      if (i == 7)
+        Serial.print("\n     ");
+    }
+    Serial.println(" }\n");
     bool *found = (bool *)cookie;
     if (found)
       *found = true;
   }
   return 0;
+}
+
+// Check if a given peer address is recognized (via MAC whitelist or IRK RPA resolution)
+static bool isAddressAuthorized(const uint8_t rawAddr[6], const char *macStr, std::string &matchedDesc)
+{
+  if (macStr != nullptr && macStr[0] != '\0')
+  {
+    // 1. Check MAC whitelist
+    for (size_t i = 0; i < NUM_AUTHORIZED_MACS; i++)
+    {
+      if (BLE_AUTHORIZED_MACS[i] && strlen(BLE_AUTHORIZED_MACS[i]) >= 12)
+      {
+        if (matchesMacString(macStr, BLE_AUTHORIZED_MACS[i]))
+        {
+          matchedDesc = std::string("MAC Whitelist: ") + macStr;
+          return true;
+        }
+      }
+    }
+  }
+
+  if (rawAddr != nullptr)
+  {
+    // 2. Check compile-time IRKs from secrets.h
+    for (size_t i = 0; i < NUM_AUTHORIZED_IRKS; i++)
+    {
+      if (resolveRPA(rawAddr, BLE_AUTHORIZED_IRKS[i]))
+      {
+        matchedDesc = std::string("Authorized IRK: ") + (macStr ? macStr : "");
+        return true;
+      }
+    }
+
+    // 3. Check dynamic bonded IRK
+    if (dynamicIRKPresent && resolveRPA(rawAddr, dynamicBondedIRK))
+    {
+      matchedDesc = std::string("Bonded Phone IRK: ") + (macStr ? macStr : "");
+      return true;
+    }
+
+    // 4. Check NVS-persisted IRKs
+    if (resolveRPAAgainstPersistedIRKs(rawAddr))
+    {
+      matchedDesc = std::string("Persisted IRK: ") + (macStr ? macStr : "");
+      return true;
+    }
+  }
+
+  return false;
 }
 
 class SecurityServerCallbacks : public NimBLEServerCallbacks
@@ -296,26 +368,41 @@ class SecurityServerCallbacks : public NimBLEServerCallbacks
       return;
 
     NimBLEAddress peerAddr(desc->peer_ota_addr);
+    NimBLEAddress idAddr(desc->peer_id_addr);
     std::string devMacStr = peerAddr.toString();
+    std::string idMacStr = idAddr.toString();
+    Serial.printf("[SECURITY] Connection received from OTA: %s | ID: %s\n", devMacStr.c_str(), idMacStr.c_str());
 
-    Serial.printf("[SECURITY] Connection received from: %s — initiating security handshake...\n", devMacStr.c_str());
-    
-    // Do NOT authorize here on raw connection. Trigger encryption/authentication first.
-    NimBLEDevice::startSecurity(desc->conn_handle);
+    // 1. If this phone is already known (in MAC whitelist or matches authorized IRK), authorize IMMEDIATELY!
+    std::string matchDesc;
+    if (isAddressAuthorized(desc->peer_ota_addr.val, devMacStr.c_str(), matchDesc) ||
+        (idMacStr != "00:00:00:00:00:00" && isAddressAuthorized(desc->peer_id_addr.val, idMacStr.c_str(), matchDesc)))
+    {
+      grantPhoneAuthorization("Authorized Phone Connected & Recognized!", matchDesc.c_str());
+      // Disconnect immediately so Android does NOT attempt to pair or create a bond!
+      pServer->disconnect(desc->conn_handle);
+      return;
+    }
+
+    // 2. If address is unrecognized, disconnect to block unauthorized access
+    Serial.printf("[SECURITY] Unrecognized phone %s — disconnecting.\n", devMacStr.c_str());
+    pServer->disconnect(desc->conn_handle);
   }
 
   void onAuthenticationComplete(ble_gap_conn_desc *desc) override
   {
-    if (desc == nullptr)
+    if (desc == nullptr || phoneAuthorized || isPhoneAuthorized())
       return;
 
     NimBLEAddress peerAddr(desc->peer_ota_addr);
     NimBLEAddress idAddr(desc->peer_id_addr);
     std::string devMacStr = peerAddr.toString();
+    std::string idMacStr = idAddr.toString();
 
     if (!desc->sec_state.encrypted || !desc->sec_state.bonded)
     {
-      Serial.printf("[SECURITY] Pairing / auth FAILED for %s — disconnecting.\n", devMacStr.c_str());
+      Serial.printf("[SECURITY] Pairing / auth FAILED for %s (encrypted=%d, bonded=%d) — disconnecting.\n",
+                    devMacStr.c_str(), desc->sec_state.encrypted, desc->sec_state.bonded);
       NimBLEDevice::getServer()->disconnect(desc->conn_handle);
       return;
     }
@@ -326,42 +413,15 @@ class SecurityServerCallbacks : public NimBLEServerCallbacks
     bool irkFound = false;
     ble_store_iterate(BLE_STORE_OBJ_TYPE_PEER_SEC, secStoreIteratorCallback, &irkFound);
 
-    // 1. Check against authorized Android MAC whitelist (now verified through encrypted link)
-    for (size_t i = 0; i < NUM_AUTHORIZED_MACS; i++)
+    std::string matchDesc;
+    if (isAddressAuthorized(desc->peer_ota_addr.val, devMacStr.c_str(), matchDesc) ||
+        (idMacStr != "00:00:00:00:00:00" && isAddressAuthorized(desc->peer_id_addr.val, idMacStr.c_str(), matchDesc)))
     {
-      if (BLE_AUTHORIZED_MACS[i] && strlen(BLE_AUTHORIZED_MACS[i]) >= 12)
-      {
-        if (matchesMacString(devMacStr.c_str(), BLE_AUTHORIZED_MACS[i]) ||
-            (idAddr.toString() != "00:00:00:00:00:00" && matchesMacString(idAddr.toString().c_str(), BLE_AUTHORIZED_MACS[i])))
-        {
-          grantPhoneAuthorization("Authorized Android Phone Connected & Authenticated!", devMacStr.c_str());
-          return;
-        }
-      }
-    }
-
-    // 2. Check against authorized IRKs (compile-time from secrets.h)
-    for (size_t i = 0; i < NUM_AUTHORIZED_IRKS; i++)
-    {
-      if (resolveRPA(desc->peer_ota_addr.val, BLE_AUTHORIZED_IRKS[i]) ||
-          resolveRPA(desc->peer_id_addr.val, BLE_AUTHORIZED_IRKS[i]) ||
-          (dynamicIRKPresent && memcmp(dynamicBondedIRK, BLE_AUTHORIZED_IRKS[i], 16) == 0))
-      {
-        grantPhoneAuthorization("Authorized Phone Connected & IRK Authenticated!", devMacStr.c_str());
-        return;
-      }
-    }
-
-    // 3. Check against NVS-persisted IRKs (auto-saved from previous pairings)
-    if (resolveRPAAgainstPersistedIRKs(desc->peer_ota_addr.val) ||
-        resolveRPAAgainstPersistedIRKs(desc->peer_id_addr.val) ||
-        (dynamicIRKPresent && isIRKAlreadyKnown(dynamicBondedIRK)))
-    {
-      grantPhoneAuthorization("Authorized Phone Connected & Persisted IRK Matched!", devMacStr.c_str());
+      grantPhoneAuthorization("Authorized Phone Connected & Authenticated!", matchDesc.c_str());
       return;
     }
 
-    // 4. Authenticated with pairing PIN passkey — auto-persist IRK for future passive detection
+    // Authenticated with pairing PIN passkey — auto-persist IRK for future passive detection
     grantPhoneAuthorization("Phone Authenticated via PIN Passkey!", devMacStr.c_str());
 
     if (dynamicIRKPresent)
@@ -372,17 +432,14 @@ class SecurityServerCallbacks : public NimBLEServerCallbacks
 
   uint32_t onPassKeyRequest() override
   {
+    Serial.printf("[SECURITY] Passkey requested by phone — providing PIN: %06u\n", (unsigned int)BLE_PAIRING_PIN);
     return BLE_PAIRING_PIN;
   }
 
   bool onConfirmPIN(uint32_t pin) override
   {
-    bool match = (pin == BLE_PAIRING_PIN);
-    if (!match)
-    {
-      Serial.printf("[SECURITY] PIN mismatch rejected: %06u (expected %06u)\n", (unsigned int)pin, (unsigned int)BLE_PAIRING_PIN);
-    }
-    return match;
+    Serial.printf("[SECURITY] Numeric comparison code: %06u — auto-confirming pairing\n", (unsigned int)pin);
+    return true;
   }
 
   void onDisconnect(NimBLEServer *pServer) override
@@ -412,69 +469,19 @@ class SecurityScanCallbacks : public NimBLEAdvertisedDeviceCallbacks
     }
 #endif
 
-    // 1. Check against authorized Android MAC addresses
-    for (size_t i = 0; i < NUM_AUTHORIZED_MACS; i++)
+    std::string matchDesc;
+    if (isAddressAuthorized(nativeAddr, devMacStr.c_str(), matchDesc))
     {
-      if (BLE_AUTHORIZED_MACS[i] && strlen(BLE_AUTHORIZED_MACS[i]) >= 12)
-      {
-        if (matchesMacString(devMacStr.c_str(), BLE_AUTHORIZED_MACS[i]))
-        {
-          char info[64];
-          snprintf(info, sizeof(info), "MAC: %s | RSSI: %d dBm", devMacStr.c_str(), advertisedDevice->getRSSI());
-          grantPhoneAuthorization("Authorized Android Phone Detected!", info);
-          return;
-        }
-      }
-    }
-
-    // 2. Check against authorized IRKs (compile-time from secrets.h)
-    if (nativeAddr != nullptr)
-    {
-      for (size_t i = 0; i < NUM_AUTHORIZED_IRKS; i++)
-      {
-        if (resolveRPA(nativeAddr, BLE_AUTHORIZED_IRKS[i]) ||
-            (dynamicIRKPresent && resolveRPA(nativeAddr, dynamicBondedIRK)))
-        {
-          char info[64];
-          snprintf(info, sizeof(info), "RPA: %s | RSSI: %d dBm", devMacStr.c_str(), advertisedDevice->getRSSI());
-          grantPhoneAuthorization("Authorized Phone IRK Resolved!", info);
-          return;
-        }
-      }
-
-      // 3. Check against NVS-persisted IRKs (auto-saved from previous pairings)
-      if (resolveRPAAgainstPersistedIRKs(nativeAddr))
-      {
-        char info[64];
-        snprintf(info, sizeof(info), "RPA: %s | RSSI: %d dBm", devMacStr.c_str(), advertisedDevice->getRSSI());
-        grantPhoneAuthorization("Authorized Phone Persisted IRK Resolved!", info);
-        return;
-      }
+      char info[80];
+      snprintf(info, sizeof(info), "%s | RSSI: %d dBm", matchDesc.c_str(), advertisedDevice->getRSSI());
+      grantPhoneAuthorization("Authorized Phone Detected via BLE Scan!", info);
+      return;
     }
   }
 };
 
 static SecurityServerCallbacks serverCallbacks;
 static SecurityScanCallbacks scanCallbacks;
-
-static void onScanEnded(NimBLEScanResults results)
-{
-  bleScanning = false;
-  NimBLEScan *pBLEScan = NimBLEDevice::getScan();
-  if (pBLEScan != nullptr)
-  {
-    pBLEScan->clearResults();
-  }
-
-  if (phoneAuthorized)
-  {
-    Serial.println("[SECURITY] Authorization granted. BLE scan stopped.");
-  }
-  else
-  {
-    Serial.println("[SECURITY] BLE scan period ended without detecting authorized phone.");
-  }
-}
 
 void setupBLESecurity()
 {
@@ -484,11 +491,8 @@ void setupBLESecurity()
   if (!bleInitialized)
   {
     NimBLEDevice::init(BLE_DEVICE_NAME);
-    NimBLEDevice::setSecurityAuth(true, true, true);
-    NimBLEDevice::setSecurityIOCap(BLE_HS_IO_DISPLAY_ONLY);
-    NimBLEDevice::setSecurityPasskey(BLE_PAIRING_PIN);
-    NimBLEDevice::setSecurityInitKey(BLE_SM_PAIR_KEY_DIST_ENC | BLE_SM_PAIR_KEY_DIST_ID);
-    NimBLEDevice::setSecurityRespKey(BLE_SM_PAIR_KEY_DIST_ENC | BLE_SM_PAIR_KEY_DIST_ID);
+    NimBLEDevice::setSecurityAuth(false, false, false); // No bonding needed — authorized via MAC/IRK whitelist directly!
+    NimBLEDevice::setSecurityIOCap(BLE_HS_IO_NO_INPUT_OUTPUT);
 
     // 1. Load auto-persisted IRKs from NVS first to populate runtime array
     loadPersistedIRKs();
@@ -511,14 +515,13 @@ void setupBLESecurity()
     NimBLEService *pService = pServer->createService(SERVICE_UUID);
     NimBLECharacteristic *pChar = pService->createCharacteristic(
         CHARACTERISTIC_UUID,
-        NIMBLE_PROPERTY::READ | NIMBLE_PROPERTY::READ_ENC | NIMBLE_PROPERTY::READ_AUTHEN |
-        NIMBLE_PROPERTY::WRITE | NIMBLE_PROPERTY::WRITE_ENC | NIMBLE_PROPERTY::WRITE_AUTHEN);
+        NIMBLE_PROPERTY::READ);
     pChar->setValue("DashCore Auth");
     pService->start();
 
     NimBLEAdvertising *pAdvertising = NimBLEDevice::getAdvertising();
     pAdvertising->addServiceUUID(SERVICE_UUID);
-    pAdvertising->setAppearance(0x03C1);
+    pAdvertising->setScanResponse(true);
     pAdvertising->setName(BLE_DEVICE_NAME);
     pAdvertising->start();
 
@@ -537,17 +540,13 @@ void setupBLESecurity()
   if (pBLEScan != nullptr)
   {
     pBLEScan->setAdvertisedDeviceCallbacks(&scanCallbacks, true); // wantDuplicates = true for continuous reception
-    pBLEScan->setActiveScan(false);                               // Passive scan (stealthy, saves power)
+    pBLEScan->setActiveScan(true);                                // Active scan catches Android discovery/scan responses
     pBLEScan->setInterval(100);                                   // 100ms interval
-    pBLEScan->setWindow(99);                                      // 99ms window (near 100% duty cycle)
+    pBLEScan->setWindow(50);                                      // 50ms window (balanced 50% scan / 50% advertising duty cycle)
 
-    uint32_t durationSec = BLE_SCAN_TIMEOUT_MS / 1000;
-    if (durationSec == 0)
-      durationSec = 1;
-
-    Serial.printf("[SECURITY] Starting BLE scan / server for phone (%u sec)...\n", (unsigned int)durationSec);
+    Serial.println("[SECURITY] Starting continuous BLE scan & server (until authorized or sleep)...");
     bleScanning = true;
-    if (!pBLEScan->start(durationSec, onScanEnded, false))
+    if (!pBLEScan->start(0, nullptr, false))
     {
       Serial.println("[SECURITY] ERROR: BLE Scan failed to start!");
       bleScanning = false;
@@ -610,17 +609,13 @@ void triggerBLERescan(unsigned long durationMs)
   if (pBLEScan != nullptr)
   {
     pBLEScan->setAdvertisedDeviceCallbacks(&scanCallbacks, true);
-    pBLEScan->setActiveScan(false);
+    pBLEScan->setActiveScan(true);
     pBLEScan->setInterval(100);
-    pBLEScan->setWindow(99);
+    pBLEScan->setWindow(50);
 
-    uint32_t durationSec = durationMs / 1000;
-    if (durationSec == 0)
-      durationSec = 1;
-
-    Serial.printf("[SECURITY] Re-scanning for phone (%u sec)...\n", (unsigned int)durationSec);
+    Serial.println("[SECURITY] Re-starting continuous BLE scan & server...");
     bleScanning = true;
-    if (!pBLEScan->start(durationSec, onScanEnded, false))
+    if (!pBLEScan->start(0, nullptr, false))
     {
       Serial.println("[SECURITY] ERROR: BLE Re-scan failed to start!");
       bleScanning = false;
