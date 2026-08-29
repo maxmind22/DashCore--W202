@@ -43,6 +43,11 @@ static bool isZeroKey(const uint8_t key[16])
 // Centralized authorization helper
 static void grantPhoneAuthorization(const char *reason, const char *deviceInfo)
 {
+  if (phoneAuthorized || isPhoneAuthorized())
+    return;
+
+  phoneAuthorized = true;
+
   Serial.printf("\n=======================================================\n");
   Serial.printf("🎉 [SECURITY] Authorization Granted: %s\n", reason ? reason : "Phone Authorized");
   if (deviceInfo != nullptr && deviceInfo[0] != '\0')
@@ -51,7 +56,6 @@ static void grantPhoneAuthorization(const char *reason, const char *deviceInfo)
   }
   Serial.printf("=======================================================\n\n");
 
-  phoneAuthorized = true;
   teardownBLESecurity();
   Serial.println("[SECURITY] Bluetooth radio completely stopped & disabled.\n");
 }
@@ -355,6 +359,12 @@ class SecurityServerCallbacks : public NimBLEServerCallbacks
     if (desc == nullptr)
       return;
 
+    if (phoneAuthorized || isPhoneAuthorized())
+    {
+      pServer->disconnect(desc->conn_handle);
+      return;
+    }
+
     NimBLEAddress peerAddr(desc->peer_ota_addr);
     NimBLEAddress idAddr(desc->peer_id_addr);
     std::string devMacStr = peerAddr.toString();
@@ -443,7 +453,7 @@ class SecurityScanCallbacks : public NimBLEAdvertisedDeviceCallbacks
 {
   void onResult(NimBLEAdvertisedDevice *advertisedDevice) override
   {
-    if (phoneAuthorized || advertisedDevice == nullptr)
+    if (phoneAuthorized || isPhoneAuthorized() || advertisedDevice == nullptr)
       return;
 
     std::string devMacStr = advertisedDevice->getAddress().toString();
