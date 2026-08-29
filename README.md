@@ -54,10 +54,10 @@ The ESP32 manages a smart, keyless push-to-start system designed to replicate an
   - **Stall Safety:** Stall detection requires CAN connectivity verification (`lastPacketTime < 2000ms`), ensuring a transient CAN signal loss at highway speed will never cut engine ignition.
 - **Double Starting Prevention:** If cranking times out, the system automatically falls back to `STATE_ACC` to prevent gear grinding on a running engine.
 - **📱 BLE Phone-as-Keyfob Engine Immobilizer:**
-  - **Passive BLE Proximity Detection:** ESP32 scans for authorized phones on boot/wake and on start button presses. No app needed on the phone — standard Bluetooth advertising is used.
+  - **Passive BLE Proximity Detection:** ESP32 scans and advertises with HID appearance (`0x03C1`) on boot/wake and start button presses. No app needed on the phone — standard Bluetooth advertising and background OS auto-reconnection are used.
   - **Multi-Device Support:**
-    - **Android:** Verified via static Bluetooth MAC address matching (`BLE_AUTHORIZED_MACS`).
-    - **iPhone:** Verified via **IRK (Identity Resolving Key)** cryptographic resolution of rotating Resolvable Private Addresses (`BLE_AUTHORIZED_IRKS` using AES-128-ECB).
+    - **iPhone & Modern Android (Android 6.0 - 15+):** Verified via **IRK (Identity Resolving Key)** cryptographic resolution of rotating Resolvable Private Addresses (`BLE_AUTHORIZED_IRKS` using AES-128-ECB and auto-persisted NVS bonds).
+    - **Android 5.0.1 / Legacy Android:** Verified via HID background auto-reconnection and static MAC matching (`BLE_AUTHORIZED_MACS`).
   - **Zero-Interference Auto Radio Shutdown:** The BLE stack and radio are **immediately powered off** once authorization is granted, preventing RF interference with the closed-loop PID alternator regulator or composite video DMA rendering.
   - **HUD Status & Audio Feedback:** Displays `"NO KEY DETECTED"` warning and emits warning beeps when starting is attempted without an authorized phone.
   - **Emergency Bypass:** 6 pulses on the central unlock line temporarily bypasses phone authorization for the current session (confirmed via 800ms chime).
