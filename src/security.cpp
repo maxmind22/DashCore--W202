@@ -295,6 +295,7 @@ static int secStoreIteratorCallback(int obj_type, union ble_store_value *val, vo
 {
   if (obj_type == BLE_STORE_OBJ_TYPE_PEER_SEC && val->sec.irk_present)
   {
+    persistNewIRK(val->sec.irk);
     memcpy(dynamicBondedIRK, val->sec.irk, 16);
     dynamicIRKPresent = true;
     Serial.println("\n🔑 [SECURITY] Active Bonded Phone IRK extracted from Bond Store:");
@@ -647,7 +648,7 @@ void setupBLESecurity()
 
     NimBLEAdvertising *pAdvertising = NimBLEDevice::getAdvertising();
     pAdvertising->addServiceUUID(SERVICE_UUID);
-    pAdvertising->setAppearance(0x0000);
+    pAdvertising->setAppearance(0x03C1);
     pAdvertising->setName(BLE_DEVICE_NAME);
     pAdvertising->start();
 
