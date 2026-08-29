@@ -52,20 +52,8 @@ static void grantPhoneAuthorization(const char *reason, const char *deviceInfo)
   Serial.printf("=======================================================\n\n");
 
   phoneAuthorized = true;
-  bleScanning = false;
-
-  NimBLEScan *pScan = NimBLEDevice::getScan();
-  if (pScan != nullptr && pScan->isScanning())
-  {
-    pScan->stop();
-    pScan->clearResults();
-  }
-
-  NimBLEAdvertising *pAdv = NimBLEDevice::getAdvertising();
-  if (pAdv != nullptr && pAdv->isAdvertising())
-  {
-    pAdv->stop();
-  }
+  teardownBLESecurity();
+  Serial.println("[SECURITY] Bluetooth radio completely stopped & disabled.\n");
 }
 
 // Load all persisted IRKs from NVS into runtime array
