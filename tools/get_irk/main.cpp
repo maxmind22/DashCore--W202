@@ -97,6 +97,16 @@ class ServerCallbacks : public NimBLEServerCallbacks
     }
   }
 
+  uint32_t onPassKeyRequest() override
+  {
+    return SETUP_PAIRING_PIN;
+  }
+
+  bool onConfirmPIN(uint32_t pin) override
+  {
+    return true;
+  }
+
   void onDisconnect(NimBLEServer *pServer) override
   {
     Serial.println("[-] Device disconnected. Advertising restarted.");

@@ -81,7 +81,7 @@ const uint32_t MAX_INJ_PULSE_PER_INTERVAL_US = 1000000; // 1,000,000us (1s): han
 #define RTC_TRIP_MAGIC_KEY 0xCAFE4567
 
 // Timeout Constants
-const unsigned long STANDBY_TIMEOUT_MS = 120000;    // 2 Minute
+const unsigned long STANDBY_TIMEOUT_MS = 60000;    // 1 Minute
 const unsigned long ACCESSORY_TIMEOUT_MS = 3600000; // 1 Hour
 const unsigned long BUTTON_COOLDOWN_MS = 500;
 const unsigned long BUTTON_LONGPRESS_RESET_MS = 3000;
