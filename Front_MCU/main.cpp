@@ -132,13 +132,13 @@ void checkCanErrors()
   uint8_t errFlags = mcp2515.getErrorFlags();
   if (errFlags != 0)
   {
+    // Clear overflow flags in EFLG without wiping CANINTF unread interrupt flags
     if (errFlags & (MCP2515::EFLG_RX0OVR | MCP2515::EFLG_RX1OVR))
     {
-      mcp2515.clearRXnOVR();
+      mcp2515.clearRXnOVRFlags();
     }
-    // Only completely reset the chip if it goes into Bus-Off (fatal state).
-    // Do NOT interfere if it's just in Error Passive (TXEP/RXEP); it will self-recover.
-    if (errFlags & MCP2515::EFLG_TXBO)
+    // Reset the chip if in Bus-Off or stuck in Error Passive (TXEP)
+    if (errFlags & (MCP2515::EFLG_TXBO | MCP2515::EFLG_TXEP))
     {
       mcp2515.reset();
       mcp2515.setBitrate(CAN_500KBPS, MCP_8MHZ);
@@ -353,7 +353,6 @@ void loop()
 
   static int alive = 0;
   // Process CAN and auto-recover errors
-  checkCanErrors();
   if (mcp2515.readMessage(&canMsgRx) == MCP2515::ERROR_OK)
   {
     if (canMsgRx.can_id == 0x03)
@@ -363,6 +362,7 @@ void loop()
       last_check = currentMillis;
     }
   }
+  checkCanErrors();
 
   // Failsafe timeout: if no message in 1000ms, assume dead
   if (currentMillis - last_check > HEARTBEAT_TIMEOUT_MS)
