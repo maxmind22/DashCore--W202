@@ -460,6 +460,12 @@ static SecurityScanCallbacks scanCallbacks;
 static void onScanEnded(NimBLEScanResults results)
 {
   bleScanning = false;
+  NimBLEScan *pBLEScan = NimBLEDevice::getScan();
+  if (pBLEScan != nullptr)
+  {
+    pBLEScan->clearResults();
+  }
+
   if (phoneAuthorized)
   {
     Serial.println("[SECURITY] Authorization granted. BLE scan stopped.");
@@ -484,7 +490,10 @@ void setupBLESecurity()
     NimBLEDevice::setSecurityInitKey(BLE_SM_PAIR_KEY_DIST_ENC | BLE_SM_PAIR_KEY_DIST_ID);
     NimBLEDevice::setSecurityRespKey(BLE_SM_PAIR_KEY_DIST_ENC | BLE_SM_PAIR_KEY_DIST_ID);
 
-    // Restore bonded phone IRK from NVS so passive RPA resolution works after reboot
+    // 1. Load auto-persisted IRKs from NVS first to populate runtime array
+    loadPersistedIRKs();
+
+    // 2. Restore/sync bonded phone IRKs from NimBLE bond store for passive scanning
     bool irkRestored = false;
     ble_store_iterate(BLE_STORE_OBJ_TYPE_PEER_SEC, secStoreIteratorCallback, &irkRestored);
     if (irkRestored)
@@ -495,9 +504,6 @@ void setupBLESecurity()
     {
       Serial.println("[SECURITY] No bonded phone IRK found in NVS. Pair via PIN first.");
     }
-
-    // Load auto-persisted IRKs from previous successful pairings
-    loadPersistedIRKs();
 
     NimBLEServer *pServer = NimBLEDevice::createServer();
     pServer->setCallbacks(&serverCallbacks);
