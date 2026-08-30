@@ -567,10 +567,10 @@ void loop()
 
     if (injector_state == 1 && rpm > 0)
     {
-      // Calculate fuel saved using the 1-second pre-cutoff average net pulse width
-      float net_saved_pulse_us = last_active_inj_pulse_us - dead_time_us;
-      if (net_saved_pulse_us < 0.0f)
-        net_saved_pulse_us = 0.0f;
+      // Calculate fuel saved using the pre-cutoff net pulse width (fallback 1500us net)
+      float net_saved_pulse_us = (last_active_inj_pulse_us >= 500.0f)
+                                     ? last_active_inj_pulse_us
+                                     : 1500.0f;
       float saved_inj_time_us =
           ((float)rpm / 120.0f) * net_saved_pulse_us * elapsed_sec;
       float fuel_saved_interval =
