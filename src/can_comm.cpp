@@ -67,7 +67,7 @@ void drainCanRxBuffer(unsigned long now) {
       last_seq_02 = rx_seq_02;
 
       // Transition 0 -> 1: injDisable just engaged (DFCO cutoff starts).
-      // Calculate and latch the average net injector pulse width over the 1 second before cutoff.
+      // Calculate and latch the average net injector pulse width over the active period before cutoff.
       if (injector_state == 0 && new_inj_state == 1) {
         float total_net_us = 0.0f;
         uint32_t total_p = 0;
@@ -76,7 +76,10 @@ void drainCanRxBuffer(unsigned long now) {
           total_p += inj_history_pulses[k];
         }
         if (total_p > 0 && total_net_us > 0.0f) {
-          last_active_inj_pulse_us = total_net_us / (float)total_p;
+          float avg_net = total_net_us / (float)total_p;
+          if (avg_net >= 500.0f) {
+            last_active_inj_pulse_us = avg_net;
+          }
         }
       }
 
@@ -120,11 +123,13 @@ void drainCanRxBuffer(unsigned long now) {
           float net_pulse_us = (float)delta_time_us - ((float)delta_pulses * dead_time_us);
           if (net_pulse_us < 0.0f) net_pulse_us = 0.0f;
 
-          // Record into rolling 1-sec buffer while injectors are actively firing
-          if (injector_state == 0) {
-            inj_history_net_us[history_idx] = net_pulse_us;
-            inj_history_pulses[history_idx] = delta_pulses;
-            history_idx = (history_idx + 1) % INJ_HISTORY_SAMPLES;
+          // Record into rolling buffer while injectors are actively firing (filter out near-zero overrun coasting)
+          if (injector_state == 0 && delta_pulses > 0) {
+            if ((net_pulse_us / (float)delta_pulses) >= 400.0f) {
+              inj_history_net_us[history_idx] = net_pulse_us;
+              inj_history_pulses[history_idx] = delta_pulses;
+              history_idx = (history_idx + 1) % INJ_HISTORY_SAMPLES;
+            }
           }
 
           float raw_duty = 0.0f;
