@@ -14,6 +14,7 @@
 #define PULSES_PER_KM 24714
 #define SPD_WINDOW_MS 100UL
 #define SPD_STALE_TIMEOUT_US 500000UL
+#define RPM_STALE_TIMEOUT_US 1000000UL
 
 const int tempPin = A0;
 const int fan = 5;
@@ -116,18 +117,21 @@ ISR(PCINT2_vect)
     if (inj_active)
     {
       uint16_t pulse_ticks = inj_now_ticks - inj_start_ticks;
-      last_inj_pulse_width = pulse_ticks >> 1; // Convert 0.5us ticks (Prescaler 8) to us
-      total_inj_time_us += last_inj_pulse_width;
-      total_inj_pulses++;
+      if (pulse_ticks >= 400) // Glitch filter: ignore inductive spikes < 200us (400 * 0.5us)
+      {
+        last_inj_pulse_width = pulse_ticks >> 1; // Convert 0.5us ticks (Prescaler 8) to us
+        total_inj_time_us += last_inj_pulse_width;
+        total_inj_pulses++;
+        inj_has_data = true;
+      }
       inj_active = false;
-      inj_has_data = true;
       inj_end_ticks = inj_now_ticks;
     }
   }
 }
 
 //=================== CAN Diagnostics ==================//
-void checkCanErrors()
+void checkCanErrors(unsigned long now)
 {
   uint8_t errFlags = mcp2515.getErrorFlags();
   if (errFlags != 0)
@@ -137,12 +141,14 @@ void checkCanErrors()
     {
       mcp2515.clearRXnOVRFlags();
     }
-    // Reset the chip if in Bus-Off or stuck in Error Passive (TXEP)
-    if (errFlags & (MCP2515::EFLG_TXBO | MCP2515::EFLG_TXEP))
+    // Only reset the chip on fatal Bus-Off (TXBO) with 1000ms cooldown to avoid reset thrashing / CPU starvation
+    static unsigned long lastResetAttempt = 0;
+    if ((errFlags & MCP2515::EFLG_TXBO) && (now - lastResetAttempt >= 1000))
     {
       mcp2515.reset();
       mcp2515.setBitrate(CAN_500KBPS, MCP_8MHZ);
       mcp2515.setNormalOneShotMode();
+      lastResetAttempt = now;
     }
   }
 }
@@ -192,7 +198,7 @@ void setup()
   mcp2515.setBitrate(CAN_500KBPS, MCP_8MHZ);
   mcp2515.setNormalOneShotMode();
 
-  wdt_enable(WDTO_500MS);
+  wdt_enable(WDTO_2S);
 }
 
 void loop()
@@ -238,11 +244,21 @@ void loop()
   //=================== Calculate RPM (Every loop) ======================//
   noInterrupts();
   uint32_t p = period;
+  uint32_t last_rpm_edge = lastTime;
   interrupts();
-  if (p > 0)
+
+  if (currentMicros - last_rpm_edge > RPM_STALE_TIMEOUT_US)
+  {
+    rpm = 0;
+  }
+  else if (p > 0)
   {
     uint32_t calc = 60000000UL / p;
     rpm = calc / 2; // Only update with valid readings  // Real engine RPM (2 pulses per rev)
+  }
+  else
+  {
+    rpm = 0;
   }
 
   //=================== Control Injectors =====================//
@@ -257,11 +273,13 @@ void loop()
     {
       bool inj_state = false;
       uint16_t inj_end_ticks_t = 0;
+      uint16_t tcnt1_snap = 0;
       noInterrupts();
       inj_end_ticks_t = inj_end_ticks; // Capture the value of inj_end_ticks atomically
       inj_state = inj_active;
+      tcnt1_snap = TCNT1;
       interrupts();
-      uint16_t elapsed_ticks = (uint16_t)(TCNT1 - inj_end_ticks_t);
+      uint16_t elapsed_ticks = (uint16_t)(tcnt1_snap - inj_end_ticks_t);
       if (!inj_state && elapsed_ticks < DFCO_INJ_WINDOW_TICKS) // 8000 ticks @ 0.5us/tick = 4000us
       {
         digitalWriteFast(inj_pin, HIGH);
@@ -293,11 +311,13 @@ void loop()
       // Safe window check: never cut mid-injection pulse
       bool inj_state = false;
       uint16_t inj_end_ticks_t = 0;
+      uint16_t tcnt1_snap = 0;
       noInterrupts();
       inj_end_ticks_t = inj_end_ticks;
       inj_state = inj_active;
+      tcnt1_snap = TCNT1;
       interrupts();
-      uint16_t elapsed_ticks = (uint16_t)(TCNT1 - inj_end_ticks_t);
+      uint16_t elapsed_ticks = (uint16_t)(tcnt1_snap - inj_end_ticks_t);
 
       // Only cut when injector is not mid-fire and we are in the inter-pulse window or stopped
       if (!inj_state && (rpm == 0 || elapsed_ticks < DFCO_INJ_WINDOW_TICKS))
@@ -362,7 +382,7 @@ void loop()
       last_check = currentMillis;
     }
   }
-  checkCanErrors();
+  checkCanErrors(currentMillis);
 
   // Failsafe timeout: if no message in 1000ms, assume dead
   if (currentMillis - last_check > HEARTBEAT_TIMEOUT_MS)
@@ -425,18 +445,13 @@ void loop()
   }
 
   //================= Regulator Failsafe ===============//
-  static uint8_t regFailCount = 0;
-  if (alive != 100)
+  if (alive == 100)
   {
-    if (++regFailCount >= REGULATOR_FAIL_THRESHOLD)
-    {
-      digitalWriteFast(regulator_pin, LOW);
-    }
+    digitalWriteFast(regulator_pin, HIGH);
   }
   else
   {
-    regFailCount = 0;
-    digitalWriteFast(regulator_pin, HIGH);
+    digitalWriteFast(regulator_pin, LOW);
   }
   wdt_reset();
 }
