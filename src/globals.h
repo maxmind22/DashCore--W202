@@ -12,7 +12,6 @@ extern struct can_frame canMsgTx;
 
 extern RTC_DATA_ATTR SystemState currentState;
 extern RTC_DATA_ATTR bool vehicleLockDisabled;
-extern RTC_DATA_ATTR bool autoStartStopDisabled;
 extern volatile bool phoneAuthorized;
 extern RTC_DATA_ATTR bool phoneAuthBypassed;
 

@@ -10,7 +10,6 @@ struct can_frame canMsgTx;
 
 RTC_DATA_ATTR SystemState currentState = STATE_SLEEP;
 RTC_DATA_ATTR bool vehicleLockDisabled = false;
-RTC_DATA_ATTR bool autoStartStopDisabled = false;
 volatile bool phoneAuthorized = false;
 RTC_DATA_ATTR bool phoneAuthBypassed = false;
 

@@ -8,7 +8,7 @@ static unsigned long lockRelayStartTime = 0;
 static unsigned long unlockFirstPulseTime = 0;
 static unsigned long unlockLastPulseTime = 0;
 static uint8_t unlockPulseCount = 0;
-static bool lastUnlockPinState = LOW;
+static bool lastUnlockPinState = HIGH; // Ignore the initial wake pulse on boot/wake
 static unsigned long lastUnlockEdgeTime = 0;
 
 static ToneState toneState = TONE_IDLE;
@@ -89,12 +89,9 @@ void playUnlockToggleTone(bool disabled)
     queueTone(1, 300, 0); // 1 long beep
 }
 
-void playStartStopToggleTone(bool disabled)
+void playAuthSuccessTone()
 {
-  if (disabled)
-    queueTone(2, 150, 150); // 2 short beeps
-  else
-    queueTone(1, 350, 0); // 1 long beep
+  queueTone(1, 200, 0); // 1 single 200ms confirmation chime
 }
 
 void playAuthWarningTone()
@@ -135,11 +132,6 @@ void processUnlockSignals(unsigned long now)
       {
         vehicleLockDisabled = !vehicleLockDisabled;
         playUnlockToggleTone(vehicleLockDisabled);
-      }
-      else if (unlockPulseCount == 5)
-      {
-        autoStartStopDisabled = !autoStartStopDisabled;
-        playStartStopToggleTone(autoStartStopDisabled);
       }
       else if (unlockPulseCount == 6)
       {
@@ -331,6 +323,9 @@ void setupPushStartPins()
   pinMode(PIN_BTN_START, INPUT);
   pinMode(PIN_INPUT_BRAKE, INPUT);
   pinMode(PIN_WAKE_UNLOCK, INPUT);
+
+  // Initialize to current state or HIGH to ignore the wake pulse that booted the MCU
+  lastUnlockPinState = HIGH;
 }
 
 void processPushStart(unsigned long now)
@@ -713,10 +708,9 @@ void processPushStart(unsigned long now)
       standstillStartTime = 0;
     }
 
-    // Auto Start-Stop evaluation with aggressive wear-protection gates
+    // Auto Start-Stop evaluation with aggressive wear-protection gates (always enabled)
     {
-      bool autoStopPermitted = !autoStartStopDisabled &&
-                               (lastEngineStartTime != 0) &&
+      bool autoStopPermitted = (lastEngineStartTime != 0) &&
                                (now - lastEngineStartTime >= AUTO_STOP_COOLDOWN_MS) &&
                                (temp_out >= AUTO_STOP_MIN_TEMP_C) &&
                                (temp_out <= AUTO_STOP_MAX_TEMP_C) &&
