@@ -17,7 +17,6 @@ void queueTone(int beeps, unsigned long onMs, unsigned long offMs, unsigned long
 void updateToneStateMachine(unsigned long now = 0);
 bool isTonePlaying();
 void playUnlockToggleTone(bool disabled);
-void playLockdownToggleTone(bool lockdownActive);
 void playStartStopToggleTone(bool disabled);
 void playAuthWarningTone();
 void processUnlockSignals(unsigned long now = 0);

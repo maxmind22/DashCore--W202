@@ -89,14 +89,6 @@ void playUnlockToggleTone(bool disabled)
     queueTone(1, 300, 0); // 1 long beep
 }
 
-void playLockdownToggleTone(bool lockdownActive)
-{
-  if (lockdownActive)
-    queueTone(3, 200, 200); // 3 short beeps
-  else
-    queueTone(1, 400, 0); // 1 long beep
-}
-
 void playStartStopToggleTone(bool disabled)
 {
   if (disabled)
@@ -143,11 +135,6 @@ void processUnlockSignals(unsigned long now)
       {
         vehicleLockDisabled = !vehicleLockDisabled;
         playUnlockToggleTone(vehicleLockDisabled);
-      }
-      else if (unlockPulseCount == 4)
-      {
-        engineStartDisabled = !engineStartDisabled;
-        playLockdownToggleTone(engineStartDisabled);
       }
       else if (unlockPulseCount == 5)
       {
@@ -493,17 +480,17 @@ void processPushStart(unsigned long now)
       if (digitalRead(PIN_INPUT_BRAKE) == LOW)
       {
         standbyBrakeCheckPending = false;
-        if (!engineStartDisabled && isPhoneAuthorized())
+        if (isPhoneAuthorized())
         {
           currentState = STATE_CRANKING;
         }
         else
         {
-          if (!engineStartDisabled && !isPhoneAuthorized() && !isBLEScanning())
+          if (!isBLEScanning())
           {
             triggerBLERescan(BLE_RESCAN_TIMEOUT_MS);
           }
-          // Serial.println("[LOCKDOWN/SECURITY] Engine start blocked! PLZ AUTHENTICATE");
+          // Serial.println("[SECURITY] Engine start blocked! PLZ AUTHENTICATE");
           playAuthWarningTone();
           currentState = STATE_STANDBY;
         }
@@ -551,18 +538,18 @@ void processPushStart(unsigned long now)
       if (digitalRead(PIN_INPUT_BRAKE) == LOW)
       {
         accBrakeCheckPending = false;
-        if (!engineStartDisabled && isPhoneAuthorized())
+        if (isPhoneAuthorized())
         {
           currentState = STATE_CRANKING;
           stoppedToAcc = false;
         }
         else
         {
-          if (!engineStartDisabled && !isPhoneAuthorized() && !isBLEScanning())
+          if (!isBLEScanning())
           {
             triggerBLERescan(BLE_RESCAN_TIMEOUT_MS);
           }
-          Serial.println("[LOCKDOWN/SECURITY] Engine start blocked! PLZ AUTHENTICATE");
+          Serial.println("[SECURITY] Engine start blocked! PLZ AUTHENTICATE");
           playAuthWarningTone();
           currentState = STATE_ACC;
         }
@@ -616,7 +603,7 @@ void processPushStart(unsigned long now)
       }
       if (brakeHeld)
       {
-        if (!engineStartDisabled && isPhoneAuthorized())
+        if (isPhoneAuthorized())
         {
           currentState = STATE_CRANKING;
         }
@@ -634,7 +621,7 @@ void processPushStart(unsigned long now)
     break;
 
   case STATE_CRANKING:
-    if (engineStartDisabled || !isPhoneAuthorized())
+    if (!isPhoneAuthorized())
     {
       // Serial.println("[DEBUG] Cranking aborted: Engine start not authorized");
       setRelays(true, false, false); // Abort cranking immediately
@@ -717,7 +704,6 @@ void processPushStart(unsigned long now)
     // Auto Start-Stop evaluation with aggressive wear-protection gates
     {
       bool autoStopPermitted = !autoStartStopDisabled &&
-                               !engineStartDisabled &&
                                (lastEngineStartTime != 0) &&
                                (now - lastEngineStartTime >= AUTO_STOP_COOLDOWN_MS) &&
                                (temp_out >= AUTO_STOP_MIN_TEMP_C) &&
