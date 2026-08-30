@@ -37,6 +37,7 @@
 #define OVERHEAT_TEMP_C 96
 #define ENGINE_STARTED_RPM 400
 const unsigned long MIN_CRANK_TIME_MS = 600; // Blind crank duration to ignore RPM spikes
+const unsigned long OFFLINE_CRANK_TIME_MS = 1200; // Cranking duration when Front MCU is offline
 #define ENGINE_ACTIVE_RPM_THRESHOLD 200
 #define EMERGENCY_OVERCURRENT_A 40.0f
 #define FRONT_MCU_TIMEOUT_MS 5000
