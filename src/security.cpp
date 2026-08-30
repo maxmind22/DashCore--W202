@@ -1,4 +1,5 @@
 #include "security.h"
+#include "pushstart.h"
 #include <NimBLEDevice.h>
 #include <Preferences.h>
 #include <mbedtls/aes.h>
@@ -47,6 +48,7 @@ static void grantPhoneAuthorization(const char *reason, const char *deviceInfo)
     return;
 
   phoneAuthorized = true;
+  playAuthSuccessTone();
 
   Serial.printf("\n=======================================================\n");
   Serial.printf("🎉 [SECURITY] Authorization Granted: %s\n", reason ? reason : "Phone Authorized");
