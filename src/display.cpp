@@ -188,32 +188,9 @@ void warnings(unsigned long now)
     buzzer_state = 1;
   }
 
-  // -------- Vehicle Lockdown / Authentication Warning --------//
-  static bool authWarningDrawn = false;
-  if (engineStartDisabled)
-  {
-    if (lowBlinkState)
-    {
-      tv.setCursor(WARNING_X + 15, WARNING_Y + 50);
-      tv.setTextColor(0xFF);
-      tv.setTextSize(1);
-      tv.print("AUTH ERROR: ENGINE LOCKED");
-      authWarningDrawn = true;
-    }
-    else if (authWarningDrawn)
-    {
-      tv.fillRect(WARNING_X + 15, WARNING_Y + 50, 160, 8, 0x00);
-    }
-  }
-  else if (authWarningDrawn)
-  {
-    tv.fillRect(WARNING_X + 15, WARNING_Y + 50, 160, 8, 0x00);
-    authWarningDrawn = false;
-  }
-
   // -------- Phone Key Detection Warning --------//
   static bool phoneKeyWarningDrawn = false;
-  if (!isPhoneAuthorized() && !engineStartDisabled)
+  if (!isPhoneAuthorized())
   {
     if (lowBlinkState)
     {
