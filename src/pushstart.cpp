@@ -655,8 +655,20 @@ void processPushStart(unsigned long now)
       // Step 2: Engage starter solenoid (ACC ON, IGN ON, START ON)
       setRelays(true, true, true);
 
-      // Only evaluate RPM after a minimum crank time to avoid noise spikes
-      if ((now - crankStageTime >= MIN_CRANK_TIME_MS) && (currentRpm > ENGINE_STARTED_RPM))
+      // Evaluate start success:
+      // - If Front MCU is live during starting, check RPM threshold (>400 RPM after 600ms) to stop cranking
+      // - Else if Front MCU is offline, use 1.2s cranking time to transition into STATE_RUNNING
+      bool startDetected = false;
+      if (now - lastPacketTime < FRONT_MCU_CAN_TIMEOUT_MS)
+      {
+        startDetected = (now - crankStageTime >= MIN_CRANK_TIME_MS) && (currentRpm > ENGINE_STARTED_RPM);
+      }
+      else
+      {
+        startDetected = (now - crankStageTime >= OFFLINE_CRANK_TIME_MS);
+      }
+
+      if (startDetected)
       {
         // Engine started successfully
         currentState = STATE_RUNNING;
@@ -723,9 +735,9 @@ void processPushStart(unsigned long now)
     }
 
     // Handle Engine Stall Safety
-    // Only treat rpm==0 as stall if CAN packets are still being received
-    // (prevents ignition cut on CAN bus failure at highway speed)
-    if (currentRpm == 0 && (now - lastPacketTime < 2000))
+    // Only treat rpm==0 as stall if CAN packets are currently actively being received from Front MCU
+    // (prevents ignition cut on CAN bus failure at highway speed or when Front MCU is disconnected)
+    if (currentRpm == 0 && (now - lastPacketTime < FRONT_MCU_CAN_TIMEOUT_MS))
     {
       currentState = STATE_ACC;
       standbyStartTime = now;

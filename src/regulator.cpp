@@ -121,11 +121,14 @@ void regulatorTask(void *pvParameters) {
     portENTER_CRITICAL(&dataMux);
     local_rpm = rpm;
     local_state = currentState;
+    unsigned long local_last_packet = lastPacketTime;
     portEXIT_CRITICAL(&dataMux);
+
+    bool frontMcuConnected = (millis() - local_last_packet < FRONT_MCU_CAN_TIMEOUT_MS);
 
     bool logical_failure =
         ((voltage_filtered >= v_target + 0.4f || current_A_filtered >= EMERGENCY_OVERCURRENT_A) ||
-         (voltage_filtered <= v_target - 0.2f && current_A_filtered <= 0.0f &&
+         (frontMcuConnected && voltage_filtered <= v_target - 0.2f && current_A_filtered <= 0.0f &&
           (local_state == STATE_RUNNING || local_rpm > ENGINE_ACTIVE_RPM_THRESHOLD)));
 
     // Consolidate state hierarchy
@@ -206,10 +209,11 @@ void regulatorTask(void *pvParameters) {
     bool delay_active = (runningStartTime != 0 &&
                          (millis() - runningStartTime < CHARGE_DELAY_MS));
 
-    // Force field coil off if engine is not running (neither STATE_RUNNING nor
-    // rpm > ENGINE_ACTIVE_RPM_THRESHOLD), during start delay, or sensor error occurs
-    if (!(local_state == STATE_RUNNING || local_rpm > ENGINE_ACTIVE_RPM_THRESHOLD) || delay_active ||
-        sensor_error) {
+    // Allow charging strictly in STATE_RUNNING (disabled during cranking, standby, ACC, IGN, and auto-stop)
+    bool engine_charging_allowed = (local_state == STATE_RUNNING);
+
+    // Force field coil off if engine is not running, during cranking/start delay (CHARGE_DELAY_MS), or sensor error occurs
+    if (!engine_charging_allowed || delay_active || sensor_error) {
       field_pwm = 0;
       integral_error = 0.0f; // Reset integrator
     } else {
