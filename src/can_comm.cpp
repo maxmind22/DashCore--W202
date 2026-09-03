@@ -29,6 +29,25 @@ void checkCanErrors(unsigned long now) {
   }
 }
 
+void sendCanHealthFrame(unsigned long now) {
+  bool regulator_ok =
+      (regulatorTaskHandle != NULL) && (now - last_regulator_heartbeat < REGULATOR_HEARTBEAT_TIMEOUT_MS);
+  health_state = regulator_ok ? 100 : 0;
+
+  canMsgTx.can_id = 0x03;
+  canMsgTx.can_dlc = 8;
+  canMsgTx.data[0] = health_state;
+  canMsgTx.data[1] = ecoInjCutActive ? 1 : 0;
+  canMsgTx.data[2] = 0;
+  canMsgTx.data[3] = 0;
+  canMsgTx.data[4] = 0;
+  canMsgTx.data[5] = 0;
+  canMsgTx.data[6] = 0;
+  canMsgTx.data[7] = 0;
+  mcp2515.sendMessage(&canMsgTx);
+}
+
+
 #define INJ_HISTORY_SAMPLES 20 // 20 samples @ 50ms = 1000ms rolling window
 
 static float inj_history_net_us[INJ_HISTORY_SAMPLES] = {0};

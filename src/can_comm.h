@@ -4,3 +4,5 @@
 
 void checkCanErrors(unsigned long now);
 void drainCanRxBuffer(unsigned long now);
+void sendCanHealthFrame(unsigned long now);
+

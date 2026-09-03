@@ -1,6 +1,9 @@
 #include "pushstart.h"
 #include "security.h"
 #include "fuel.h" // For resetFuelTripData
+#include "regulator.h"
+#include "can_comm.h"
+
 
 static LockRelayState lockRelayState = LOCK_IDLE;
 static unsigned long lockRelayStartTime = 0;
@@ -192,7 +195,13 @@ void wakeupCANController()
 
 void enterPowerDownSleep()
 {
-  // Save trip stats to NVS Flash memory right before shutdown
+  // --- ORDERED SHUTDOWN: Stop everything safely before deep sleep ---
+
+  // 1. Safely stop the regulator FreeRTOS task FIRST (running on Core 0, does I2C)
+  // This prevents the SPI flash cache panic when writing to Preferences below!
+  stopRegulatorTask();
+
+  // 2. Save trip stats to NVS Flash memory (safe now that Core 0 task is stopped)
   Preferences prefs;
   prefs.begin("trip_data", false);
   prefs.putFloat("fuel", total_fuel_liters);
@@ -200,38 +209,6 @@ void enterPowerDownSleep()
   prefs.putFloat("r_int", compounded_r_int);
   prefs.putFloat("saved", total_fuel_saved_liters);
   prefs.end();
-
-  // --- ORDERED SHUTDOWN: Stop everything safely before deep sleep ---
-
-  // 1. Safely stop the regulator FreeRTOS task first (running on Core 0, does I2C)
-  //    Keep the original 1s WDT alive by resetting it in the wait loop.
-  if (regulatorTaskHandle != NULL)
-  {
-    regulatorTaskRunning = false;
-    for (int timeout = 0; timeout < 100; timeout++)
-    {
-      esp_task_wdt_reset(); // Keep current WDT alive while waiting for task exit
-      taskYIELD();
-      delay(5);
-      if (regulatorTaskHandle == NULL)
-        break;
-    }
-    // Use critical section to safely check-and-delete (prevents race with self-deleting task)
-    portENTER_CRITICAL(&dataMux);
-    TaskHandle_t h = regulatorTaskHandle;
-    regulatorTaskHandle = NULL;
-    portEXIT_CRITICAL(&dataMux);
-    if (h != NULL)
-    {
-      vTaskDelete(h);
-    }
-  }
-
-  // 2. Now that regulatorTask is stopped, extend WDT to 5s for remaining shutdown
-  esp_task_wdt_delete(NULL);
-  esp_task_wdt_deinit();
-  esp_task_wdt_init(5, true); // 5s timeout with panic=true
-  esp_task_wdt_add(NULL);
 
   // 3. Turn off field coil PWM and detach LEDC
   ledcWrite(0, 0);
@@ -277,9 +254,9 @@ void enterPowerDownSleep()
   gpio_hold_en((gpio_num_t)PIN_5V_GATE);
   gpio_hold_en((gpio_num_t)field_relay_pin);
   gpio_hold_en((gpio_num_t)buzzer_pin);
-  gpio_deep_sleep_hold_en();
 
   // Allow relay switching and vehicle state to settle completely (prevent transient unlock)
+  esp_task_wdt_reset();
   delay(200);
 
   // 7.1 Activate vehicle locking relay briefly to ensure it remains locked
@@ -290,8 +267,10 @@ void enterPowerDownSleep()
     digitalWrite(PIN_RELAY_LOCK, HIGH); // Ground the lock wire via relay
     delay(200);                         // Ground pulse duration of 200ms
     digitalWrite(PIN_RELAY_LOCK, LOW);
-    pinMode(PIN_RELAY_LOCK, INPUT); // Float pin to prevent sleep leakage
   }
+  esp_task_wdt_reset();
+  gpio_hold_en((gpio_num_t)PIN_RELAY_LOCK);
+  gpio_deep_sleep_hold_en();
 
   // 8. Turn off the 3.3V digital gate (must happen after locking relay is pulsed)
   digitalWrite(PIN_3V3_DIGITAL_GATE, LOW); // Cut 3.3V pull-ups/shifter
@@ -332,6 +311,7 @@ void processPushStart(unsigned long now)
 {
   if (now == 0)
     now = millis();
+  processBLEEvents();
   updateLockRelay(now);
   updateToneStateMachine(now);
 
@@ -345,10 +325,11 @@ void processPushStart(unsigned long now)
     processUnlockSignals(now);
   }
 
-  // Edge detection for push button
+  // Edge detection for push button (Active Low, Pull-Up)
   static bool lastBtnState = HIGH;
   bool currentBtnState = digitalRead(PIN_BTN_START);
-  bool btnPressed = (currentBtnState == LOW && lastBtnState == HIGH);
+  bool btnEdgeDown = (currentBtnState == LOW && lastBtnState == HIGH);
+  bool btnEdgeUp = (currentBtnState == HIGH && lastBtnState == LOW);
   lastBtnState = currentBtnState;
 
   bool brakeHeld = (digitalRead(PIN_INPUT_BRAKE) == LOW);
@@ -356,6 +337,7 @@ void processPushStart(unsigned long now)
 
   static unsigned long buttonDownTime = 0;
   static bool buttonLongPressHandled = false;
+  bool btnShortPressed = false;
 
   if (currentBtnState == LOW)
   {
@@ -379,14 +361,24 @@ void processPushStart(unsigned long now)
   }
   else
   {
+    if (btnEdgeUp)
+    {
+      // Fired on release: only accept as a tap if held for at least 50ms (debounce)
+      // and not already handled by long-press
+      if (!buttonLongPressHandled && buttonDownTime != 0 && (now - buttonDownTime >= 50))
+      {
+        btnShortPressed = true;
+      }
+    }
     buttonDownTime = 0;
     buttonLongPressHandled = false;
   }
 
-  if (btnPressed)
+  if (btnEdgeDown)
   {
     standbyStartTime = now;
   }
+
 
   // Boot-lock: Lock 2 minute after booting when in ACC or IGN state
   static bool bootLockDone = false;
@@ -449,22 +441,8 @@ void processPushStart(unsigned long now)
   switch (currentState)
   {
   case STATE_SLEEP:
-    // Woken up by deep sleep reset (unlock pulse) -> Authenticated
-    currentState = STATE_STANDBY;
-    standbyStartTime = now;
-    lastButtonPressTime = 0; // Clear cooldown on first boot
-
-    wakeupCANController();
-    startTVDisplay();
-    if (regulatorTaskHandle != NULL)
-    {
-      vTaskResume(regulatorTaskHandle);
-    }
-    break;
-
   case STATE_STANDBY:
   {
-    // Serial.println("OFF");
     // Relays: ACC OFF, IGN OFF, START OFF
     static bool standbyBrakeCheckPending = false;
     static unsigned long standbyBrakeCheckTime = 0;
@@ -502,7 +480,7 @@ void processPushStart(unsigned long now)
     {
       setRelays(false, false, false);
 
-      if (btnPressed && (now - lastButtonPressTime >= BUTTON_COOLDOWN_MS))
+      if (btnShortPressed && (now - lastButtonPressTime >= BUTTON_COOLDOWN_MS))
       {
         lastButtonPressTime = now;
         if (!isPhoneAuthorized() && !isBLEScanning())
@@ -517,6 +495,7 @@ void processPushStart(unsigned long now)
     }
     break;
   }
+
 
   case STATE_ACC:
   {
@@ -569,7 +548,7 @@ void processPushStart(unsigned long now)
     {
       setRelays(true, false, false);
 
-      if (btnPressed && (now - lastButtonPressTime >= BUTTON_COOLDOWN_MS))
+      if (btnShortPressed && (now - lastButtonPressTime >= BUTTON_COOLDOWN_MS))
       {
         lastButtonPressTime = now;
         if (!isPhoneAuthorized() && !isBLEScanning())
@@ -589,13 +568,14 @@ void processPushStart(unsigned long now)
     // Relays: ACC ON, IGN ON, START OFF (POS2)
     setRelays(true, true, false);
 
-    if (btnPressed && (now - lastButtonPressTime >= BUTTON_COOLDOWN_MS))
+    if (btnShortPressed && (now - lastButtonPressTime >= BUTTON_COOLDOWN_MS))
     {
       lastButtonPressTime = now;
       if (!isPhoneAuthorized() && !isBLEScanning())
       {
         triggerBLERescan(BLE_RESCAN_TIMEOUT_MS);
       }
+
       if (brakeHeld)
       {
         if (isPhoneAuthorized())
@@ -742,7 +722,7 @@ void processPushStart(unsigned long now)
     }
 
     // Handle Engine Stop Button Press (Only if vehicle is stationary)
-    if (btnPressed && (now - lastButtonPressTime >= BUTTON_COOLDOWN_MS))
+    if (btnShortPressed && (now - lastButtonPressTime >= BUTTON_COOLDOWN_MS))
     {
       if (spd == 0)
       { // Safety check: speed must be zero
@@ -777,7 +757,7 @@ void processPushStart(unsigned long now)
     ecoInjCutActive = true;
 
     // Check manual button press: Driver shuts down car completely
-    if (btnPressed && (now - lastButtonPressTime >= BUTTON_COOLDOWN_MS))
+    if (btnShortPressed && (now - lastButtonPressTime >= BUTTON_COOLDOWN_MS))
     {
       lastButtonPressTime = now;
       ecoInjCutActive = false;
@@ -811,6 +791,7 @@ void processPushStart(unsigned long now)
       currentState = STATE_CRANKING;
       crankStage = CRANK_PRIME;
       crankStageTime = 0;
+      sendCanHealthFrame(now); // Immediately command Front MCU to restore injectors!
     }
     break;
   }

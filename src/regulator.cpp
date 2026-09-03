@@ -18,7 +18,41 @@ void recoverI2CBus(int sdaPin, int sclPin) {
       }
     }
   }
+
+  // Generate standard I2C STOP condition so all slaves reset state machine
+  digitalWrite(sclPin, LOW);
+  delayMicroseconds(5);
+  pinMode(sdaPin, OUTPUT);
+  digitalWrite(sdaPin, LOW);
+  delayMicroseconds(5);
+  digitalWrite(sclPin, HIGH);
+  delayMicroseconds(5);
+  digitalWrite(sdaPin, HIGH);
+  delayMicroseconds(5);
+  pinMode(sdaPin, INPUT);
 }
+
+void stopRegulatorTask() {
+  if (regulatorTaskHandle != NULL) {
+    regulatorTaskRunning = false;
+    for (int timeout = 0; timeout < 100; timeout++) {
+      esp_task_wdt_reset();
+      taskYIELD();
+      vTaskDelay(pdMS_TO_TICKS(5));
+      if (regulatorTaskHandle == NULL)
+        break;
+    }
+    portENTER_CRITICAL(&dataMux);
+    TaskHandle_t h = regulatorTaskHandle;
+    regulatorTaskHandle = NULL;
+    portEXIT_CRITICAL(&dataMux);
+    if (h != NULL) {
+      esp_task_wdt_delete(h);
+      vTaskDelete(h);
+    }
+  }
+}
+
 
 void regulatorTask(void *pvParameters) {
   esp_task_wdt_add(NULL);
@@ -167,14 +201,18 @@ void regulatorTask(void *pvParameters) {
 
     float p_term = base_Kp * err;
 
-    if (isfinite(err) && isfinite(dt)) {
+    // Anti-windup: clamp max integral error so base_Ki * integral_error does not exceed 1023
+    const float max_integral = (base_Ki > 0.0f) ? (1023.0f / base_Ki) : 0.0f;
+    // Do not accumulate positive error if proportional term already saturates 100% PWM
+    bool saturated = (p_term >= 1023.0f && err > 0.0f);
+    if (isfinite(err) && isfinite(dt) && !saturated) {
       integral_error += (err * dt);
     }
 
     if (!isfinite(integral_error))
       integral_error = 0.0f;
-    if (integral_error > 1023.0f)
-      integral_error = 1023.0f;
+    if (integral_error > max_integral)
+      integral_error = max_integral;
     if (integral_error < 0.0f)
       integral_error = 0.0f;
 

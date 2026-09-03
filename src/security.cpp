@@ -41,6 +41,8 @@ static bool isZeroKey(const uint8_t key[16])
   return true;
 }
 
+static volatile bool authGrantedPending = false;
+
 // Centralized authorization helper
 static void grantPhoneAuthorization(const char *reason, const char *deviceInfo)
 {
@@ -48,7 +50,7 @@ static void grantPhoneAuthorization(const char *reason, const char *deviceInfo)
     return;
 
   phoneAuthorized = true;
-  playAuthSuccessTone();
+  authGrantedPending = true;
 
   Serial.printf("\n=======================================================\n");
   Serial.printf("🎉 [SECURITY] Authorization Granted: %s\n", reason ? reason : "Phone Authorized");
@@ -57,10 +59,19 @@ static void grantPhoneAuthorization(const char *reason, const char *deviceInfo)
     Serial.printf("   Device: %s\n", deviceInfo);
   }
   Serial.printf("=======================================================\n\n");
-
-  teardownBLESecurity();
-  Serial.println("[SECURITY] Bluetooth radio completely stopped & disabled.\n");
 }
+
+void processBLEEvents()
+{
+  if (authGrantedPending)
+  {
+    authGrantedPending = false;
+    playAuthSuccessTone();
+    teardownBLESecurity();
+    Serial.println("[SECURITY] Bluetooth radio completely stopped & disabled.\n");
+  }
+}
+
 
 // Load all persisted IRKs from NVS into runtime array
 static void loadPersistedIRKs()
