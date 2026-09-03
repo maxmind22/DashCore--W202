@@ -20,3 +20,7 @@ void triggerBLERescan(unsigned long durationMs = BLE_RESCAN_TIMEOUT_MS);
 
 // Check if a BLE scan is currently active
 bool isBLEScanning();
+
+// Process any deferred BLE events on Core 1 (audio tones, radio shutdown)
+void processBLEEvents();
+

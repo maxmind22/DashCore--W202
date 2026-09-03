@@ -29,6 +29,7 @@ void setup()
   gpio_hold_dis((gpio_num_t)field_relay_pin);
   gpio_hold_dis((gpio_num_t)buzzer_pin);
   gpio_hold_dis((gpio_num_t)PIN_3V3_DIGITAL_GATE);
+  gpio_hold_dis((gpio_num_t)PIN_RELAY_LOCK);
   gpio_deep_sleep_hold_dis();
 
   setupPushStartPins();
@@ -121,23 +122,10 @@ void loop()
   static unsigned long lastCanSendTimeMs = 0;
   if (now - lastCanSendTimeMs >= CAN_HEALTH_SEND_INTERVAL_MS)
   {
-    bool regulator_ok =
-        (regulatorTaskHandle == NULL) || (now - last_regulator_heartbeat < REGULATOR_HEARTBEAT_TIMEOUT_MS);
-    health_state = regulator_ok ? 100 : 0;
-
-    canMsgTx.can_id = 0x03;
-    canMsgTx.can_dlc = 8;
-    canMsgTx.data[0] = health_state;
-    canMsgTx.data[1] = ecoInjCutActive ? 1 : 0;
-    canMsgTx.data[2] = 0;
-    canMsgTx.data[3] = 0;
-    canMsgTx.data[4] = 0;
-    canMsgTx.data[5] = 0;
-    canMsgTx.data[6] = 0;
-    canMsgTx.data[7] = 0;
-    mcp2515.sendMessage(&canMsgTx);
+    sendCanHealthFrame(now);
     lastCanSendTimeMs = now;
   }
+
 
   if (last_clear < 6)
   {
@@ -186,20 +174,21 @@ void loop()
   float local_current_A_filtered = current_A_filtered;
   portEXIT_CRITICAL(&dataMux);
 
-  fuel_in_temporary =
-      local_ads_fuel; // Use pre-fetched value from regulatorTask
-  if (fuel_in_temporary < /*2190 max*/ 22000 &&
-      fuel_in_temporary > 1200 /*1326 min*/)
+  fuel_in_temporary = local_ads_fuel; // Pre-fetched value from regulatorTask
+  static bool fuel_initialized = false;
+  if (fuel_in_temporary < 22000 && fuel_in_temporary > 1200)
   {
     raw = fuel_in_temporary;
+    if (!fuel_initialized)
+    {
+      smoothVal = (float)raw;
+      filtered = raw;
+      lastValue = raw;
+      fuel_initialized = true;
+    }
   }
-  if (lastTime == 0)
-  {
-    smoothVal = (float)raw;
-    filtered = raw;
-    lastValue = raw;
-  }
-  else
+
+  if (fuel_initialized)
   {
     int delta = abs(raw - lastValue);
     if (delta <= 2000)
@@ -223,12 +212,12 @@ void loop()
       last_fuel_correction = now;
     }
     lastValue = filtered;
+    smoothVal =
+        0.001f * filtered +
+        (1.0f - 0.001f) * smoothVal; // Exponential moving average for smoothing
+    percent = (int)getFuelPercent(smoothVal);
+    percent = constrain(percent, 0, 100);
   }
-  smoothVal =
-      0.001f * filtered +
-      (1.0f - 0.001f) * smoothVal; // Exponential moving average for smoothing
-  percent = (int)getFuelPercent(smoothVal);
-  percent = constrain(percent, 0, 100);
 
   //-------------------- Coolant level
   coolant_level = digitalReadFast(coolant_level_pin);
@@ -249,30 +238,36 @@ void loop()
   int spd_in = spd_l;
 
   // --------------- filter SPD ----------------
-  if (lastTime == 0)
+  bool canTimedOut = (now - lastPacketTime > FRONT_MCU_CAN_TIMEOUT_MS);
+  if (lastTime == 0 || canTimedOut)
   {
     last_spd = spd_in;
-  }
-  if (abs(spd_in - last_spd) <= 10)
-  { // sample accepted
     spd = spd_in;
-    goodSamples2++;
   }
   else
   {
-    spd = last_spd; // sample rejected, set it to previous good value
-    badSamples2++;
-  }
-  if (now - last_spd_correction >= 5000)
-  { // sample error correction
-    if (goodSamples2 < badSamples2)
-    {
+    if (abs(spd_in - last_spd) <= 10)
+    { // sample accepted
       spd = spd_in;
+      goodSamples2++;
     }
-    goodSamples2 = 0;
-    badSamples2 = 0;
-    last_spd_correction = now;
+    else
+    {
+      spd = last_spd; // sample rejected, set it to previous good value
+      badSamples2++;
+    }
+    if (now - last_spd_correction >= 5000)
+    { // sample error correction
+      if (goodSamples2 < badSamples2)
+      {
+        spd = spd_in;
+      }
+      goodSamples2 = 0;
+      badSamples2 = 0;
+      last_spd_correction = now;
+    }
   }
+
 
   if (spd != last_spd || lastTime == 0)
   {
@@ -592,7 +587,8 @@ void loop()
     spd_delta_pulses = 0;
 
     float speed_val = (float)spd;
-    bool is_moving = (interval_dist_km > 0.0001f || speed_val > 0.0f);
+    // Standard automotive threshold: calculate L/100km only when moving >= 3 km/h
+    bool is_moving = (speed_val >= 3.0f);
 
     // Calculate instant consumption
     if (is_moving)
@@ -600,8 +596,10 @@ void loop()
       float dist_for_calc = (interval_dist_km > 0.0001f)
                                 ? interval_dist_km
                                 : ((speed_val / 3600.0f) * elapsed_sec);
-      // inst_val in L/100km
+      // inst_val in L/100km, clamped to 99.9 to prevent text overflow
       inst_val = (fuel_consumed_liters / dist_for_calc) * 100.0f;
+      if (inst_val > 99.9f)
+        inst_val = 99.9f;
     }
     else
     {
@@ -625,11 +623,11 @@ void loop()
     char bufInst[20];
     if (is_moving)
     {
-      snprintf(bufInst, sizeof(bufInst), "%5.1f L/100km", inst_val);
+      snprintf(bufInst, sizeof(bufInst), "%4.1f L/100km", inst_val);
     }
     else
     {
-      snprintf(bufInst, sizeof(bufInst), "%5.1f L/h", inst_val);
+      snprintf(bufInst, sizeof(bufInst), "%4.1f L/h", inst_val);
     }
     tv.fillRect(90, 210, 160, 16, 0x00); // Clear previous instant readout
     tv.setCursor(90, 210);
