@@ -42,6 +42,7 @@ const unsigned long OFFLINE_CRANK_TIME_MS = 1200; // Cranking duration when Fron
 #define EMERGENCY_OVERCURRENT_A 40.0f
 #define FRONT_MCU_TIMEOUT_MS 5000
 #define FRONT_MCU_CAN_TIMEOUT_MS 1000
+const unsigned long ENGINE_STALL_DEBOUNCE_MS = 1500; // Require 1.5s persistent 0 RPM before cutting ignition
 #define FRONT_MCU_CAN_SEND_INTERVAL_US 50000.0f // Front MCU sends every 50ms
 #define CHARGE_MALFUNCTION_DELAY_MS 20000
 #define BATTERY_LOW_DELAY_MS 10000
