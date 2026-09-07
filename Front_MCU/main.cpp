@@ -13,7 +13,7 @@
 // W202 C200 instrument cluster speed pulse (205/55R16, 48 ABS teeth, falling edge)
 #define PULSES_PER_KM 24714UL
 #define SPD_WINDOW_MS 100UL
-#define RPM_STALE_TIMEOUT_US 400000UL
+#define RPM_STALE_TIMEOUT_US 1000000UL
 #define RPM_MIN_PERIOD_US 2500UL // Glitch filter: max ~12,000 RPM (2 pulses/rev)
 
 

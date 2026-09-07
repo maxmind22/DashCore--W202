@@ -708,17 +708,30 @@ void processPushStart(unsigned long now)
       }
     }
 
-    // Handle Engine Stall Safety
+    // Handle Engine Stall Safety with confirmation debounce
     // Only treat rpm==0 as stall if CAN packets are currently actively being received from Front MCU
-    // (prevents ignition cut on CAN bus failure at highway speed or when Front MCU is disconnected)
+    // and 0 RPM persists for at least ENGINE_STALL_DEBOUNCE_MS (prevents ignition cut on transient glitches/stumbles)
+    static unsigned long zeroRpmStartTime = 0;
     if (currentRpm == 0 && (now - lastPacketTime < FRONT_MCU_CAN_TIMEOUT_MS))
     {
-      currentState = STATE_ACC;
-      standbyStartTime = now;
-      stoppedToAcc = false;
-      standstillStartTime = 0;
-      isEcoRestart = false;
-      ecoInjCutActive = false;
+      if (zeroRpmStartTime == 0)
+      {
+        zeroRpmStartTime = now;
+      }
+      else if (now - zeroRpmStartTime >= ENGINE_STALL_DEBOUNCE_MS)
+      {
+        currentState = STATE_ACC;
+        standbyStartTime = now;
+        stoppedToAcc = false;
+        standstillStartTime = 0;
+        isEcoRestart = false;
+        ecoInjCutActive = false;
+        zeroRpmStartTime = 0;
+      }
+    }
+    else
+    {
+      zeroRpmStartTime = 0;
     }
 
     // Handle Engine Stop Button Press (Only if vehicle is stationary)
