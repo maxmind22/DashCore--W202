@@ -68,10 +68,17 @@ void regulatorTask(void *pvParameters) {
   const float current_alpha = 0.2f;
 
   // Baseline PID Gains (Tuned for physical units: Volts and Amps)
-  const float base_Kp_v = 1800.0f; // PWM counts per Volt error (~360 PWM for 0.2V error)
-  const float base_Ki_v = 350.0f;  // PWM counts per Volt-second error
-  const float base_Kp_i = 80.0f;   // PWM counts per Amp error (~160 PWM for 2A overcurrent)
-  const float base_Ki_i = 20.0f;   // PWM counts per Amp-second error
+  // Derived directly from the proven legacy gains (Kp=30, Ki=5 with *100 V scale and *10 I scale):
+  const float base_Kp_v = 3000.0f; // Exact legacy equivalent: 30.0f * 100
+  const float base_Ki_v = 500.0f;  // Exact legacy equivalent: 5.0f * 100
+  const float base_Kp_i = 300.0f;  // Exact legacy equivalent: 30.0f * 10
+  const float base_Ki_i = 50.0f;   // Exact legacy equivalent: 5.0f * 10
+
+  // Previously tested theoretical softer gains:
+  // const float base_Kp_v = 1800.0f; // PWM counts per Volt error (~360 PWM for 0.2V error)
+  // const float base_Ki_v = 350.0f;  // PWM counts per Volt-second error
+  // const float base_Kp_i = 80.0f;   // PWM counts per Amp error (~160 PWM for 2A overcurrent)
+  // const float base_Ki_i = 20.0f;   // PWM counts per Amp-second error
 
   // Controller State Variables
   static float integral_v = 0.0f;
