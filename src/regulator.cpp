@@ -103,7 +103,6 @@ void regulatorTask(void *pvParameters) {
     unsigned long in_last_packet = lastPacketTime;
     portEXIT_CRITICAL(&dataMux);
 
-    local_rpm = in_rpm;
     bool frontMcuConnected = (millis() - in_last_packet < FRONT_MCU_CAN_TIMEOUT_MS);
 
     // --- 2. Sample ADS1115 ADC ---
