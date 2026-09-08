@@ -116,5 +116,5 @@ extern int chg2;
 extern volatile uint32_t last_charge;
 extern volatile uint32_t last_regulator_heartbeat;
 extern volatile uint16_t rpm;
-extern int field_pwm;
+extern volatile int field_pwm;
 extern uint16_t local_rpm;

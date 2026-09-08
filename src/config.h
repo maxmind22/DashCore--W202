@@ -31,19 +31,31 @@
 #define coolant_level_pin 34
 #define FIELD_PIN 12
 #define field_relay_pin 14
+#define PIN_I2C_SDA 21
+#define PIN_I2C_SCL 22
+
+// --- Alternator Regulator Constants ---
+#define REGULATOR_V_TARGET 13.60f           // LiFePO4 safe full absorption voltage (3.40V/cell)
+#define REGULATOR_I_LIMIT 20.00f            // Maximum continuous battery charging current (A)
+#define REGULATOR_V_EMERGENCY 14.20f        // Emergency hardware cut threshold (V)
+#define REGULATOR_RELAY_COOLDOWN_MS 5000    // Latch duration to prevent relay chatter (ms)
+#define REGULATOR_RAMP_UP_PER_SEC 250.0f    // Soft-start slew rate (~4s for 0 -> 100% PWM)
+#define REGULATOR_RAMP_DOWN_PER_SEC 1000.0f // Controlled fast ramp-down rate
+#define REGULATOR_NOMINAL_RPM 1500.0f       // Baseline RPM for gain scheduling / Front MCU offline
+#define FUEL_ADC_INTERVAL_US 2000000UL      // Fuel sender ADC read interval (2s)
 
 // --- Threshold Constants ---
 #define OVERSPEED_KMH 58
 #define OVERHEAT_TEMP_C 96
 #define ENGINE_STARTED_RPM 400
-const unsigned long MIN_CRANK_TIME_MS = 600; // Blind crank duration to ignore RPM spikes
+const unsigned long MIN_CRANK_TIME_MS = 600;      // Blind crank duration to ignore RPM spikes
 const unsigned long OFFLINE_CRANK_TIME_MS = 1200; // Cranking duration when Front MCU is offline
 #define ENGINE_ACTIVE_RPM_THRESHOLD 200
 #define EMERGENCY_OVERCURRENT_A 40.0f
 #define FRONT_MCU_TIMEOUT_MS 5000
 #define FRONT_MCU_CAN_TIMEOUT_MS 1000
 const unsigned long ENGINE_STALL_DEBOUNCE_MS = 1500; // Require 1.5s persistent 0 RPM before cutting ignition
-#define FRONT_MCU_CAN_SEND_INTERVAL_US 50000.0f // Front MCU sends every 50ms
+#define FRONT_MCU_CAN_SEND_INTERVAL_US 50000.0f      // Front MCU sends every 50ms
 #define CHARGE_MALFUNCTION_DELAY_MS 20000
 #define BATTERY_LOW_DELAY_MS 10000
 #define CAN_HEALTH_SEND_INTERVAL_MS 200
@@ -83,7 +95,7 @@ const uint32_t MAX_INJ_PULSE_PER_INTERVAL_US = 1000000; // 1,000,000us (1s): han
 #define RTC_TRIP_MAGIC_KEY 0xCAFE4567
 
 // Timeout Constants
-const unsigned long STANDBY_TIMEOUT_MS = 60000;    // 1 Minute
+const unsigned long STANDBY_TIMEOUT_MS = 60000;     // 1 Minute
 const unsigned long ACCESSORY_TIMEOUT_MS = 3600000; // 1 Hour
 const unsigned long BUTTON_COOLDOWN_MS = 500;
 const unsigned long BUTTON_LONGPRESS_RESET_MS = 3000;

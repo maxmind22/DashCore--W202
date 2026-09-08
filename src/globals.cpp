@@ -114,5 +114,5 @@ int chg2 = 0;
 volatile uint32_t last_charge = 0;
 volatile uint32_t last_regulator_heartbeat = 0;
 volatile uint16_t rpm = 0;
-int field_pwm = 0;
+volatile int field_pwm = 0;
 uint16_t local_rpm = 0;

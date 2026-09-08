@@ -41,7 +41,7 @@ void setup()
   regulatorTaskRunning = true;
   stoppedToAcc = false;
 
-  recoverI2CBus(21, 22);
+  recoverI2CBus(PIN_I2C_SDA, PIN_I2C_SCL);
   Wire.begin();
   Wire.setClock(100000); // Slower clock for better noise immunity in engine bay
   Wire.setTimeOut(20);   // Abort I2C transaction if it takes > 20ms
