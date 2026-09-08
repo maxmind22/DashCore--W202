@@ -117,4 +117,3 @@ extern volatile uint32_t last_charge;
 extern volatile uint32_t last_regulator_heartbeat;
 extern volatile uint16_t rpm;
 extern volatile int field_pwm;
-extern uint16_t local_rpm;
