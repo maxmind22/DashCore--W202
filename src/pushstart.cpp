@@ -169,8 +169,6 @@ bool isEngineRunning(unsigned long now)
   {
     if (rpm >= ENGINE_STARTED_RPM || new_rpm >= ENGINE_STARTED_RPM)
       return true;
-    if (spd > 0 && (rpm >= ENGINE_ACTIVE_RPM_THRESHOLD || new_rpm >= ENGINE_ACTIVE_RPM_THRESHOLD))
-      return true;
   }
 
   return false;
@@ -179,18 +177,14 @@ bool isEngineRunning(unsigned long now)
 void setRelays(bool acc, bool ign, bool start)
 {
   // HARDWARE SAFETY INTERLOCK:
-  // Strictly prevent starter engagement if vehicle is in motion, or if system
-  // state is not actively in STATE_CRANKING (e.g. RUNNING, STANDBY, ACC, IGNITION).
+  // Strictly prevent starter engagement if system state is not actively in STATE_CRANKING
+  // (e.g. prevent engagement if already RUNNING, STANDBY, ACC, IGNITION).
   if (start)
   {
-    unsigned long now = millis();
-    bool canLive = (now - lastPacketTime < FRONT_MCU_CAN_TIMEOUT_MS);
-    bool vehicleMoving = (canLive && spd > 0);
-
-    if (vehicleMoving || currentState != STATE_CRANKING || currentState == STATE_RUNNING)
+    if (currentState != STATE_CRANKING || currentState == STATE_RUNNING)
     {
       start = false;
-      // Serial.println("[SAFETY] Starter engagement blocked: Engine running, vehicle in motion, or invalid state!");
+      // Serial.println("[SAFETY] Starter engagement blocked: Engine running or invalid state!");
     }
   }
 
@@ -360,8 +354,7 @@ void processPushStart(unsigned long now)
   if (currentState != STATE_RUNNING && currentState != STATE_CRANKING)
   {
     if (now - lastPacketTime < FRONT_MCU_CAN_TIMEOUT_MS &&
-        (rpm >= ENGINE_STARTED_RPM || new_rpm >= ENGINE_STARTED_RPM ||
-         (spd > 0 && (rpm >= ENGINE_ACTIVE_RPM_THRESHOLD || new_rpm >= ENGINE_ACTIVE_RPM_THRESHOLD))))
+        (rpm >= ENGINE_STARTED_RPM || new_rpm >= ENGINE_STARTED_RPM))
     {
       // Only auto-sync if not in the middle of an intentional shutdown
       if (lastEngineStopTime == 0 || now - lastEngineStopTime >= ENGINE_SPINDOWN_SAFETY_MS)
@@ -698,7 +691,7 @@ void processPushStart(unsigned long now)
 
       // Safety check: If engine is already running (starter is OFF, so no starter electrical noise),
       // transition immediately to STATE_RUNNING without ever engaging the starter!
-      if (now - lastPacketTime < FRONT_MCU_CAN_TIMEOUT_MS && (currentRpm >= ENGINE_STARTED_RPM || spd > 0))
+      if (now - lastPacketTime < FRONT_MCU_CAN_TIMEOUT_MS && currentRpm >= ENGINE_STARTED_RPM)
       {
         currentState = STATE_RUNNING;
         lastEngineStartTime = now;
