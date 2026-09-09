@@ -3,6 +3,7 @@
 #include "globals.h"
 
 void processPushStart(unsigned long now = 0);
+bool isEngineRunning(unsigned long now = 0);
 void setRelays(bool acc, bool ign, bool start);
 void setupPushStartPins();
 void enterPowerDownSleep();

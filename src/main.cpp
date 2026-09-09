@@ -474,7 +474,31 @@ void loop()
     lastRpmUpdateTime = now;
   }
 
-  temp_out = map((int)raw2, 250, 950, 40, 120);
+  // Calibrated for 2.3kΩ pull-down: 40°C = 437 ADC, 60°C = 636 ADC, 91°C = 846 ADC, 96°C = 871 ADC, 120°C = 990 ADC
+  if (raw2 <= 437)
+  {
+    temp_out = 40;
+  }
+  else if (raw2 >= 990)
+  {
+    temp_out = 120;
+  }
+  else if (raw2 < 636)
+  {
+    temp_out = map((int)raw2, 437, 636, 40, 60);
+  }
+  else if (raw2 < 846)
+  {
+    temp_out = map((int)raw2, 636, 846, 60, 91);
+  }
+  else if (raw2 < 871)
+  {
+    temp_out = map((int)raw2, 846, 871, 91, 96);
+  }
+  else
+  {
+    temp_out = map((int)raw2, 871, 990, 96, 120);
+  }
   temp_out = constrain(temp_out, 40, 120);
 
   if (now - lastPacketTime > FRONT_MCU_CAN_TIMEOUT_MS)
