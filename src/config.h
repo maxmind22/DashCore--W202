@@ -46,9 +46,11 @@
 
 // --- Threshold Constants ---
 #define OVERSPEED_KMH 58
-#define OVERHEAT_TEMP_C 96
+#define OVERHEAT_TEMP_C 108
 #define ENGINE_STARTED_RPM 400
+#define ENGINE_SPINDOWN_RPM_THRESHOLD 50
 const unsigned long MIN_CRANK_TIME_MS = 600;      // Blind crank duration to ignore RPM spikes
+const unsigned long ENGINE_SPINDOWN_SAFETY_MS = 2000;    // Cooldown duration to prevent auto-syncing during intentional stop
 const unsigned long OFFLINE_CRANK_TIME_MS = 1200; // Cranking duration when Front MCU is offline
 #define ENGINE_ACTIVE_RPM_THRESHOLD 200
 #define EMERGENCY_OVERCURRENT_A 40.0f
@@ -126,7 +128,7 @@ static const size_t NUM_AUTHORIZED_IRKS = sizeof(BLE_AUTHORIZED_IRKS) / sizeof(B
 const unsigned long AUTO_STOP_STANDSTILL_DELAY_MS = 10000; // 10s standstill before stop
 const unsigned long AUTO_STOP_COOLDOWN_MS = 90000;         // 90s engine runtime cooldown between stops
 const int AUTO_STOP_MIN_TEMP_C = 82;                       // Coolant temp >= 82°C
-const int AUTO_STOP_MAX_TEMP_C = 95;                       // Coolant temp <= 95°C
+const int AUTO_STOP_MAX_TEMP_C = 98;                       // Coolant temp <= 98°C
 const float AUTO_STOP_MIN_VOLTAGE = 12.00f;                // Min battery voltage to allow stop
 const float AUTO_STOP_RESTART_VOLTAGE = 11.60f;            // Battery floor triggering auto-restart
 const unsigned long AUTO_STOP_MAX_DURATION_MS = 90000;     // 90s max stop duration before restart

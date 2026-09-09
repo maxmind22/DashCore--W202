@@ -157,8 +157,43 @@ void processUnlockSignals(unsigned long now)
   }
 }
 
+bool isEngineRunning(unsigned long now)
+{
+  if (now == 0)
+    now = millis();
+
+  if (currentState == STATE_RUNNING)
+    return true;
+
+  if (now - lastPacketTime < FRONT_MCU_CAN_TIMEOUT_MS)
+  {
+    if (rpm >= ENGINE_STARTED_RPM || new_rpm >= ENGINE_STARTED_RPM)
+      return true;
+    if (spd > 0 && (rpm >= ENGINE_ACTIVE_RPM_THRESHOLD || new_rpm >= ENGINE_ACTIVE_RPM_THRESHOLD))
+      return true;
+  }
+
+  return false;
+}
+
 void setRelays(bool acc, bool ign, bool start)
 {
+  // HARDWARE SAFETY INTERLOCK:
+  // Strictly prevent starter engagement if vehicle is in motion, or if system
+  // state is not actively in STATE_CRANKING (e.g. RUNNING, STANDBY, ACC, IGNITION).
+  if (start)
+  {
+    unsigned long now = millis();
+    bool canLive = (now - lastPacketTime < FRONT_MCU_CAN_TIMEOUT_MS);
+    bool vehicleMoving = (canLive && spd > 0);
+
+    if (vehicleMoving || currentState != STATE_CRANKING || currentState == STATE_RUNNING)
+    {
+      start = false;
+      // Serial.println("[SAFETY] Starter engagement blocked: Engine running, vehicle in motion, or invalid state!");
+    }
+  }
+
   digitalWrite(PIN_RELAY_ACC, acc ? HIGH : LOW);
   digitalWrite(PIN_RELAY_IGN, ign ? HIGH : LOW);
   digitalWrite(PIN_RELAY_START, start ? HIGH : LOW);
@@ -318,6 +353,28 @@ void processPushStart(unsigned long now)
   static enum { CRANK_PRIME,
                 CRANK_SOLENOID } crankStage = CRANK_PRIME;
   static unsigned long crankStageTime = 0;
+  static unsigned long lastEngineStopTime = 0;
+
+  // Auto-synchronize to STATE_RUNNING if engine is detected running while in standby/acc/ign
+  // (e.g. after MCU reset while driving, or manual push/roll start)
+  if (currentState != STATE_RUNNING && currentState != STATE_CRANKING)
+  {
+    if (now - lastPacketTime < FRONT_MCU_CAN_TIMEOUT_MS &&
+        (rpm >= ENGINE_STARTED_RPM || new_rpm >= ENGINE_STARTED_RPM ||
+         (spd > 0 && (rpm >= ENGINE_ACTIVE_RPM_THRESHOLD || new_rpm >= ENGINE_ACTIVE_RPM_THRESHOLD))))
+    {
+      // Only auto-sync if not in the middle of an intentional shutdown
+      if (lastEngineStopTime == 0 || now - lastEngineStopTime >= ENGINE_SPINDOWN_SAFETY_MS)
+      {
+        currentState = STATE_RUNNING;
+        setRelays(true, true, false); // Keep ACC & IGN ON, START OFF
+        lastEngineStartTime = now;
+        standstillStartTime = 0;
+        isEcoRestart = false;
+        ecoInjCutActive = false;
+      }
+    }
+  }
 
   // Continuously monitor unlock pulses while engine is not running.
   if (currentState != STATE_RUNNING)
@@ -453,6 +510,12 @@ void processPushStart(unsigned long now)
       if (digitalRead(PIN_INPUT_BRAKE) == LOW)
       {
         standbyBrakeCheckPending = false;
+        if (isEngineRunning(now))
+        {
+          currentState = STATE_RUNNING;
+          setRelays(true, true, false);
+          break;
+        }
         if (isPhoneAuthorized())
         {
           currentState = STATE_CRANKING;
@@ -512,6 +575,13 @@ void processPushStart(unsigned long now)
       if (digitalRead(PIN_INPUT_BRAKE) == LOW)
       {
         accBrakeCheckPending = false;
+        if (isEngineRunning(now))
+        {
+          currentState = STATE_RUNNING;
+          setRelays(true, true, false);
+          stoppedToAcc = false;
+          break;
+        }
         if (isPhoneAuthorized())
         {
           currentState = STATE_CRANKING;
@@ -578,6 +648,12 @@ void processPushStart(unsigned long now)
 
       if (brakeHeld)
       {
+        if (isEngineRunning(now))
+        {
+          currentState = STATE_RUNNING;
+          setRelays(true, true, false);
+          break;
+        }
         if (isPhoneAuthorized())
         {
           currentState = STATE_CRANKING;
@@ -608,6 +684,7 @@ void processPushStart(unsigned long now)
       ecoInjCutActive = false;
       break;
     }
+
     // Non-blocking stage machine for cranking sequence
 
     if (crankStage == CRANK_PRIME)
@@ -618,9 +695,33 @@ void processPushStart(unsigned long now)
       {
         crankStageTime = now;
       }
+
+      // Safety check: If engine is already running (starter is OFF, so no starter electrical noise),
+      // transition immediately to STATE_RUNNING without ever engaging the starter!
+      if (now - lastPacketTime < FRONT_MCU_CAN_TIMEOUT_MS && (currentRpm >= ENGINE_STARTED_RPM || spd > 0))
+      {
+        currentState = STATE_RUNNING;
+        lastEngineStartTime = now;
+        standstillStartTime = 0;
+        isEcoRestart = false;
+        ecoInjCutActive = false;
+        crankStage = CRANK_PRIME;
+        crankStageTime = 0;
+        break;
+      }
+
       unsigned long requiredPrime = isEcoRestart ? ECO_CRANK_PRIME_MS : COLD_CRANK_PRIME_MS;
       if (now - crankStageTime >= requiredPrime)
       {
+        // Starter protection: If engine is still rotating/spinning down (> 50 RPM),
+        // hold in prime stage until stationary before engaging starter pinion
+        if (now - lastPacketTime < FRONT_MCU_CAN_TIMEOUT_MS && currentRpm > ENGINE_SPINDOWN_RPM_THRESHOLD)
+        {
+          if (now - crankStageTime < MAX_CRANK_TIME_MS)
+          {
+            break; // Hold in CRANK_PRIME with starter OFF
+          }
+        }
         crankStage = CRANK_SOLENOID;
         crankStageTime = now; // Reset timer for max crank limit
       }
@@ -631,7 +732,8 @@ void processPushStart(unsigned long now)
       setRelays(true, true, true);
 
       // Evaluate start success:
-      // - If Front MCU is live during starting, check RPM threshold (>400 RPM after 600ms) to stop cranking
+      // - If Front MCU is live during starting, check RPM threshold strictly after MIN_CRANK_TIME_MS (600ms)
+      //   to mitigate the noisy RPM signal during starter engagement that causes premature cutoff/starting failure.
       // - Else if Front MCU is offline, use 1.2s cranking time to transition into STATE_RUNNING
       bool startDetected = false;
       if (now - lastPacketTime < FRONT_MCU_CAN_TIMEOUT_MS)
@@ -720,6 +822,7 @@ void processPushStart(unsigned long now)
       }
       else if (now - zeroRpmStartTime >= ENGINE_STALL_DEBOUNCE_MS)
       {
+        lastEngineStopTime = now;
         currentState = STATE_ACC;
         standbyStartTime = now;
         stoppedToAcc = false;
@@ -740,6 +843,7 @@ void processPushStart(unsigned long now)
       if (spd == 0)
       { // Safety check: speed must be zero
         lastButtonPressTime = now;
+        lastEngineStopTime = now;
         standstillStartTime = 0;
         isEcoRestart = false;
         ecoInjCutActive = false;
@@ -773,6 +877,7 @@ void processPushStart(unsigned long now)
     if (btnShortPressed && (now - lastButtonPressTime >= BUTTON_COOLDOWN_MS))
     {
       lastButtonPressTime = now;
+      lastEngineStopTime = now;
       ecoInjCutActive = false;
       isEcoRestart = false;
       setRelays(false, false, false); // Turn off all relays
@@ -800,11 +905,22 @@ void processPushStart(unsigned long now)
     {
       // Restore injectors immediately over CAN
       ecoInjCutActive = false;
+      sendCanHealthFrame(now); // Immediately command Front MCU to restore injectors!
+
+      // Safety check: If engine is already running (e.g. caught upon injector restore or didn't stall),
+      // transition directly to STATE_RUNNING without engaging starter!
+      if (now - lastPacketTime < FRONT_MCU_CAN_TIMEOUT_MS && currentRpm >= ENGINE_STARTED_RPM)
+      {
+        currentState = STATE_RUNNING;
+        isEcoRestart = false;
+        setRelays(true, true, false);
+        break;
+      }
+
       isEcoRestart = true;
       currentState = STATE_CRANKING;
       crankStage = CRANK_PRIME;
       crankStageTime = 0;
-      sendCanHealthFrame(now); // Immediately command Front MCU to restore injectors!
     }
     break;
   }

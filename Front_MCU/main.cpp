@@ -26,7 +26,7 @@ const int ac = A1;
 #define DFCO_ENGAGE_RPM 1500
 #define DFCO_DISENGAGE_RPM 1000
 #define DFCO_ENGAGE_DELAY_MS 1000
-#define DFCO_ENGINE_WARM_ADC 440
+#define DFCO_ENGINE_WARM_ADC 636 // Engine warm (>60°C with 2.3kΩ pull-down)
 #define DFCO_INJ_WINDOW_TICKS 8000 // 8000 ticks @ 0.5us/tick = 4000us (safe window before next cylinder fires)
 #define MAX_INJ_ACTIVE_MS 30       // 30ms max pulse timeout to prevent telemetry lockup
 
@@ -34,13 +34,13 @@ const int ac = A1;
 #define HEARTBEAT_TIMEOUT_MS 1000
 #define REGULATOR_FAIL_THRESHOLD 3
 
-// --- Fan Control ---
-#define FAN_TEMP_MIN_ADC 690
-#define FAN_TEMP_HYST_ADC 15   // Turn off at 675 ADC to prevent cycling
-#define FAN_TEMP_MAX_ADC 730
+// --- Fan Control (Calibrated for 2.3kΩ pull-down: 93°C = 856 ADC, 96°C = 871 ADC, 102°C = 901 ADC) ---
+#define FAN_TEMP_MIN_ADC 856   // Turn on at 93°C (gentle ~18% speed)
+#define FAN_TEMP_HYST_ADC 15   // Turn off below 841 (~90°C, safely above 87°C thermostat)
+#define FAN_TEMP_MAX_ADC 901   // Full 100% fan speed at 102°C (thermostat fully open)
 #define FAN_AC_MIN_ADC 50
 #define FAN_AC_MAX_ADC 500
-#define FAN_DUTY_MIN 20
+#define FAN_DUTY_MIN 45        // ~18% PWM to reliably start Toyota fan module without stall/hum
 #define FAN_DUTY_MAX 255
 
 // --- Speed ---
@@ -255,10 +255,9 @@ void loop()
       if (temp_avg >= FAN_TEMP_MIN_ADC)
         fan_active = true;
     }
-
     if (fan_active)
     {
-      dutyCycle_temp = map((int)temp_avg, FAN_TEMP_MIN_ADC - FAN_TEMP_HYST_ADC, FAN_TEMP_MAX_ADC, FAN_DUTY_MIN, FAN_DUTY_MAX);
+      dutyCycle_temp = map((int)temp_avg, FAN_TEMP_MIN_ADC, FAN_TEMP_MAX_ADC, FAN_DUTY_MIN, FAN_DUTY_MAX);
       dutyCycle_temp = constrain(dutyCycle_temp, FAN_DUTY_MIN, FAN_DUTY_MAX);
     }
 
@@ -282,7 +281,6 @@ void loop()
       dutyCycle_ac = map((int)acState_avg, FAN_AC_MIN_ADC, FAN_AC_MAX_ADC, FAN_DUTY_MIN, FAN_DUTY_MAX);
       dutyCycle_ac = constrain(dutyCycle_ac, FAN_DUTY_MIN, FAN_DUTY_MAX);
     }
-
     int dutyCycle = max(dutyCycle_temp, dutyCycle_ac);
     analogWrite(fan, dutyCycle);
 
