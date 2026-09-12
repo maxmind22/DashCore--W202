@@ -6,6 +6,7 @@
 #include "can_comm.h"
 #include "fuel.h"
 #include "security.h"
+#include <Fonts/FreeSansBold24pt7b.h>
 
 //=================== setup ===============//
 void setup()
@@ -125,7 +126,6 @@ void loop()
     sendCanHealthFrame(now);
     lastCanSendTimeMs = now;
   }
-
 
   if (last_clear < 6)
   {
@@ -268,18 +268,25 @@ void loop()
     }
   }
 
-
   if (spd != last_spd || lastTime == 0)
   {
+    // Clear previous speed number area (prevents character overlap with custom fonts)
+    tv.fillRect(80, 149, 85, 38, 0x00);
 
-    tv.setCursor(72, 150);
-    tv.setTextColor(0xFF, 0x00);
-    tv.setTextSize(5);
-    char spdStr[4];
-    snprintf(spdStr, sizeof(spdStr), "%3d", spd);
-    tv.print(spdStr);
+    tv.setFont(&FreeSansBold24pt7b);
+    tv.setTextColor(0xFF);
     tv.setTextSize(1);
+    char spdStr[6];
+    snprintf(spdStr, sizeof(spdStr), "%d", spd);
 
+    int16_t x1, y1;
+    uint16_t w, h;
+    tv.getTextBounds(spdStr, 0, 0, &x1, &y1, &w, &h);
+    int xPos = 160 - w;      // Right-align against x = 160
+    tv.setCursor(xPos, 184); // Baseline at y = 184
+    tv.print(spdStr);
+
+    tv.setFont(); // Reset to default font for remaining UI elements
     last_spd = spd;
   }
 

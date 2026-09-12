@@ -1,6 +1,10 @@
 #include "globals.h"
 
-ESP_8_BIT_GFX tv(true, 8);
+#if USE_PAL_VIDEO
+ESP_8_BIT_GFX tv(false, 8); // PAL (50Hz, 256x240, +16 scanlines)
+#else
+ESP_8_BIT_GFX tv(true, 8);  // NTSC (60Hz, 256x224)
+#endif
 Adafruit_ADS1115 adc;
 MCP2515 mcp2515(5, 8000000);
 portMUX_TYPE dataMux = portMUX_INITIALIZER_UNLOCKED;
