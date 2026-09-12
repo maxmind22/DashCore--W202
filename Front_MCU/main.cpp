@@ -14,7 +14,6 @@
 #define PULSES_PER_KM 24714UL
 #define SPD_WINDOW_MS 100UL
 #define RPM_STALE_TIMEOUT_US 1000000UL
-#define RPM_MIN_PERIOD_US 2500UL // Glitch filter: max ~12,000 RPM (2 pulses/rev)
 
 
 const int tempPin = A0;
@@ -34,9 +33,9 @@ const int ac = A1;
 #define HEARTBEAT_TIMEOUT_MS 1000
 #define REGULATOR_FAIL_THRESHOLD 3
 
-// --- Fan Control (Calibrated for 2.3kΩ pull-down: 93°C = 856 ADC, 96°C = 871 ADC, 102°C = 901 ADC) ---
-#define FAN_TEMP_MIN_ADC 856   // Turn on at 93°C (gentle ~18% speed)
-#define FAN_TEMP_HYST_ADC 15   // Turn off below 841 (~90°C, safely above 87°C thermostat)
+// --- Fan Control (Calibrated for 2.3kΩ pull-down: 92°C = 851 ADC, 95°C = 866 ADC, 96°C = 871 ADC, 102°C = 901 ADC) ---
+#define FAN_TEMP_MIN_ADC 866   // Turn on at 95°C (gentle ~18% speed)
+#define FAN_TEMP_HYST_ADC 15   // Turn off below 851 (92°C, 3°C hysteresis to prevent short-cycling)
 #define FAN_TEMP_MAX_ADC 901   // Full 100% fan speed at 102°C (thermostat fully open)
 #define FAN_AC_MIN_ADC 50
 #define FAN_AC_MAX_ADC 500
@@ -92,12 +91,8 @@ MCP2515 mcp2515(10, 8000000);
 void rpmISR()
 {
   uint32_t now = micros();
-  uint32_t diff = now - lastTime;
-  if (diff >= RPM_MIN_PERIOD_US) // Glitch / noise filter
-  {
-    period = diff;
-    lastTime = now;
-  }
+  period = now - lastTime;
+  lastTime = now;
 }
 
 void spdISR()
@@ -299,10 +294,11 @@ void loop()
   {
     rpm = 0;
   }
-  else
+  else if (p >= 2500UL)
   {
     rpm = 30000000UL / p; // 60,000,000 / (p * 2 pulses/rev)
   }
+  // If p < 2500UL (noise glitch > 12,000 RPM), retain previous valid rpm reading
 
   //=================== Control Injectors (DFCO) =====================//
   int th_Pos = digitalReadFast(th_pin);
@@ -344,7 +340,7 @@ void loop()
     last_inj_check = 0; // Reset timer if condition no longer met
   }
 
-  // Deactivation is instant when throttle is released or RPM drops below hysteresis limit
+  // Deactivation is instant when throttle is opened or RPM drops below hysteresis limit
   if ((th_Pos == 0 || rpm < DFCO_DISENGAGE_RPM) && injDisable)
   {
     injDisable = false;

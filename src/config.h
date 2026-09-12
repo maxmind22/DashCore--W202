@@ -66,6 +66,11 @@ const unsigned long ENGINE_STALL_DEBOUNCE_MS = 1500; // Require 1.5s persistent 
 #define FUEL_UPDATE_INTERVAL_MS 1000
 #define RPM_UPDATE_INTERVAL_MS 500
 
+// --- Video Output Configuration ---
+// Set to true to test PAL video output (50Hz, 256x240, +16 vertical scanlines)
+// Set to false to revert to NTSC video output (60Hz, 256x224)
+#define USE_PAL_VIDEO false
+
 // Display layout constants
 #define FUEL_X 5
 #define FUEL_Y 100
@@ -126,7 +131,7 @@ static const size_t NUM_AUTHORIZED_IRKS = sizeof(BLE_AUTHORIZED_IRKS) / sizeof(B
 
 // Auto Start-Stop Constants & Wear-Protection Thresholds
 const unsigned long AUTO_STOP_STANDSTILL_DELAY_MS = 10000; // 10s standstill before stop
-const unsigned long AUTO_STOP_COOLDOWN_MS = 90000;         // 90s engine runtime cooldown between stops
+const unsigned long AUTO_STOP_COOLDOWN_MS = 45000;         // 45s engine runtime cooldown between stops
 const int AUTO_STOP_MIN_TEMP_C = 82;                       // Coolant temp >= 82°C
 const int AUTO_STOP_MAX_TEMP_C = 98;                       // Coolant temp <= 98°C
 const float AUTO_STOP_MIN_VOLTAGE = 12.00f;                // Min battery voltage to allow stop
