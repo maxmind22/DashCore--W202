@@ -40,7 +40,7 @@
 #define REGULATOR_V_EMERGENCY 14.20f        // Emergency hardware cut threshold (V)
 #define REGULATOR_RELAY_COOLDOWN_MS 5000    // Latch duration to prevent relay chatter (ms)
 #define REGULATOR_RAMP_UP_PER_SEC 250.0f    // Soft-start slew rate (~4s for 0 -> 100% PWM)
-#define REGULATOR_RAMP_DOWN_PER_SEC 1000.0f // Controlled fast ramp-down rate
+#define REGULATOR_RAMP_DOWN_PER_SEC 500.0f  // Controlled smooth ramp-down rate (prevents current plunge)
 #define REGULATOR_NOMINAL_RPM 1500.0f       // Baseline RPM for gain scheduling / Front MCU offline
 #define FUEL_ADC_INTERVAL_US 2000000UL      // Fuel sender ADC read interval (2s)
 
@@ -113,6 +113,7 @@ const unsigned long BRAKE_CHECK_SETTLE_MS = 100; // Window (ms) to energize and 
 #define BLE_SCAN_TIMEOUT_MS 10000  // Initial boot/wake scan duration (10s)
 #define BLE_RESCAN_TIMEOUT_MS 5000 // Quick on-demand scan on start button press (5s)
 #define BLE_MIN_RSSI -95           // Minimum RSSI filter in dBm (-128 to disable)
+#define AUTH_SUCCESS_BEEP_MS 1000  // Confirmation beep duration when phone is authorized (ms)
 
 #if __has_include("secrets.h")
 #include "secrets.h"
