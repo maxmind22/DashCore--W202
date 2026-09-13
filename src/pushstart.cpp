@@ -58,9 +58,13 @@ void updateToneStateMachine(unsigned long now)
 {
   if (toneState == TONE_IDLE)
     return;
-  if (now == 0)
-    now = millis();
-  if (toneState == TONE_ON && (now - tonePhaseStart >= toneOnMs))
+  unsigned long currentMs = (now != 0) ? now : millis();
+  if (currentMs < tonePhaseStart)
+    currentMs = millis();
+  if (currentMs < tonePhaseStart)
+    return;
+
+  if (toneState == TONE_ON && (currentMs - tonePhaseStart >= toneOnMs))
   {
     digitalWriteFast(buzzer_pin, LOW);
     toneBeepsRemaining--;
@@ -70,14 +74,14 @@ void updateToneStateMachine(unsigned long now)
     }
     else
     {
-      tonePhaseStart = now;
+      tonePhaseStart = currentMs;
       toneState = TONE_OFF;
     }
   }
-  else if (toneState == TONE_OFF && (now - tonePhaseStart >= toneOffMs))
+  else if (toneState == TONE_OFF && (currentMs - tonePhaseStart >= toneOffMs))
   {
     digitalWriteFast(buzzer_pin, HIGH);
-    tonePhaseStart = now;
+    tonePhaseStart = currentMs;
     toneState = TONE_ON;
   }
 }
@@ -94,7 +98,7 @@ void playUnlockToggleTone(bool disabled)
 
 void playAuthSuccessTone()
 {
-  queueTone(1, 200, 0); // 1 single 200ms confirmation chime
+  queueTone(1, AUTH_SUCCESS_BEEP_MS, 0); // 1 single confirmation chime
 }
 
 void playAuthWarningTone()

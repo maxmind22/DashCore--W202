@@ -192,15 +192,11 @@ void regulatorTask(void *pvParameters) {
     bool delay_active = (runningStartTime != 0 &&
                          (millis() - runningStartTime < CHARGE_DELAY_MS));
 
-    // --- 6. RPM Gain Scheduling ---
-    // If Front MCU is offline (or RPM reading is zero/invalid), fall back to REGULATOR_NOMINAL_RPM
-    float effective_rpm = (frontMcuConnected && in_rpm >= 500) ? (float)in_rpm : REGULATOR_NOMINAL_RPM;
-    float rpm_scale = constrain(REGULATOR_NOMINAL_RPM / effective_rpm, 0.7f, 1.4f);
-
-    float Kp_v = base_Kp_v * rpm_scale;
-    float Ki_v = base_Ki_v * rpm_scale;
-    float Kp_i = base_Kp_i * rpm_scale;
-    float Ki_i = base_Ki_i * rpm_scale;
+    // --- 6. Static Baseline Gains (RPM dependence disabled for stabilization) ---
+    float Kp_v = base_Kp_v;
+    float Ki_v = base_Ki_v;
+    float Kp_i = base_Kp_i;
+    float Ki_i = base_Ki_i;
 
     // --- 7. Dual Parallel PI Regulators (CC/CV) ---
     // Voltage PI Controller (Target 13.60V)

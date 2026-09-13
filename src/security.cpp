@@ -66,9 +66,9 @@ void processBLEEvents()
   if (authGrantedPending)
   {
     authGrantedPending = false;
-    playAuthSuccessTone();
     teardownBLESecurity();
     Serial.println("[SECURITY] Bluetooth radio completely stopped & disabled.\n");
+    playAuthSuccessTone();
   }
 }
 
