@@ -217,7 +217,7 @@ void regulatorTask(void *pvParameters) {
     float commanded_pwm = (target_pwm_v < target_pwm_i) ? target_pwm_v : target_pwm_i;
     float clamped_pwm = constrain(commanded_pwm, 0.0f, 1023.0f);
 
-    // Bumpless Transfer & Anti-Windup Back-Tracking:
+    // Bumpless Transfer & Anti-Windup Tracking:
     if (target_pwm_v <= target_pwm_i) {
       // Voltage loop is in control (CV Mode)
       bool saturated = (clamped_pwm >= 1023.0f && err_v > 0.0f) ||
@@ -226,8 +226,8 @@ void regulatorTask(void *pvParameters) {
         integral_v += (Ki_v * err_v * dt);
       }
       integral_v = constrain(integral_v, 0.0f, 1023.0f);
-      // Back-track current integrator to prevent current windup during CV mode
-      integral_i = constrain(clamped_pwm - p_term_i, 0.0f, 1023.0f);
+      // Track current integrator to active output to prevent windup while in CV mode
+      integral_i = clamped_pwm;
     } else {
       // Current loop is in control (CC Mode)
       bool saturated = (clamped_pwm >= 1023.0f && err_i > 0.0f) ||
@@ -236,8 +236,8 @@ void regulatorTask(void *pvParameters) {
         integral_i += (Ki_i * err_i * dt);
       }
       integral_i = constrain(integral_i, 0.0f, 1023.0f);
-      // Back-track voltage integrator to prevent voltage windup during CC mode
-      integral_v = constrain(clamped_pwm - p_term_v, 0.0f, 1023.0f);
+      // Track voltage integrator to active output to allow current loop full headroom up to 20A
+      integral_v = clamped_pwm;
     }
 
     // --- 8. Field Soft-Start Slew Rate Limiter ---
