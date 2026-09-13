@@ -113,7 +113,7 @@ const unsigned long BRAKE_CHECK_SETTLE_MS = 100; // Window (ms) to energize and 
 #define BLE_SCAN_TIMEOUT_MS 10000  // Initial boot/wake scan duration (10s)
 #define BLE_RESCAN_TIMEOUT_MS 5000 // Quick on-demand scan on start button press (5s)
 #define BLE_MIN_RSSI -95           // Minimum RSSI filter in dBm (-128 to disable)
-#define AUTH_SUCCESS_BEEP_MS 1000  // Confirmation beep duration when phone is authorized (ms)
+#define AUTH_SUCCESS_BEEP_MS 500   // Confirmation beep duration when phone is authorized (ms)
 
 #if __has_include("secrets.h")
 #include "secrets.h"
