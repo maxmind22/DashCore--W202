@@ -63,7 +63,7 @@ void regulatorTask(void *pvParameters) {
   int consecutive_failures = 0;
 
   const float voltage_alpha = 0.8f;               // 0.3
-  const float current_sensor_offset_mv = 2500.0f; // 2519
+  const float current_sensor_offset_mv = 2495.44f; // Calibrated: -0.30A target vs -1.44A reading (nominal 2500.0f)
   const float current_sensor_mV_per_A = 4.0f; // 4.0f; // mV per Amp (FS500E2T)
   const float current_limit_upper = 20.000f;  // start pulling back above this
   const float current_alpha = 0.2f;
