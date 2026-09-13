@@ -45,6 +45,11 @@ const int ac = A1;
 // --- Speed ---
 #define MAX_SPEED_KMH 220
 
+// --- Oil Level Filter (W202 S11 Switch: LOW = OK, HIGH = Low Oil with 47k pull-up) ---
+#define OIL_LOW_PERSIST_MS 30000UL   // 30s sustained low oil to trigger warning (rejects slosh)
+#define OIL_OK_RECOVERY_MS 10000UL   // 10s continuous OK to clear warning
+#define OIL_CHECK_MIN_RPM 500        // Engine running qualification threshold
+
 // --- CAN ---
 #define CAN_SEND_INTERVAL_MS 50
 #define CAN_SENSOR_READ_INTERVAL_MS 500
@@ -279,7 +284,64 @@ void loop()
     int dutyCycle = max(dutyCycle_temp, dutyCycle_ac);
     analogWrite(fan, dutyCycle);
 
-    oil_level = digitalReadFast(oil_level_pin);
+    // --- OEM-Style Oil Level Filter (Mercedes W202 / S11) ---
+    // Hardware: 47k pull-up to D6 -> Sensor -> GND.
+    // Tested state: LOW = Oil OK, HIGH = Low Oil.
+    // Damping: Requires 30s sustained LOW oil reading (HIGH) while engine is running (RPM >= 500)
+    // to reject cornering/braking slosh. Requires 10s continuous OK (LOW) to clear warning.
+    uint8_t raw_oil = digitalReadFast(oil_level_pin);
+    static uint32_t oil_low_accum_ms = 0;
+    static uint32_t oil_ok_accum_ms = 0;
+
+    if (rpm >= OIL_CHECK_MIN_RPM)
+    {
+      if (raw_oil == HIGH) // Sensor reports low oil
+      {
+        oil_ok_accum_ms = 0;
+        if (oil_low_accum_ms < OIL_LOW_PERSIST_MS)
+        {
+          oil_low_accum_ms += CAN_SENSOR_READ_INTERVAL_MS;
+        }
+        if (oil_low_accum_ms >= OIL_LOW_PERSIST_MS)
+        {
+          oil_level = 1; // Assert low oil warning after 30s sustained condition
+        }
+      }
+      else // Sensor reports oil level OK
+      {
+        if (oil_low_accum_ms >= CAN_SENSOR_READ_INTERVAL_MS)
+        {
+          oil_low_accum_ms -= CAN_SENSOR_READ_INTERVAL_MS;
+        }
+        else
+        {
+          oil_low_accum_ms = 0;
+        }
+
+        if (oil_ok_accum_ms < OIL_OK_RECOVERY_MS)
+        {
+          oil_ok_accum_ms += CAN_SENSOR_READ_INTERVAL_MS;
+        }
+        if (oil_ok_accum_ms >= OIL_OK_RECOVERY_MS)
+        {
+          oil_level = 0; // Clear warning after 10s continuous OK
+          oil_low_accum_ms = 0;
+        }
+      }
+    }
+    else
+    {
+      // Engine stopped or cranking: pause/decay low oil accumulation to prevent false alerts when parked
+      if (oil_low_accum_ms >= CAN_SENSOR_READ_INTERVAL_MS)
+      {
+        oil_low_accum_ms -= CAN_SENSOR_READ_INTERVAL_MS;
+      }
+      else
+      {
+        oil_low_accum_ms = 0;
+      }
+      oil_ok_accum_ms = 0;
+    }
 
     lastSensorTime = currentMillis;
   }
