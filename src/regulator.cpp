@@ -65,13 +65,13 @@ void regulatorTask(void *pvParameters) {
   const float voltage_alpha = 0.8f;
   const float current_sensor_offset_mv = 2495.44f; // Calibrated: -0.30A target vs -1.44A reading (nominal 2500.0f)
   const float current_sensor_mV_per_A = 4.0f; // mV per Amp (FS500E2T)
-  const float current_alpha = 0.3f; // Reduced phase lag from 0.2 while maintaining noise rejection
+  const float current_alpha = 0.40f; // Faster response (reduces phase delay to ~50ms) to eliminate rocking
 
-  // Baseline PID Gains (Tuned for physical units: Volts and Amps)
-  const float base_Kp_v = 1800.0f; // PWM counts per Volt error (~360 PWM for 0.2V error)
-  const float base_Ki_v = 350.0f;  // PWM counts per Volt-second error
-  const float base_Kp_i = 60.0f;   // PWM counts per Amp error (~120 PWM for 2A overcurrent, soft & stable)
-  const float base_Ki_i = 15.0f;   // PWM counts per Amp-second error
+  // Baseline PID Gains (Tuned for physical plant: ~20 PWM counts per Amp)
+  const float base_Kp_v = 900.0f;  // PWM counts per Volt error (~90 PWM for 0.1V error, suppresses ripple)
+  const float base_Ki_v = 150.0f;  // PWM counts per Volt-second error
+  const float base_Kp_i = 12.0f;   // PWM counts per Amp error (critically damped, eliminates 13A-22A oscillation)
+  const float base_Ki_i = 3.0f;    // PWM counts per Amp-second error (smooth zero-steady-state tracking)
 
   // Controller State Variables
   static float integral_v = 0.0f;
@@ -195,7 +195,7 @@ void regulatorTask(void *pvParameters) {
     // --- 6. RPM Gain Scheduling ---
     // If Front MCU is offline (or RPM reading is zero/invalid), fall back to REGULATOR_NOMINAL_RPM
     float effective_rpm = (frontMcuConnected && in_rpm >= 500) ? (float)in_rpm : REGULATOR_NOMINAL_RPM;
-    float rpm_scale = constrain(REGULATOR_NOMINAL_RPM / effective_rpm, 0.5f, 2.0f);
+    float rpm_scale = constrain(REGULATOR_NOMINAL_RPM / effective_rpm, 0.7f, 1.4f);
 
     float Kp_v = base_Kp_v * rpm_scale;
     float Ki_v = base_Ki_v * rpm_scale;
