@@ -395,9 +395,8 @@ class SecurityServerCallbacks : public NimBLEServerCallbacks
       return;
     }
 
-    // 2. If address is unrecognized, disconnect to block unauthorized access
-    Serial.printf("[SECURITY] Unrecognized phone %s — disconnecting.\n", devMacStr.c_str());
-    pServer->disconnect(desc->conn_handle);
+    // 2. Unrecognized phone — allow connection to proceed for PIN-based pairing
+    Serial.printf("[SECURITY] Unrecognized phone %s — awaiting PIN authentication.\n", devMacStr.c_str());
   }
 
   void onAuthenticationComplete(ble_gap_conn_desc *desc) override
@@ -449,8 +448,10 @@ class SecurityServerCallbacks : public NimBLEServerCallbacks
 
   bool onConfirmPIN(uint32_t pin) override
   {
-    Serial.printf("[SECURITY] Numeric comparison code: %06u — auto-confirming pairing\n", (unsigned int)pin);
-    return true;
+    bool match = (pin == BLE_PAIRING_PIN);
+    Serial.printf("[SECURITY] Numeric comparison PIN: %06u — %s\n",
+                  (unsigned int)pin, match ? "ACCEPTED" : "REJECTED");
+    return match;
   }
 
   void onDisconnect(NimBLEServer *pServer) override
@@ -502,8 +503,8 @@ void setupBLESecurity()
   if (!bleInitialized)
   {
     NimBLEDevice::init(BLE_DEVICE_NAME);
-    NimBLEDevice::setSecurityAuth(false, false, false); // No bonding needed — authorized via MAC/IRK whitelist directly!
-    NimBLEDevice::setSecurityIOCap(BLE_HS_IO_NO_INPUT_OUTPUT);
+    NimBLEDevice::setSecurityAuth(true, true, false);       // Bonding + MITM enforced, SC off for compatibility
+    NimBLEDevice::setSecurityIOCap(BLE_HS_IO_DISPLAY_ONLY); // ESP32 "displays" PIN, phone must type it
 
     // 1. Load auto-persisted IRKs from NVS first to populate runtime array
     loadPersistedIRKs();

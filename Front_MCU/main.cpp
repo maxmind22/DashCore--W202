@@ -389,10 +389,12 @@ void loop()
       // Safe cut window: right after monitored injector finishes, before the next cylinder fires
       if (!inj_busy && just_ended && elapsed_ticks < DFCO_INJ_WINDOW_TICKS)
       {
-        digitalWriteFast(inj_pin, HIGH);
-        injDisable = true;
         noInterrupts();
-        inj_just_ended = false;
+        if (!inj_active) {   // Re-verify no pulse started since snapshot
+          digitalWriteFast(inj_pin, HIGH);
+          injDisable = true;
+          inj_just_ended = false;
+        }
         interrupts();
       }
     }
@@ -421,10 +423,12 @@ void loop()
       // Safe cut: if engine is already stopped (rpm == 0) or in the safe inter-injector window
       if (!inj_busy && (rpm == 0 || (just_ended && elapsed_ticks < DFCO_INJ_WINDOW_TICKS)))
       {
-        digitalWriteFast(inj_pin, HIGH);
-        eco_inj_cut_active = true;
         noInterrupts();
-        inj_just_ended = false;
+        if (!inj_active) {   // Re-verify no pulse started since snapshot
+          digitalWriteFast(inj_pin, HIGH);
+          eco_inj_cut_active = true;
+          inj_just_ended = false;
+        }
         interrupts();
       }
     }
@@ -465,7 +469,7 @@ void loop()
 
   static int alive = 0;
   // Process CAN and auto-recover errors
-  while (mcp2515.readMessage(&canMsgRx) == MCP2515::ERROR_OK)
+  for (uint8_t i = 0; i < 10 && mcp2515.readMessage(&canMsgRx) == MCP2515::ERROR_OK; i++)
   {
     if (canMsgRx.can_id == 0x03)
     {

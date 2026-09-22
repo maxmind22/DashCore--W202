@@ -39,10 +39,23 @@
 #define REGULATOR_I_LIMIT 20.00f            // Maximum continuous battery charging current (A)
 #define REGULATOR_V_EMERGENCY 14.20f        // Emergency hardware cut threshold (V)
 #define REGULATOR_RELAY_COOLDOWN_MS 5000    // Latch duration to prevent relay chatter (ms)
+#define REGULATOR_RELAY_RESET_V 13.20f      // Relay re-engages only when voltage drops below this (1.0V hysteresis band)
 #define REGULATOR_RAMP_UP_PER_SEC 250.0f    // Soft-start slew rate (~4s for 0 -> 100% PWM)
 #define REGULATOR_RAMP_DOWN_PER_SEC 500.0f  // Controlled smooth ramp-down rate (prevents current plunge)
 #define REGULATOR_NOMINAL_RPM 1500.0f       // Baseline RPM for gain scheduling / Front MCU offline
 #define FUEL_ADC_INTERVAL_US 2000000UL      // Fuel sender ADC read interval (2s)
+
+// --- Alternator Regulator Calibration ---
+#define CURRENT_SENSOR_OFFSET_MV 2495.44f  // FS500E2T zero-current offset (calibrated from 2500.0 nominal)
+#define CURRENT_SENSOR_MV_PER_A  4.0f      // FS500E2T sensitivity (mV per Amp)
+#define VOLTAGE_EMA_ALPHA        0.80f     // Voltage exponential moving average filter coefficient
+#define CURRENT_EMA_ALPHA        0.40f     // Current EMA coefficient (faster response, ~50ms phase delay)
+
+// --- PID Gains (tuned for ~20 PWM counts per Amp plant response) ---
+#define PID_KP_VOLTAGE  900.0f   // PWM counts per Volt error
+#define PID_KI_VOLTAGE  150.0f   // PWM counts per Volt·second error
+#define PID_KP_CURRENT   12.0f   // PWM counts per Amp error
+#define PID_KI_CURRENT    3.0f   // PWM counts per Amp·second error
 
 // --- Threshold Constants ---
 #define OVERSPEED_KMH 58

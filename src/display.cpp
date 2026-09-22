@@ -235,12 +235,8 @@ void warnings(unsigned long now)
     boot_chime++;
     buzzer_state = 1;
   }
-  if (buzzer_state == 1)
+  if (!isTonePlaying())
   {
-    digitalWriteFast(buzzer_pin, HIGH);
-  }
-  else if (!isTonePlaying())
-  {
-    digitalWriteFast(buzzer_pin, LOW);
+    digitalWriteFast(buzzer_pin, buzzer_state ? HIGH : LOW);
   }
 }
