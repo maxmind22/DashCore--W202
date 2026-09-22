@@ -62,16 +62,16 @@ void regulatorTask(void *pvParameters) {
   esp_task_wdt_add(NULL);
   int consecutive_failures = 0;
 
-  const float voltage_alpha = 0.8f;
-  const float current_sensor_offset_mv = 2495.44f; // Calibrated: -0.30A target vs -1.44A reading (nominal 2500.0f)
-  const float current_sensor_mV_per_A = 4.0f; // mV per Amp (FS500E2T)
-  const float current_alpha = 0.40f; // Faster response (reduces phase delay to ~50ms) to eliminate rocking
+  const float voltage_alpha = VOLTAGE_EMA_ALPHA;
+  const float current_sensor_offset_mv = CURRENT_SENSOR_OFFSET_MV;
+  const float current_sensor_mV_per_A = CURRENT_SENSOR_MV_PER_A;
+  const float current_alpha = CURRENT_EMA_ALPHA;
 
   // Baseline PID Gains (Tuned for physical plant: ~20 PWM counts per Amp)
-  const float base_Kp_v = 900.0f;  // PWM counts per Volt error (~90 PWM for 0.1V error, suppresses ripple)
-  const float base_Ki_v = 150.0f;  // PWM counts per Volt-second error
-  const float base_Kp_i = 12.0f;   // PWM counts per Amp error (critically damped, eliminates 13A-22A oscillation)
-  const float base_Ki_i = 3.0f;    // PWM counts per Amp-second error (smooth zero-steady-state tracking)
+  const float base_Kp_v = PID_KP_VOLTAGE;
+  const float base_Ki_v = PID_KI_VOLTAGE;
+  const float base_Kp_i = PID_KP_CURRENT;
+  const float base_Ki_i = PID_KI_CURRENT;
 
   // Controller State Variables
   static float integral_v = 0.0f;
@@ -149,7 +149,7 @@ void regulatorTask(void *pvParameters) {
     bool relay_latched = false;
     if (relay_trip_time != 0) {
       if (millis() - relay_trip_time < REGULATOR_RELAY_COOLDOWN_MS ||
-          new_v >= REGULATOR_V_TARGET + 0.20f) {
+          new_v >= REGULATOR_RELAY_RESET_V) {
         relay_latched = true;
       } else {
         relay_trip_time = 0;
