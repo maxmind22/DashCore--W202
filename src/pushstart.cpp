@@ -890,15 +890,13 @@ void processPushStart(unsigned long now)
 
     // 2. Safety restart triggers:
     // - Battery drops below restart threshold (11.6V)
-    // - Max auto-stop duration exceeded (90s)
-    // - Engine coolant temp creeping high (> 95°C)
+    // - Engine coolant temp creeping high (> 98°C)
     // - Front MCU communication loss
-    bool maxDurationExceeded = (now - autoStopStartTime >= AUTO_STOP_MAX_DURATION_MS);
     bool batteryLow = (voltage_filtered < AUTO_STOP_RESTART_VOLTAGE);
     bool tempCreep = (temp_out > AUTO_STOP_MAX_TEMP_C);
     bool canLoss = (now - lastPacketTime > FRONT_MCU_TIMEOUT_MS);
 
-    if (brakeReleased || maxDurationExceeded || batteryLow || tempCreep || canLoss)
+    if (brakeReleased || batteryLow || tempCreep || canLoss)
     {
       // Restore injectors immediately over CAN
       ecoInjCutActive = false;
