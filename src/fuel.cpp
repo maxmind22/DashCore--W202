@@ -24,8 +24,12 @@ void resetFuelTripData(unsigned long now) {
   total_fuel_liters = 0.0f;
   total_distance_km = 0.0f;
   total_fuel_saved_liters = 0.0f;
+  accumulated_inj_time_us = 0;
+  accumulated_inj_pulses = 0;
+  spd_delta_pulses = 0;
   avg_l_100km = 0.0f;
   inst_val = 0.0f;
+
 
   Preferences prefs;
   prefs.begin("trip_data", false);

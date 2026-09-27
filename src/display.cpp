@@ -1,5 +1,6 @@
 #include "display.h"
 #include "pushstart.h"
+#include "security.h"
 
 void drawStaticGauge()
 {
@@ -187,27 +188,45 @@ void warnings(unsigned long now)
     buzzer_state = 1;
   }
 
-  // -------- Vehicle Lockdown / Authentication Warning --------//
-  static bool authWarningDrawn = false;
-  if (engineStartDisabled)
+  // -------- Phone Key Detection Warning --------//
+  static bool phoneKeyWarningDrawn = false;
+  if (!isPhoneAuthorized())
   {
     if (lowBlinkState)
     {
-      tv.setCursor(WARNING_X + 15, WARNING_Y + 50);
+      tv.setCursor(WARNING_X + 25, WARNING_Y + 42);
       tv.setTextColor(0xFF);
       tv.setTextSize(1);
-      tv.print("AUTH ERROR: ENGINE LOCKED");
-      authWarningDrawn = true;
+      tv.print("NO KEY DETECTED");
+      phoneKeyWarningDrawn = true;
     }
-    else if (authWarningDrawn)
+    else if (phoneKeyWarningDrawn)
     {
-      tv.fillRect(WARNING_X + 15, WARNING_Y + 50, 160, 8, 0x00);
+      tv.fillRect(WARNING_X + 25, WARNING_Y + 42, 100, 8, 0x00);
     }
   }
-  else if (authWarningDrawn)
+  else if (phoneKeyWarningDrawn)
   {
-    tv.fillRect(WARNING_X + 15, WARNING_Y + 50, 160, 8, 0x00);
-    authWarningDrawn = false;
+    tv.fillRect(WARNING_X + 25, WARNING_Y + 42, 100, 8, 0x00);
+    phoneKeyWarningDrawn = false;
+  }
+
+  // -------- Auto Start-Stop Active Indicator --------//
+  static bool ecoStopDrawn = false;
+  if (currentState == STATE_AUTO_STOP)
+  {
+    if (!ecoStopDrawn)
+    {
+      tv.setCursor(WARNING_X + 35, WARNING_Y + 60);
+      tv.setTextColor(0x1C); // Green in 8-bit palette
+      tv.print("[A] ECO STOP");
+      ecoStopDrawn = true;
+    }
+  }
+  else if (ecoStopDrawn)
+  {
+    tv.fillRect(WARNING_X + 35, WARNING_Y + 60, 90, 8, 0x00);
+    ecoStopDrawn = false;
   }
 
   //---------- ring boot chime  ---------
@@ -216,12 +235,8 @@ void warnings(unsigned long now)
     boot_chime++;
     buzzer_state = 1;
   }
-  if (buzzer_state == 1)
+  if (!isTonePlaying())
   {
-    digitalWriteFast(buzzer_pin, HIGH);
-  }
-  else if (!isTonePlaying())
-  {
-    digitalWriteFast(buzzer_pin, LOW);
+    digitalWriteFast(buzzer_pin, buzzer_state ? HIGH : LOW);
   }
 }

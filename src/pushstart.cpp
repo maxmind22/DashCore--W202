@@ -1,5 +1,9 @@
 #include "pushstart.h"
+#include "security.h"
 #include "fuel.h" // For resetFuelTripData
+#include "regulator.h"
+#include "can_comm.h"
+
 
 static LockRelayState lockRelayState = LOCK_IDLE;
 static unsigned long lockRelayStartTime = 0;
@@ -7,7 +11,7 @@ static unsigned long lockRelayStartTime = 0;
 static unsigned long unlockFirstPulseTime = 0;
 static unsigned long unlockLastPulseTime = 0;
 static uint8_t unlockPulseCount = 0;
-static bool lastUnlockPinState = LOW;
+static bool lastUnlockPinState = HIGH; // Ignore the initial wake pulse on boot/wake
 static unsigned long lastUnlockEdgeTime = 0;
 
 static ToneState toneState = TONE_IDLE;
@@ -54,9 +58,13 @@ void updateToneStateMachine(unsigned long now)
 {
   if (toneState == TONE_IDLE)
     return;
-  if (now == 0)
-    now = millis();
-  if (toneState == TONE_ON && (now - tonePhaseStart >= toneOnMs))
+  unsigned long currentMs = (now != 0) ? now : millis();
+  if (currentMs < tonePhaseStart)
+    currentMs = millis();
+  if (currentMs < tonePhaseStart)
+    return;
+
+  if (toneState == TONE_ON && (currentMs - tonePhaseStart >= toneOnMs))
   {
     digitalWriteFast(buzzer_pin, LOW);
     toneBeepsRemaining--;
@@ -66,14 +74,14 @@ void updateToneStateMachine(unsigned long now)
     }
     else
     {
-      tonePhaseStart = now;
+      tonePhaseStart = currentMs;
       toneState = TONE_OFF;
     }
   }
-  else if (toneState == TONE_OFF && (now - tonePhaseStart >= toneOffMs))
+  else if (toneState == TONE_OFF && (currentMs - tonePhaseStart >= toneOffMs))
   {
     digitalWriteFast(buzzer_pin, HIGH);
-    tonePhaseStart = now;
+    tonePhaseStart = currentMs;
     toneState = TONE_ON;
   }
 }
@@ -88,12 +96,9 @@ void playUnlockToggleTone(bool disabled)
     queueTone(1, 300, 0); // 1 long beep
 }
 
-void playLockdownToggleTone(bool lockdownActive)
+void playAuthSuccessTone()
 {
-  if (lockdownActive)
-    queueTone(3, 200, 200); // 3 short beeps
-  else
-    queueTone(1, 400, 0); // 1 long beep
+  queueTone(1, AUTH_SUCCESS_BEEP_MS, 0); // 1 single confirmation chime
 }
 
 void playAuthWarningTone()
@@ -135,10 +140,17 @@ void processUnlockSignals(unsigned long now)
         vehicleLockDisabled = !vehicleLockDisabled;
         playUnlockToggleTone(vehicleLockDisabled);
       }
-      else if (unlockPulseCount == 4)
+      else if (unlockPulseCount == 6)
       {
-        engineStartDisabled = !engineStartDisabled;
-        playLockdownToggleTone(engineStartDisabled);
+        phoneAuthBypassed = !phoneAuthBypassed;
+        if (phoneAuthBypassed)
+        {
+          queueTone(1, 800, 0, now); // 1 long beep (800ms) = phone auth bypassed
+        }
+        else
+        {
+          queueTone(4, 150, 100, now); // 4 short beeps = bypass disabled
+        }
       }
     }
 
@@ -149,8 +161,37 @@ void processUnlockSignals(unsigned long now)
   }
 }
 
+bool isEngineRunning(unsigned long now)
+{
+  if (now == 0)
+    now = millis();
+
+  if (currentState == STATE_RUNNING)
+    return true;
+
+  if (now - lastPacketTime < FRONT_MCU_CAN_TIMEOUT_MS)
+  {
+    if (rpm >= ENGINE_STARTED_RPM || new_rpm >= ENGINE_STARTED_RPM)
+      return true;
+  }
+
+  return false;
+}
+
 void setRelays(bool acc, bool ign, bool start)
 {
+  // HARDWARE SAFETY INTERLOCK:
+  // Strictly prevent starter engagement if system state is not actively in STATE_CRANKING
+  // (e.g. prevent engagement if already RUNNING, STANDBY, ACC, IGNITION).
+  if (start)
+  {
+    if (currentState != STATE_CRANKING || currentState == STATE_RUNNING)
+    {
+      start = false;
+      // Serial.println("[SAFETY] Starter engagement blocked: Engine running or invalid state!");
+    }
+  }
+
   digitalWrite(PIN_RELAY_ACC, acc ? HIGH : LOW);
   digitalWrite(PIN_RELAY_IGN, ign ? HIGH : LOW);
   digitalWrite(PIN_RELAY_START, start ? HIGH : LOW);
@@ -187,7 +228,13 @@ void wakeupCANController()
 
 void enterPowerDownSleep()
 {
-  // Save trip stats to NVS Flash memory right before shutdown
+  // --- ORDERED SHUTDOWN: Stop everything safely before deep sleep ---
+
+  // 1. Safely stop the regulator FreeRTOS task FIRST (running on Core 0, does I2C)
+  // This prevents the SPI flash cache panic when writing to Preferences below!
+  stopRegulatorTask();
+
+  // 2. Save trip stats to NVS Flash memory (safe now that Core 0 task is stopped)
   Preferences prefs;
   prefs.begin("trip_data", false);
   prefs.putFloat("fuel", total_fuel_liters);
@@ -196,38 +243,6 @@ void enterPowerDownSleep()
   prefs.putFloat("saved", total_fuel_saved_liters);
   prefs.end();
 
-  // --- ORDERED SHUTDOWN: Stop everything safely before deep sleep ---
-
-  // 1. Safely stop the regulator FreeRTOS task first (running on Core 0, does I2C)
-  //    Keep the original 1s WDT alive by resetting it in the wait loop.
-  if (regulatorTaskHandle != NULL)
-  {
-    regulatorTaskRunning = false;
-    for (int timeout = 0; timeout < 100; timeout++)
-    {
-      esp_task_wdt_reset(); // Keep current WDT alive while waiting for task exit
-      taskYIELD();
-      delay(5);
-      if (regulatorTaskHandle == NULL)
-        break;
-    }
-    // Use critical section to safely check-and-delete (prevents race with self-deleting task)
-    portENTER_CRITICAL(&dataMux);
-    TaskHandle_t h = regulatorTaskHandle;
-    regulatorTaskHandle = NULL;
-    portEXIT_CRITICAL(&dataMux);
-    if (h != NULL)
-    {
-      vTaskDelete(h);
-    }
-  }
-
-  // 2. Now that regulatorTask is stopped, extend WDT to 5s for remaining shutdown
-  esp_task_wdt_delete(NULL);
-  esp_task_wdt_deinit();
-  esp_task_wdt_init(5, true); // 5s timeout with panic=true
-  esp_task_wdt_add(NULL);
-
   // 3. Turn off field coil PWM and detach LEDC
   ledcWrite(0, 0);
   ledcDetachPin(FIELD_PIN);
@@ -235,6 +250,11 @@ void enterPowerDownSleep()
   // 4. Stop TV display (I2S DMA) — must stop before deep sleep or DMA crash
   stopTVDisplay();
   delay(10); // Let DMA finish any in-flight transfer
+
+  // 4.1 Ensure BLE scanner is completely shut down and reset session auth
+  teardownBLESecurity();
+  phoneAuthorized = false;
+  phoneAuthBypassed = false;
 
   // 5. Put MCP2515 CAN controller to sleep (SPI device)
   sleepCANController();
@@ -267,9 +287,9 @@ void enterPowerDownSleep()
   gpio_hold_en((gpio_num_t)PIN_5V_GATE);
   gpio_hold_en((gpio_num_t)field_relay_pin);
   gpio_hold_en((gpio_num_t)buzzer_pin);
-  gpio_deep_sleep_hold_en();
 
   // Allow relay switching and vehicle state to settle completely (prevent transient unlock)
+  esp_task_wdt_reset();
   delay(200);
 
   // 7.1 Activate vehicle locking relay briefly to ensure it remains locked
@@ -280,8 +300,10 @@ void enterPowerDownSleep()
     digitalWrite(PIN_RELAY_LOCK, HIGH); // Ground the lock wire via relay
     delay(200);                         // Ground pulse duration of 200ms
     digitalWrite(PIN_RELAY_LOCK, LOW);
-    pinMode(PIN_RELAY_LOCK, INPUT); // Float pin to prevent sleep leakage
   }
+  esp_task_wdt_reset();
+  gpio_hold_en((gpio_num_t)PIN_RELAY_LOCK);
+  gpio_deep_sleep_hold_en();
 
   // 8. Turn off the 3.3V digital gate (must happen after locking relay is pulsed)
   digitalWrite(PIN_3V3_DIGITAL_GATE, LOW); // Cut 3.3V pull-ups/shifter
@@ -313,18 +335,43 @@ void setupPushStartPins()
   pinMode(PIN_BTN_START, INPUT);
   pinMode(PIN_INPUT_BRAKE, INPUT);
   pinMode(PIN_WAKE_UNLOCK, INPUT);
+
+  // Initialize to current state or HIGH to ignore the wake pulse that booted the MCU
+  lastUnlockPinState = HIGH;
 }
 
 void processPushStart(unsigned long now)
 {
   if (now == 0)
     now = millis();
+  processBLEEvents();
   updateLockRelay(now);
   updateToneStateMachine(now);
 
   static enum { CRANK_PRIME,
                 CRANK_SOLENOID } crankStage = CRANK_PRIME;
   static unsigned long crankStageTime = 0;
+  static unsigned long lastEngineStopTime = 0;
+
+  // Auto-synchronize to STATE_RUNNING if engine is detected running while in standby/acc/ign
+  // (e.g. after MCU reset while driving, or manual push/roll start)
+  if (currentState != STATE_RUNNING && currentState != STATE_CRANKING)
+  {
+    if (now - lastPacketTime < FRONT_MCU_CAN_TIMEOUT_MS &&
+        (rpm >= ENGINE_STARTED_RPM || new_rpm >= ENGINE_STARTED_RPM))
+    {
+      // Only auto-sync if not in the middle of an intentional shutdown
+      if (lastEngineStopTime == 0 || now - lastEngineStopTime >= ENGINE_SPINDOWN_SAFETY_MS)
+      {
+        currentState = STATE_RUNNING;
+        setRelays(true, true, false); // Keep ACC & IGN ON, START OFF
+        lastEngineStartTime = now;
+        standstillStartTime = 0;
+        isEcoRestart = false;
+        ecoInjCutActive = false;
+      }
+    }
+  }
 
   // Continuously monitor unlock pulses while engine is not running.
   if (currentState != STATE_RUNNING)
@@ -332,10 +379,11 @@ void processPushStart(unsigned long now)
     processUnlockSignals(now);
   }
 
-  // Edge detection for push button
+  // Edge detection for push button (Active Low, Pull-Up)
   static bool lastBtnState = HIGH;
   bool currentBtnState = digitalRead(PIN_BTN_START);
-  bool btnPressed = (currentBtnState == LOW && lastBtnState == HIGH);
+  bool btnEdgeDown = (currentBtnState == LOW && lastBtnState == HIGH);
+  bool btnEdgeUp = (currentBtnState == HIGH && lastBtnState == LOW);
   lastBtnState = currentBtnState;
 
   bool brakeHeld = (digitalRead(PIN_INPUT_BRAKE) == LOW);
@@ -343,6 +391,7 @@ void processPushStart(unsigned long now)
 
   static unsigned long buttonDownTime = 0;
   static bool buttonLongPressHandled = false;
+  bool btnShortPressed = false;
 
   if (currentBtnState == LOW)
   {
@@ -366,14 +415,24 @@ void processPushStart(unsigned long now)
   }
   else
   {
+    if (btnEdgeUp)
+    {
+      // Fired on release: only accept as a tap if held for at least 50ms (debounce)
+      // and not already handled by long-press
+      if (!buttonLongPressHandled && buttonDownTime != 0 && (now - buttonDownTime >= 50))
+      {
+        btnShortPressed = true;
+      }
+    }
     buttonDownTime = 0;
     buttonLongPressHandled = false;
   }
 
-  if (btnPressed)
+  if (btnEdgeDown)
   {
     standbyStartTime = now;
   }
+
 
   // Boot-lock: Lock 2 minute after booting when in ACC or IGN state
   static bool bootLockDone = false;
@@ -436,22 +495,8 @@ void processPushStart(unsigned long now)
   switch (currentState)
   {
   case STATE_SLEEP:
-    // Woken up by deep sleep reset (unlock pulse) -> Authenticated
-    currentState = STATE_STANDBY;
-    standbyStartTime = now;
-    lastButtonPressTime = 0; // Clear cooldown on first boot
-
-    wakeupCANController();
-    startTVDisplay();
-    if (regulatorTaskHandle != NULL)
-    {
-      vTaskResume(regulatorTaskHandle);
-    }
-    break;
-
   case STATE_STANDBY:
   {
-    // Serial.println("OFF");
     // Relays: ACC OFF, IGN OFF, START OFF
     static bool standbyBrakeCheckPending = false;
     static unsigned long standbyBrakeCheckTime = 0;
@@ -462,13 +507,23 @@ void processPushStart(unsigned long now)
       if (digitalRead(PIN_INPUT_BRAKE) == LOW)
       {
         standbyBrakeCheckPending = false;
-        if (!engineStartDisabled)
+        if (isEngineRunning(now))
+        {
+          currentState = STATE_RUNNING;
+          setRelays(true, true, false);
+          break;
+        }
+        if (isPhoneAuthorized())
         {
           currentState = STATE_CRANKING;
         }
         else
         {
-          // Serial.println("[LOCKDOWN] Engine start blocked! PLZ AUTHENTICATE");
+          if (!isBLEScanning())
+          {
+            triggerBLERescan(BLE_RESCAN_TIMEOUT_MS);
+          }
+          // Serial.println("[SECURITY] Engine start blocked! PLZ AUTHENTICATE");
           playAuthWarningTone();
           currentState = STATE_STANDBY;
         }
@@ -485,9 +540,13 @@ void processPushStart(unsigned long now)
     {
       setRelays(false, false, false);
 
-      if (btnPressed && (now - lastButtonPressTime >= BUTTON_COOLDOWN_MS))
+      if (btnShortPressed && (now - lastButtonPressTime >= BUTTON_COOLDOWN_MS))
       {
         lastButtonPressTime = now;
+        if (!isPhoneAuthorized() && !isBLEScanning())
+        {
+          triggerBLERescan(BLE_RESCAN_TIMEOUT_MS);
+        }
         // Temporarily turn on ACC & IGN to power the brake switch circuit
         setRelays(true, true, false);
         standbyBrakeCheckPending = true;
@@ -496,6 +555,7 @@ void processPushStart(unsigned long now)
     }
     break;
   }
+
 
   case STATE_ACC:
   {
@@ -512,14 +572,25 @@ void processPushStart(unsigned long now)
       if (digitalRead(PIN_INPUT_BRAKE) == LOW)
       {
         accBrakeCheckPending = false;
-        if (!engineStartDisabled)
+        if (isEngineRunning(now))
+        {
+          currentState = STATE_RUNNING;
+          setRelays(true, true, false);
+          stoppedToAcc = false;
+          break;
+        }
+        if (isPhoneAuthorized())
         {
           currentState = STATE_CRANKING;
           stoppedToAcc = false;
         }
         else
         {
-          Serial.println("[LOCKDOWN] Engine start blocked! PLZ AUTHENTICATE");
+          if (!isBLEScanning())
+          {
+            triggerBLERescan(BLE_RESCAN_TIMEOUT_MS);
+          }
+          Serial.println("[SECURITY] Engine start blocked! PLZ AUTHENTICATE");
           playAuthWarningTone();
           currentState = STATE_ACC;
         }
@@ -544,9 +615,13 @@ void processPushStart(unsigned long now)
     {
       setRelays(true, false, false);
 
-      if (btnPressed && (now - lastButtonPressTime >= BUTTON_COOLDOWN_MS))
+      if (btnShortPressed && (now - lastButtonPressTime >= BUTTON_COOLDOWN_MS))
       {
         lastButtonPressTime = now;
+        if (!isPhoneAuthorized() && !isBLEScanning())
+        {
+          triggerBLERescan(BLE_RESCAN_TIMEOUT_MS);
+        }
         // Temporarily turn on IGN to power the brake switch circuit
         setRelays(true, true, false);
         accBrakeCheckPending = true;
@@ -560,12 +635,23 @@ void processPushStart(unsigned long now)
     // Relays: ACC ON, IGN ON, START OFF (POS2)
     setRelays(true, true, false);
 
-    if (btnPressed && (now - lastButtonPressTime >= BUTTON_COOLDOWN_MS))
+    if (btnShortPressed && (now - lastButtonPressTime >= BUTTON_COOLDOWN_MS))
     {
       lastButtonPressTime = now;
+      if (!isPhoneAuthorized() && !isBLEScanning())
+      {
+        triggerBLERescan(BLE_RESCAN_TIMEOUT_MS);
+      }
+
       if (brakeHeld)
       {
-        if (!engineStartDisabled)
+        if (isEngineRunning(now))
+        {
+          currentState = STATE_RUNNING;
+          setRelays(true, true, false);
+          break;
+        }
+        if (isPhoneAuthorized())
         {
           currentState = STATE_CRANKING;
         }
@@ -583,28 +669,56 @@ void processPushStart(unsigned long now)
     break;
 
   case STATE_CRANKING:
-    if (engineStartDisabled)
+    if (!isPhoneAuthorized())
     {
-      // Serial.println("[DEBUG] Cranking aborted: Engine start disabled (Lockdown)");
+      // Serial.println("[DEBUG] Cranking aborted: Engine start not authorized");
       setRelays(true, false, false); // Abort cranking immediately
       currentState = STATE_ACC;
       playAuthWarningTone();
       crankStage = CRANK_PRIME;
       crankStageTime = 0;
+      isEcoRestart = false;
+      ecoInjCutActive = false;
       break;
     }
+
     // Non-blocking stage machine for cranking sequence
 
     if (crankStage == CRANK_PRIME)
     {
-      // Step 1: Go to POS2 (ACC & IGN ON) for fuel pump/ECU prime (500ms)
+      // Step 1: Go to POS2 (ACC & IGN ON) for fuel pump/ECU prime
       setRelays(true, true, false);
       if (crankStageTime == 0)
       {
         crankStageTime = now;
       }
-      if (now - crankStageTime >= CRANK_PRIME_MS)
+
+      // Safety check: If engine is already running (starter is OFF, so no starter electrical noise),
+      // transition immediately to STATE_RUNNING without ever engaging the starter!
+      if (now - lastPacketTime < FRONT_MCU_CAN_TIMEOUT_MS && currentRpm >= ENGINE_STARTED_RPM)
       {
+        currentState = STATE_RUNNING;
+        lastEngineStartTime = now;
+        standstillStartTime = 0;
+        isEcoRestart = false;
+        ecoInjCutActive = false;
+        crankStage = CRANK_PRIME;
+        crankStageTime = 0;
+        break;
+      }
+
+      unsigned long requiredPrime = isEcoRestart ? ECO_CRANK_PRIME_MS : COLD_CRANK_PRIME_MS;
+      if (now - crankStageTime >= requiredPrime)
+      {
+        // Starter protection: If engine is still rotating/spinning down (> 50 RPM),
+        // hold in prime stage until stationary before engaging starter pinion
+        if (now - lastPacketTime < FRONT_MCU_CAN_TIMEOUT_MS && currentRpm > ENGINE_SPINDOWN_RPM_THRESHOLD)
+        {
+          if (now - crankStageTime < MAX_CRANK_TIME_MS)
+          {
+            break; // Hold in CRANK_PRIME with starter OFF
+          }
+        }
         crankStage = CRANK_SOLENOID;
         crankStageTime = now; // Reset timer for max crank limit
       }
@@ -614,12 +728,29 @@ void processPushStart(unsigned long now)
       // Step 2: Engage starter solenoid (ACC ON, IGN ON, START ON)
       setRelays(true, true, true);
 
-      // Only evaluate RPM after a minimum crank time to avoid noise spikes
-      if ((now - crankStageTime >= MIN_CRANK_TIME_MS) && (currentRpm > ENGINE_STARTED_RPM))
+      // Evaluate start success:
+      // - If Front MCU is live during starting, check RPM threshold strictly after MIN_CRANK_TIME_MS (600ms)
+      //   to mitigate the noisy RPM signal during starter engagement that causes premature cutoff/starting failure.
+      // - Else if Front MCU is offline, use 1.2s cranking time to transition into STATE_RUNNING
+      bool startDetected = false;
+      if (now - lastPacketTime < FRONT_MCU_CAN_TIMEOUT_MS)
+      {
+        startDetected = (now - crankStageTime >= MIN_CRANK_TIME_MS) && (currentRpm > ENGINE_STARTED_RPM);
+      }
+      else
+      {
+        startDetected = (now - crankStageTime >= OFFLINE_CRANK_TIME_MS);
+      }
+
+      if (startDetected)
       {
         // Engine started successfully
         currentState = STATE_RUNNING;
         setRelays(true, true, false); // Disengage starter, keep ACC/IGN on
+        lastEngineStartTime = now;    // Record start time for cooldown tracking
+        standstillStartTime = 0;
+        isEcoRestart = false;
+        ecoInjCutActive = false;
         crankStage = CRANK_PRIME;     // Reset stages
         crankStageTime = 0;
       }
@@ -630,6 +761,8 @@ void processPushStart(unsigned long now)
         setRelays(true, false, false); // Disengage starter to ACC for another try (w202 prevent double starting)
         currentState = STATE_ACC;
         standbyStartTime = now; // Reset 2-min timeout
+        isEcoRestart = false;
+        ecoInjCutActive = false;
         crankStage = CRANK_PRIME;
         crankStageTime = 0;
         stoppedToAcc = false; // Reset flag on crank timeout
@@ -641,22 +774,76 @@ void processPushStart(unsigned long now)
     // Relays: ACC ON, IGN ON, START OFF (Engine running)
     setRelays(true, true, false);
 
-    // Handle Engine Stall Safety
-    // Only treat rpm==0 as stall if CAN packets are still being received
-    // (prevents ignition cut on CAN bus failure at highway speed)
-    if (currentRpm == 0 && (now - lastPacketTime < 2000))
+    // Track continuous standstill duration (spd == 0 with brake held)
+    if (spd == 0 && brakeHeld)
     {
-      currentState = STATE_ACC;
-      standbyStartTime = now;
-      stoppedToAcc = false;
+      if (standstillStartTime == 0)
+      {
+        standstillStartTime = now;
+      }
+    }
+    else
+    {
+      standstillStartTime = 0;
+    }
+
+    // Auto Start-Stop evaluation with aggressive wear-protection gates (always enabled)
+    {
+      bool autoStopPermitted = (lastEngineStartTime != 0) &&
+                               (now - lastEngineStartTime >= AUTO_STOP_COOLDOWN_MS) &&
+                               (temp_out >= AUTO_STOP_MIN_TEMP_C) &&
+                               (temp_out <= AUTO_STOP_MAX_TEMP_C) &&
+                               (voltage_filtered >= AUTO_STOP_MIN_VOLTAGE) &&
+                               (now - lastPacketTime < FRONT_MCU_TIMEOUT_MS);
+
+      if (autoStopPermitted && standstillStartTime != 0 &&
+          (now - standstillStartTime >= AUTO_STOP_STANDSTILL_DELAY_MS))
+      {
+        currentState = STATE_AUTO_STOP;
+        autoStopStartTime = now;
+        ecoInjCutActive = true; // Signal Front MCU over CAN 0x03 to cut injectors
+        standstillStartTime = 0;
+        break;
+      }
+    }
+
+    // Handle Engine Stall Safety with confirmation debounce
+    // Only treat rpm==0 as stall if CAN packets are currently actively being received from Front MCU
+    // and 0 RPM persists for at least ENGINE_STALL_DEBOUNCE_MS (prevents ignition cut on transient glitches/stumbles)
+    static unsigned long zeroRpmStartTime = 0;
+    if (currentRpm == 0 && (now - lastPacketTime < FRONT_MCU_CAN_TIMEOUT_MS))
+    {
+      if (zeroRpmStartTime == 0)
+      {
+        zeroRpmStartTime = now;
+      }
+      else if (now - zeroRpmStartTime >= ENGINE_STALL_DEBOUNCE_MS)
+      {
+        lastEngineStopTime = now;
+        currentState = STATE_ACC;
+        standbyStartTime = now;
+        stoppedToAcc = false;
+        standstillStartTime = 0;
+        isEcoRestart = false;
+        ecoInjCutActive = false;
+        zeroRpmStartTime = 0;
+      }
+    }
+    else
+    {
+      zeroRpmStartTime = 0;
     }
 
     // Handle Engine Stop Button Press (Only if vehicle is stationary)
-    if (btnPressed && (now - lastButtonPressTime >= BUTTON_COOLDOWN_MS))
+    if (btnShortPressed && (now - lastButtonPressTime >= BUTTON_COOLDOWN_MS))
     {
       if (spd == 0)
       { // Safety check: speed must be zero
         lastButtonPressTime = now;
+        lastEngineStopTime = now;
+        standstillStartTime = 0;
+        isEcoRestart = false;
+        ecoInjCutActive = false;
         bool brakeHeld = (digitalRead(PIN_INPUT_BRAKE) == LOW);
         if (brakeHeld)
         {
@@ -674,5 +861,63 @@ void processPushStart(unsigned long now)
       }
     }
     break;
+
+  case STATE_AUTO_STOP:
+  {
+    // Relays: ACC ON, IGN ON, START OFF (ECU awake, fuel cut via Front MCU CAN)
+    setRelays(true, true, false);
+
+    // Keep eco injector cut active over CAN
+    ecoInjCutActive = true;
+
+    // Check manual button press: Driver shuts down car completely
+    if (btnShortPressed && (now - lastButtonPressTime >= BUTTON_COOLDOWN_MS))
+    {
+      lastButtonPressTime = now;
+      lastEngineStopTime = now;
+      ecoInjCutActive = false;
+      isEcoRestart = false;
+      setRelays(false, false, false); // Turn off all relays
+      currentState = STATE_STANDBY;
+      standbyStartTime = now;
+      stoppedToAcc = false;
+      break;
+    }
+
+    // Restart triggers:
+    // 1. Primary restart trigger: Driver releases foot from brake
+    bool brakeReleased = (digitalRead(PIN_INPUT_BRAKE) == HIGH);
+
+    // 2. Safety restart triggers:
+    // - Battery drops below restart threshold (11.6V)
+    // - Engine coolant temp creeping high (> 98°C)
+    // - Front MCU communication loss
+    bool batteryLow = (voltage_filtered < AUTO_STOP_RESTART_VOLTAGE);
+    bool tempCreep = (temp_out > AUTO_STOP_MAX_TEMP_C);
+    bool canLoss = (now - lastPacketTime > FRONT_MCU_TIMEOUT_MS);
+
+    if (brakeReleased || batteryLow || tempCreep || canLoss)
+    {
+      // Restore injectors immediately over CAN
+      ecoInjCutActive = false;
+      sendCanHealthFrame(now); // Immediately command Front MCU to restore injectors!
+
+      // Safety check: If engine is already running (e.g. caught upon injector restore or didn't stall),
+      // transition directly to STATE_RUNNING without engaging starter!
+      if (now - lastPacketTime < FRONT_MCU_CAN_TIMEOUT_MS && currentRpm >= ENGINE_STARTED_RPM)
+      {
+        currentState = STATE_RUNNING;
+        isEcoRestart = false;
+        setRelays(true, true, false);
+        break;
+      }
+
+      isEcoRestart = true;
+      currentState = STATE_CRANKING;
+      crankStage = CRANK_PRIME;
+      crankStageTime = 0;
+    }
+    break;
+  }
   }
 }

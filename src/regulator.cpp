@@ -18,30 +18,70 @@ void recoverI2CBus(int sdaPin, int sclPin) {
       }
     }
   }
+
+  // Generate standard I2C STOP condition so all slaves reset state machine
+  digitalWrite(sclPin, LOW);
+  delayMicroseconds(5);
+  pinMode(sdaPin, OUTPUT);
+  digitalWrite(sdaPin, LOW);
+  delayMicroseconds(5);
+  digitalWrite(sclPin, HIGH);
+  delayMicroseconds(5);
+  digitalWrite(sdaPin, HIGH);
+  delayMicroseconds(5);
+  pinMode(sdaPin, INPUT);
 }
+
+void stopRegulatorTask() {
+  if (regulatorTaskHandle != NULL) {
+    regulatorTaskRunning = false;
+    for (int timeout = 0; timeout < 100; timeout++) {
+      esp_task_wdt_reset();
+      taskYIELD();
+      vTaskDelay(pdMS_TO_TICKS(5));
+      if (regulatorTaskHandle == NULL)
+        break;
+    }
+    portENTER_CRITICAL(&dataMux);
+    TaskHandle_t h = regulatorTaskHandle;
+    regulatorTaskHandle = NULL;
+    portEXIT_CRITICAL(&dataMux);
+    if (h != NULL) {
+      esp_task_wdt_delete(h);
+      vTaskDelete(h);
+    }
+  }
+  // Guarantee safe hardware state upon task stop
+  ledcWrite(0, 0);
+  field_pwm = 0;
+  digitalWriteFast(field_relay_pin, LOW);
+}
+
 
 void regulatorTask(void *pvParameters) {
   esp_task_wdt_add(NULL);
   int consecutive_failures = 0;
 
-  const float voltage_alpha = 0.8f;               // 0.3
-  const float current_sensor_offset_mv = 2500.0f; // 2519
-  const float current_sensor_mV_per_A = 4.0f; // 4.0f; // mV per Amp (FS500E2T)
-  const float current_limit_upper = 20.000f;  // start pulling back above this
-  const float current_alpha = 0.2f;
-  // const float current_alpha = 0.3f; // previously 0.2
-  const float base_Kp = 30.000f;
-  const float base_Ki = 5.0f;
-  const float Kd = 0.0f;
+  const float voltage_alpha = VOLTAGE_EMA_ALPHA;
+  const float current_sensor_offset_mv = CURRENT_SENSOR_OFFSET_MV;
+  const float current_sensor_mV_per_A = CURRENT_SENSOR_MV_PER_A;
+  const float current_alpha = CURRENT_EMA_ALPHA;
 
-  static float integral_error = 0.0f;
+  // Baseline PID Gains (Tuned for physical plant: ~20 PWM counts per Amp)
+  const float base_Kp_v = PID_KP_VOLTAGE;
+  const float base_Ki_v = PID_KI_VOLTAGE;
+  const float base_Kp_i = PID_KP_CURRENT;
+  const float base_Ki_i = PID_KI_CURRENT;
+
+  // Controller State Variables
+  static float integral_v = 0.0f;
+  static float integral_i = 0.0f;
+  static float active_pwm = 0.0f;
   static unsigned long last_regulator_time = 0;
   static uint32_t last_fuel_time = 0;
-  static uint32_t last_stack_check = 0;
+  static unsigned long undercharging_start_time = 0;
+  static unsigned long relay_trip_time = 0;
 
-  static float last_error = 0.0f;
-  const float v_target = 13.6000f; // Max voltage is 13.6V
-  SystemState local_state = STATE_SLEEP;
   unsigned long runningStartTime = 0;
   const unsigned long CHARGE_DELAY_MS = 2000; // 2 seconds delay before charging starts
 
@@ -54,41 +94,36 @@ void regulatorTask(void *pvParameters) {
       portEXIT_CRITICAL(&dataMux);
       vTaskDelete(NULL); // Delete self safely
     }
-    // uint32_t start = micros();
 
-    //-------------------- Voltage measurement
+    // --- 1. ADC Voltage and Current Measurement ---
     int voltage_raw = adc.readADC_SingleEnded(0);
     int16_t current_raw_t = adc.readADC_SingleEnded(1);
 
-    // Glitch protection: only update if reading is sane
     esp_task_wdt_reset(); // Reset WDT after potentially blocking I2C reads
+
+    float new_v = voltage_filtered;
+    float new_c = current_A_filtered;
 
     if (voltage_raw > 0 && current_raw_t > 0) {
       consecutive_failures = 0;
       // GAIN_ONE is 0.125mV per bit (0.000125V)
-      // Pre-calculated voltage multiplier: 0.000125f * 4.33766718718175f
+      // Voltage divider multiplier: 0.000125f * 4.337667187f = 0.0005422084f
       float voltage = voltage_raw * 0.0005422084f;
-      float new_v =
-          voltage_alpha * voltage + (1.0f - voltage_alpha) * voltage_filtered;
+      new_v = voltage_alpha * voltage + (1.0f - voltage_alpha) * voltage_filtered;
 
-      // Pre-calculated current multiplier: 0.000125V * 1000 = 0.125mV per bit
+      // Current conversion: 0.125mV per bit
       float current_mv = current_raw_t * 0.125f;
       float current_raw =
           (current_mv - current_sensor_offset_mv) / current_sensor_mV_per_A;
-      float new_c = current_alpha * current_raw +
-                    (1.0f - current_alpha) * current_A_filtered;
-
-      portENTER_CRITICAL(&dataMux);
-      voltage_filtered = new_v;
-      current_A_filtered = new_c;
-      portEXIT_CRITICAL(&dataMux);
+      new_c = current_alpha * current_raw +
+              (1.0f - current_alpha) * current_A_filtered;
     } else {
       consecutive_failures++;
       if (consecutive_failures > 50) {
         // I2C Bus Recovery
         Wire.end();
-        vTaskDelay(pdMS_TO_TICKS(10));              // Yield CPU properly instead of blocking delay()
-        recoverI2CBus(21, 22); // Toggle SCL to release any stuck I2C slave
+        vTaskDelay(pdMS_TO_TICKS(10)); // Yield CPU properly instead of blocking delay()
+        recoverI2CBus(PIN_I2C_SDA, PIN_I2C_SCL); // Toggle SCL to release any stuck I2C slave
         Wire.begin();
         Wire.setClock(100000);
         Wire.setTimeOut(20); // Ensure I2C transaction timeout is set in recovery
@@ -99,105 +134,56 @@ void regulatorTask(void *pvParameters) {
       }
     }
 
-    // --- Evaluate charging system state ---
-    bool severe_failure = false;
     bool sensor_error = (consecutive_failures > 5);
 
-    // 1. Emergency hard cut on severe overvoltage, overcurrent, or sensor
-    // failure
-    if (voltage_filtered >= v_target + 0.6f || current_A_filtered > EMERGENCY_OVERCURRENT_A ||
-        sensor_error) {
-      digitalWriteFast(field_relay_pin, HIGH);
-      severe_failure = true;
-    } else
-      digitalWriteFast(field_relay_pin, LOW);
+    // --- 2. Emergency Protection & Relay Anti-Chatter Hysteresis ---
+    bool trip_condition = (new_v >= REGULATOR_V_EMERGENCY ||
+                           new_c > EMERGENCY_OVERCURRENT_A ||
+                           sensor_error);
 
-    // 2. Logical malfunctions (regulator output doesn't match expected
-    // response)
-    // - High voltage/current despite commanding low field (runaway/short)
-    // - Low voltage and no current despite commanding high field (open
-    // circuit/broken belt) We use <= 0.5A instead of 0.0A to account for small
-    // ADC noise around zero
-    portENTER_CRITICAL(&dataMux);
-    local_rpm = rpm;
-    local_state = currentState;
-    portEXIT_CRITICAL(&dataMux);
+    if (trip_condition) {
+      relay_trip_time = millis();
+    }
 
-    bool logical_failure =
-        ((voltage_filtered >= v_target + 0.4f || current_A_filtered >= EMERGENCY_OVERCURRENT_A) ||
-         (voltage_filtered <= v_target - 0.2f && current_A_filtered <= 0.0f &&
-          (local_state == STATE_RUNNING || local_rpm > ENGINE_ACTIVE_RPM_THRESHOLD)));
+    // Latch relay open for minimum cooldown and until voltage falls below safe limit
+    bool relay_latched = false;
+    if (relay_trip_time != 0) {
+      if (millis() - relay_trip_time < REGULATOR_RELAY_COOLDOWN_MS ||
+          new_v >= REGULATOR_RELAY_RESET_V) {
+        relay_latched = true;
+      } else {
+        relay_trip_time = 0;
+      }
+    }
 
-    // Consolidate state hierarchy
-    int next_charge_state = 0;
-    if (severe_failure || logical_failure) {
-      next_charge_state = 1; // charging malfunction warning
-    } else if (voltage_filtered < v_target - 1.4) // If voltage is very low while engine is running.
-    {
-      next_charge_state = 2; // battery low warning
+    bool severe_failure = relay_latched;
+    if (relay_latched) {
+      digitalWriteFast(field_relay_pin, HIGH); // Open high-side safety relay
     } else {
-      next_charge_state = 0; // normal
+      digitalWriteFast(field_relay_pin, LOW);  // Closed (normal operation)
     }
 
+    // --- 3. Snapshot Shared Engine State ---
     portENTER_CRITICAL(&dataMux);
-    charge_state = next_charge_state;
-    if (charge_state == 0) {
-      last_charge = millis();
-    }
+    uint16_t in_rpm = rpm;
+    SystemState in_state = currentState;
+    unsigned long in_last_packet = lastPacketTime;
     portEXIT_CRITICAL(&dataMux);
-    // --- Target settings ---
 
-    // Calculate dt (time elapsed in seconds) to make PID immune to loop delays
+    bool frontMcuConnected = (millis() - in_last_packet < FRONT_MCU_CAN_TIMEOUT_MS);
+
+    // --- 4. Loop Timing dt Calculation ---
     uint32_t current_micros = micros();
     float dt = (current_micros - last_regulator_time) / 1000000.0f;
     if (last_regulator_time == 0 || dt > 0.1f || dt <= 0.0f) {
-      dt = 0.020f; // Default to 20ms on first run or severe lag (typical loop time)
+      dt = 0.025f; // Default nominal loop time
     }
     last_regulator_time = current_micros;
 
-    // 1. Seamless CC/CV Error
-    // We increase PWM until we hit EITHER 13.6V or our 20A limit.
-    // The most restrictive target (smallest error) commands the loop seamlessly.
-    float err_v = (v_target - voltage_filtered) * 100;
-    float err_i = (current_limit_upper - current_A_filtered) * 10;
-    float err = (err_v < err_i) ? err_v : err_i;
+    // --- 5. Charging Permission & Soft Start Delay ---
+    bool engine_charging_allowed = (in_state == STATE_RUNNING);
 
-    float p_term = base_Kp * err;
-
-    if (isfinite(err) && isfinite(dt)) {
-      integral_error += (err * dt);
-    }
-
-    if (!isfinite(integral_error))
-      integral_error = 0.0f;
-    if (integral_error > 1023.0f)
-      integral_error = 1023.0f;
-    if (integral_error < 0.0f)
-      integral_error = 0.0f;
-
-    float i_term = base_Ki * integral_error;
-    last_error = err;
-
-    int voltage_pwm = constrain((int)(p_term + i_term), 0, 1023);
-
-    // 2. Absolute Hard Voltage Ceiling (Safety Override)
-    // We already have CC/CV in the PID above. These overrides are just to
-    // provide an extra push if we cross the absolute limits, but they must
-    // not be so aggressive that they cause oscillation.
-    int safety_pwm = voltage_pwm;
-    // Extra pullback if overvoltage occurs (Safety backup for PID)
-    if (voltage_filtered >= v_target + 0.2f) {
-      float ov_err = ((v_target + 0.2f) - voltage_filtered) * 100;
-      safety_pwm = safety_pwm + (int)(200.0f * ov_err);
-    }
-    // Extra pullback if overcurrent occurs (Safety backup for PID)
-    if (current_A_filtered >= current_limit_upper + 10.0f) {
-      float oi_err = ((current_limit_upper + 10.0f) - current_A_filtered) * 10;
-      safety_pwm = safety_pwm + (int)(200.0f * oi_err); // Mild push-back
-    }
-
-    // Reset running start time if engine is not running or not in RUNNING state
-    if (local_state != STATE_RUNNING) {
+    if (in_state != STATE_RUNNING) {
       runningStartTime = 0;
     } else if (runningStartTime == 0) {
       runningStartTime = millis();
@@ -206,39 +192,132 @@ void regulatorTask(void *pvParameters) {
     bool delay_active = (runningStartTime != 0 &&
                          (millis() - runningStartTime < CHARGE_DELAY_MS));
 
-    // Force field coil off if engine is not running (neither STATE_RUNNING nor
-    // rpm > ENGINE_ACTIVE_RPM_THRESHOLD), during start delay, or sensor error occurs
-    if (!(local_state == STATE_RUNNING || local_rpm > ENGINE_ACTIVE_RPM_THRESHOLD) || delay_active ||
-        sensor_error) {
-      field_pwm = 0;
-      integral_error = 0.0f; // Reset integrator
+    // --- 6. Static Baseline Gains (RPM dependence disabled for stabilization) ---
+    float Kp_v = base_Kp_v;
+    float Ki_v = base_Ki_v;
+    float Kp_i = base_Kp_i;
+    float Ki_i = base_Ki_i;
+
+    // --- 7. Dual Parallel PI Regulators (CC/CV) ---
+    // Voltage PI Controller (Target 13.60V)
+    float err_v = REGULATOR_V_TARGET - new_v;
+    float p_term_v = Kp_v * err_v;
+    float target_pwm_v = p_term_v + integral_v;
+
+    // Current PI Controller (Ceiling 20.00A charge into battery)
+    float err_i = REGULATOR_I_LIMIT - new_c;
+    float p_term_i = Kp_i * err_i;
+    float target_pwm_i = p_term_i + integral_i;
+
+    // Minimum Selection Arbiter: Whichever loop commands less field excitation takes control
+    float commanded_pwm = (target_pwm_v < target_pwm_i) ? target_pwm_v : target_pwm_i;
+    float clamped_pwm = constrain(commanded_pwm, 0.0f, 1023.0f);
+
+    // Bumpless Transfer & Anti-Windup Tracking:
+    if (target_pwm_v <= target_pwm_i) {
+      // Voltage loop is in control (CV Mode)
+      bool saturated = (clamped_pwm >= 1023.0f && err_v > 0.0f) ||
+                       (clamped_pwm <= 0.0f && err_v < 0.0f);
+      if (isfinite(err_v) && isfinite(dt) && !saturated) {
+        integral_v += (Ki_v * err_v * dt);
+      }
+      integral_v = constrain(integral_v, 0.0f, 1023.0f);
+      // Track current integrator to active output to prevent windup while in CV mode
+      integral_i = clamped_pwm;
     } else {
-      field_pwm = constrain(safety_pwm, 0, 1023);
+      // Current loop is in control (CC Mode)
+      bool saturated = (clamped_pwm >= 1023.0f && err_i > 0.0f) ||
+                       (clamped_pwm <= 0.0f && err_i < 0.0f);
+      if (isfinite(err_i) && isfinite(dt) && !saturated) {
+        integral_i += (Ki_i * err_i * dt);
+      }
+      integral_i = constrain(integral_i, 0.0f, 1023.0f);
+      // Track voltage integrator to active output to allow current loop full headroom up to 20A
+      integral_v = clamped_pwm;
     }
 
+    // --- 8. Field Soft-Start Slew Rate Limiter ---
+    float max_step_up = REGULATOR_RAMP_UP_PER_SEC * dt;
+    float max_step_down = REGULATOR_RAMP_DOWN_PER_SEC * dt;
+
+    if (!engine_charging_allowed || delay_active || sensor_error || relay_latched) {
+      active_pwm = 0.0f;
+      integral_v = 0.0f;
+      integral_i = 0.0f;
+    } else {
+      if (clamped_pwm > active_pwm + max_step_up) {
+        active_pwm += max_step_up;
+      } else if (clamped_pwm < active_pwm - max_step_down) {
+        active_pwm -= max_step_down;
+      } else {
+        active_pwm = clamped_pwm;
+      }
+    }
+
+    field_pwm = (int)constrain(active_pwm, 0.0f, 1023.0f);
     ledcWrite(0, field_pwm);
 
-    // --- Auxiliary Sensors (Not used for regulator control, but read here to
-    // avoid I2C contention) ---
-    if (current_micros - last_fuel_time >= 100000) {
-      int new_fuel = adc.readADC_SingleEnded(2);
-      if (new_fuel >= 0) // Only update on valid I2C read
-      {
-        portENTER_CRITICAL(&dataMux);
-        ads_fuel = new_fuel;
-        portEXIT_CRITICAL(&dataMux);
+    // --- 9. Diagnostics & Malfunction Detection ---
+    bool overvoltage_fault = (new_v >= REGULATOR_V_TARGET + 0.40f);
+
+    // Broken belt / open circuit detection:
+    // Only evaluate if Front MCU is online, engine is running, start delay passed,
+    // field is near 100% duty (saturated), engine RPM >= 1200,
+    // and voltage/current remain completely unresponsive.
+    bool undercharging_detected = false;
+    if (frontMcuConnected && in_state == STATE_RUNNING && !delay_active) {
+      if (field_pwm >= 900 && in_rpm >= 1200 &&
+          new_v <= (REGULATOR_V_TARGET - 0.40f) && new_c <= 0.0f) {
+        undercharging_detected = true;
+      }
+    }
+
+    if (undercharging_detected) {
+      if (undercharging_start_time == 0) undercharging_start_time = millis();
+    } else {
+      undercharging_start_time = 0;
+    }
+
+    // Persist for 3 continuous seconds before asserting malfunction
+    bool unresponsiveness_fault = (undercharging_start_time != 0 &&
+                                   (millis() - undercharging_start_time >= 3000));
+
+    bool logical_failure = overvoltage_fault || unresponsiveness_fault;
+
+    int next_charge_state = 0;
+    if (severe_failure || logical_failure) {
+      next_charge_state = 1; // Charging system malfunction warning
+    } else if (in_state == STATE_RUNNING && !delay_active &&
+               new_v < (REGULATOR_V_TARGET - 1.40f)) {
+      next_charge_state = 2; // Battery low warning (< 12.2V while running)
+    } else {
+      next_charge_state = 0; // Normal
+    }
+
+    // --- 10. Sample Auxiliary Fuel ADC (every 2s) ---
+    int new_fuel_val = -1;
+    if (current_micros - last_fuel_time >= FUEL_ADC_INTERVAL_US) {
+      int read_f = adc.readADC_SingleEnded(2);
+      if (read_f >= 0) {
+        new_fuel_val = read_f;
       }
       last_fuel_time = current_micros;
     }
 
-    // --- Stack monitoring ---
-    // if (current_micros - last_stack_check >= 1000000) // Every 1 second
-    // {
-    //   free_stack = uxTaskGetStackHighWaterMark(NULL);
-    //   last_stack_check = current_micros;
-    // }
-    // task_duration = micros() - start;
-    vTaskDelay(pdMS_TO_TICKS(20)); // Use vTaskDelay instead of vTaskDelayUntil to always yield
+    // --- 11. Write Shared Variables Atomically ---
+    portENTER_CRITICAL(&dataMux);
+    voltage_filtered = new_v;
+    current_A_filtered = new_c;
+    charge_state = next_charge_state;
+    if (charge_state == 0) {
+      last_charge = millis();
+    }
+    if (new_fuel_val >= 0) {
+      ads_fuel = new_fuel_val;
+    }
+    portEXIT_CRITICAL(&dataMux);
+
+    vTaskDelay(pdMS_TO_TICKS(20)); // Yield CPU to Core 0 scheduler
     last_regulator_heartbeat = millis(); // Signal Core 1 that regulator is alive
     esp_task_wdt_reset();
   }

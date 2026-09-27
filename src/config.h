@@ -31,17 +31,46 @@
 #define coolant_level_pin 34
 #define FIELD_PIN 12
 #define field_relay_pin 14
+#define PIN_I2C_SDA 21
+#define PIN_I2C_SCL 22
+
+// --- Alternator Regulator Constants ---
+#define REGULATOR_V_TARGET 13.60f           // LiFePO4 safe full absorption voltage (3.40V/cell)
+#define REGULATOR_I_LIMIT 20.00f            // Maximum continuous battery charging current (A)
+#define REGULATOR_V_EMERGENCY 14.20f        // Emergency hardware cut threshold (V)
+#define REGULATOR_RELAY_COOLDOWN_MS 5000    // Latch duration to prevent relay chatter (ms)
+#define REGULATOR_RELAY_RESET_V 13.20f      // Relay re-engages only when voltage drops below this (1.0V hysteresis band)
+#define REGULATOR_RAMP_UP_PER_SEC 250.0f    // Soft-start slew rate (~4s for 0 -> 100% PWM)
+#define REGULATOR_RAMP_DOWN_PER_SEC 500.0f  // Controlled smooth ramp-down rate (prevents current plunge)
+#define REGULATOR_NOMINAL_RPM 1500.0f       // Baseline RPM for gain scheduling / Front MCU offline
+#define FUEL_ADC_INTERVAL_US 2000000UL      // Fuel sender ADC read interval (2s)
+
+// --- Alternator Regulator Calibration ---
+#define CURRENT_SENSOR_OFFSET_MV 2495.44f  // FS500E2T zero-current offset (calibrated from 2500.0 nominal)
+#define CURRENT_SENSOR_MV_PER_A  4.0f      // FS500E2T sensitivity (mV per Amp)
+#define VOLTAGE_EMA_ALPHA        0.80f     // Voltage exponential moving average filter coefficient
+#define CURRENT_EMA_ALPHA        0.40f     // Current EMA coefficient (faster response, ~50ms phase delay)
+
+// --- PID Gains (tuned for ~20 PWM counts per Amp plant response) ---
+#define PID_KP_VOLTAGE  900.0f   // PWM counts per Volt error
+#define PID_KI_VOLTAGE  150.0f   // PWM counts per Volt·second error
+#define PID_KP_CURRENT   12.0f   // PWM counts per Amp error
+#define PID_KI_CURRENT    3.0f   // PWM counts per Amp·second error
 
 // --- Threshold Constants ---
 #define OVERSPEED_KMH 58
-#define OVERHEAT_TEMP_C 96
+#define OVERHEAT_TEMP_C 108
 #define ENGINE_STARTED_RPM 400
-const unsigned long MIN_CRANK_TIME_MS = 600; // Blind crank duration to ignore RPM spikes
+#define ENGINE_SPINDOWN_RPM_THRESHOLD 50
+const unsigned long MIN_CRANK_TIME_MS = 600;      // Blind crank duration to ignore RPM spikes
+const unsigned long ENGINE_SPINDOWN_SAFETY_MS = 2000;    // Cooldown duration to prevent auto-syncing during intentional stop
+const unsigned long OFFLINE_CRANK_TIME_MS = 1200; // Cranking duration when Front MCU is offline
 #define ENGINE_ACTIVE_RPM_THRESHOLD 200
 #define EMERGENCY_OVERCURRENT_A 40.0f
 #define FRONT_MCU_TIMEOUT_MS 5000
 #define FRONT_MCU_CAN_TIMEOUT_MS 1000
-#define FRONT_MCU_CAN_SEND_INTERVAL_US 50000.0f // Front MCU sends every 50ms
+const unsigned long ENGINE_STALL_DEBOUNCE_MS = 1500; // Require 1.5s persistent 0 RPM before cutting ignition
+#define FRONT_MCU_CAN_SEND_INTERVAL_US 50000.0f      // Front MCU sends every 50ms
 #define CHARGE_MALFUNCTION_DELAY_MS 20000
 #define BATTERY_LOW_DELAY_MS 10000
 #define CAN_HEALTH_SEND_INTERVAL_MS 200
@@ -49,6 +78,11 @@ const unsigned long MIN_CRANK_TIME_MS = 600; // Blind crank duration to ignore R
 #define DISPLAY_METRICS_UPDATE_MS 250
 #define FUEL_UPDATE_INTERVAL_MS 1000
 #define RPM_UPDATE_INTERVAL_MS 500
+
+// --- Video Output Configuration ---
+// Set to true to test PAL video output (50Hz, 256x240, +16 vertical scanlines)
+// Set to false to revert to NTSC video output (60Hz, 256x224)
+#define USE_PAL_VIDEO false
 
 // Display layout constants
 #define FUEL_X 5
@@ -71,8 +105,8 @@ const unsigned long MIN_CRANK_TIME_MS = 600; // Blind crank duration to ignore R
 #define WARNING_Y 20
 
 // Fuel/Trip Constants
-#define PULSES_PER_KM 24179
-const float PULSES_PER_KM_F = 24179.0f;
+#define PULSES_PER_KM 24714
+const float PULSES_PER_KM_F = 24714.33f;
 const int LOW_FUEL_LEVEL = 10;
 const float INJECTOR_FLOW_RATE_CC_MIN = 228.0f; // Rated 228 cc/min @ 3.8 bar OEM regulator pressure
 const int NUM_INJECTORS = 4;
@@ -81,13 +115,45 @@ const uint32_t MAX_INJ_PULSE_PER_INTERVAL_US = 1000000; // 1,000,000us (1s): han
 #define RTC_TRIP_MAGIC_KEY 0xCAFE4567
 
 // Timeout Constants
-const unsigned long STANDBY_TIMEOUT_MS = 120000;    // 2 Minute
+const unsigned long STANDBY_TIMEOUT_MS = 60000;     // 1 Minute
 const unsigned long ACCESSORY_TIMEOUT_MS = 3600000; // 1 Hour
 const unsigned long BUTTON_COOLDOWN_MS = 500;
 const unsigned long BUTTON_LONGPRESS_RESET_MS = 3000;
 const unsigned long MAX_CRANK_TIME_MS = 5000;
 const unsigned long BRAKE_CHECK_SETTLE_MS = 100; // Window (ms) to energize and continuously sample brake circuit
-const unsigned long CRANK_PRIME_MS = 500;        // ECU boot & fuel rail prime delay (ms)
+
+// --- BLE PHONE KEY SECURITY ---
+#define BLE_SCAN_TIMEOUT_MS 10000  // Initial boot/wake scan duration (10s)
+#define BLE_RESCAN_TIMEOUT_MS 5000 // Quick on-demand scan on start button press (5s)
+#define BLE_MIN_RSSI -95           // Minimum RSSI filter in dBm (-128 to disable)
+#define AUTH_SUCCESS_BEEP_MS 500   // Confirmation beep duration when phone is authorized (ms)
+
+#if __has_include("secrets.h")
+#include "secrets.h"
+#else
+// Fallback defaults if secrets.h is not created yet (copy from secrets.example.h)
+#define BLE_DEVICE_NAME "MB-BT-Audio"
+#define BLE_PAIRING_PIN 123456
+static const char *const BLE_AUTHORIZED_MACS[] = {
+    "00:00:00:00:00:00"};
+static const size_t NUM_AUTHORIZED_MACS = sizeof(BLE_AUTHORIZED_MACS) / sizeof(BLE_AUTHORIZED_MACS[0]);
+static const uint8_t BLE_AUTHORIZED_IRKS[][16] = {
+    {0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+     0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00}};
+static const size_t NUM_AUTHORIZED_IRKS = sizeof(BLE_AUTHORIZED_IRKS) / sizeof(BLE_AUTHORIZED_IRKS[0]);
+#endif
+
+// Auto Start-Stop Constants & Wear-Protection Thresholds
+const unsigned long AUTO_STOP_STANDSTILL_DELAY_MS = 10000; // 10s standstill before stop
+const unsigned long AUTO_STOP_COOLDOWN_MS = 45000;         // 45s engine runtime cooldown between stops
+const int AUTO_STOP_MIN_TEMP_C = 82;                       // Coolant temp >= 82°C
+const int AUTO_STOP_MAX_TEMP_C = 98;                       // Coolant temp <= 98°C
+const float AUTO_STOP_MIN_VOLTAGE = 12.00f;                // Min battery voltage to allow stop
+const float AUTO_STOP_RESTART_VOLTAGE = 11.60f;            // Battery floor triggering auto-restart
+const unsigned long AUTO_STOP_MAX_DURATION_MS = 90000;     // 90s max stop duration before restart
+const unsigned long COLD_CRANK_PRIME_MS = 500;             // ECU cold boot & trigger sync delay (ms)
+const unsigned long ECO_CRANK_PRIME_MS = 30;               // Fast warm restart prime delay (ms)
+const float BASELINE_IDLE_FUEL_L_PER_HR = 0.90f;           // Idle fuel consumption baseline (L/h)
 
 // --- SYSTEM STATES ---
 enum SystemState
@@ -97,7 +163,8 @@ enum SystemState
   STATE_ACC,
   STATE_IGNITION,
   STATE_CRANKING,
-  STATE_RUNNING
+  STATE_RUNNING,
+  STATE_AUTO_STOP
 };
 
 enum ToneState
