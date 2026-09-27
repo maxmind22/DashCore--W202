@@ -1,6 +1,10 @@
 #include "globals.h"
 
-ESP_8_BIT_GFX tv(true, 8);
+#if USE_PAL_VIDEO
+ESP_8_BIT_GFX tv(false, 8); // PAL (50Hz, 256x240, +16 scanlines)
+#else
+ESP_8_BIT_GFX tv(true, 8);  // NTSC (60Hz, 256x224)
+#endif
 Adafruit_ADS1115 adc;
 MCP2515 mcp2515(5, 8000000);
 portMUX_TYPE dataMux = portMUX_INITIALIZER_UNLOCKED;
@@ -10,12 +14,19 @@ struct can_frame canMsgTx;
 
 RTC_DATA_ATTR SystemState currentState = STATE_SLEEP;
 RTC_DATA_ATTR bool vehicleLockDisabled = false;
-RTC_DATA_ATTR bool engineStartDisabled = false;
+volatile bool phoneAuthorized = false;
+RTC_DATA_ATTR bool phoneAuthBypassed = false;
 
 unsigned long standbyStartTime = 0;
 unsigned long lastButtonPressTime = 0;
 bool stoppedToAcc = false;
 volatile bool regulatorTaskRunning = true;
+
+bool isEcoRestart = false;
+bool ecoInjCutActive = false;
+unsigned long lastEngineStartTime = 0;
+unsigned long autoStopStartTime = 0;
+unsigned long standstillStartTime = 0;
 
 unsigned long lastTime = 0;
 unsigned long last_spd_correction = 0;
@@ -107,5 +118,4 @@ int chg2 = 0;
 volatile uint32_t last_charge = 0;
 volatile uint32_t last_regulator_heartbeat = 0;
 volatile uint16_t rpm = 0;
-int field_pwm = 0;
-uint16_t local_rpm = 0;
+volatile int field_pwm = 0;

@@ -1,24 +1,52 @@
 #include "can_comm.h"
 #include "fuel.h"
 
-void checkCanErrors() {
+void checkCanErrors(unsigned long now) {
   uint8_t errFlags = mcp2515.getErrorFlags();
   if (errFlags != 0) {
-    // Clear overflow flags to resume reception
+    // Clear overflow flags in EFLG without wiping CANINTF unread interrupt flags
     if (errFlags & (MCP2515::EFLG_RX0OVR | MCP2515::EFLG_RX1OVR)) {
-      mcp2515.clearRXnOVR();
+      mcp2515.clearRXnOVRFlags();
     }
 
-    // Only completely reset the chip if it goes into Bus-Off (fatal state).
-    // Do NOT interfere if it's just in Error Passive (TXEP/RXEP); it will
-    // self-recover.
-    if (errFlags & MCP2515::EFLG_TXBO) {
+    // Reset the chip if in Bus-Off or stuck in Error Passive (TXEP)
+    if (errFlags & (MCP2515::EFLG_TXBO | MCP2515::EFLG_TXEP)) {
       mcp2515.reset();
       mcp2515.setBitrate(CAN_500KBPS, MCP_8MHZ);
       mcp2515.setNormalOneShotMode();
     }
   }
+
+  // Auto-recovery for stale/disconnected communication:
+  // If no packets received for > 2000ms, periodically reset and re-initialize MCP2515 every 1000ms
+  // to clear any silicon lockup or stuck buffer states without requiring an ESP32 power cycle.
+  static unsigned long lastResetAttempt = 0;
+  if ((now - lastPacketTime > 2000) && (now - lastResetAttempt >= 1000)) {
+    mcp2515.reset();
+    mcp2515.setBitrate(CAN_500KBPS, MCP_8MHZ);
+    mcp2515.setNormalOneShotMode();
+    lastResetAttempt = now;
+  }
 }
+
+void sendCanHealthFrame(unsigned long now) {
+  bool regulator_ok =
+      (regulatorTaskHandle != NULL) && (now - last_regulator_heartbeat < REGULATOR_HEARTBEAT_TIMEOUT_MS);
+  health_state = regulator_ok ? 100 : 0;
+
+  canMsgTx.can_id = 0x03;
+  canMsgTx.can_dlc = 8;
+  canMsgTx.data[0] = health_state;
+  canMsgTx.data[1] = ecoInjCutActive ? 1 : 0;
+  canMsgTx.data[2] = 0;
+  canMsgTx.data[3] = 0;
+  canMsgTx.data[4] = 0;
+  canMsgTx.data[5] = 0;
+  canMsgTx.data[6] = 0;
+  canMsgTx.data[7] = 0;
+  mcp2515.sendMessage(&canMsgTx);
+}
+
 
 #define INJ_HISTORY_SAMPLES 20 // 20 samples @ 50ms = 1000ms rolling window
 
@@ -58,7 +86,7 @@ void drainCanRxBuffer(unsigned long now) {
       last_seq_02 = rx_seq_02;
 
       // Transition 0 -> 1: injDisable just engaged (DFCO cutoff starts).
-      // Calculate and latch the average net injector pulse width over the 1 second before cutoff.
+      // Calculate and latch the average net injector pulse width over the active period before cutoff.
       if (injector_state == 0 && new_inj_state == 1) {
         float total_net_us = 0.0f;
         uint32_t total_p = 0;
@@ -67,7 +95,10 @@ void drainCanRxBuffer(unsigned long now) {
           total_p += inj_history_pulses[k];
         }
         if (total_p > 0 && total_net_us > 0.0f) {
-          last_active_inj_pulse_us = total_net_us / (float)total_p;
+          float avg_net = total_net_us / (float)total_p;
+          if (avg_net >= 500.0f) {
+            last_active_inj_pulse_us = avg_net;
+          }
         }
       }
 
@@ -111,11 +142,13 @@ void drainCanRxBuffer(unsigned long now) {
           float net_pulse_us = (float)delta_time_us - ((float)delta_pulses * dead_time_us);
           if (net_pulse_us < 0.0f) net_pulse_us = 0.0f;
 
-          // Record into rolling 1-sec buffer while injectors are actively firing
-          if (injector_state == 0) {
-            inj_history_net_us[history_idx] = net_pulse_us;
-            inj_history_pulses[history_idx] = delta_pulses;
-            history_idx = (history_idx + 1) % INJ_HISTORY_SAMPLES;
+          // Record into rolling buffer while injectors are actively firing (filter out near-zero overrun coasting)
+          if (injector_state == 0 && delta_pulses > 0) {
+            if ((net_pulse_us / (float)delta_pulses) >= 400.0f) {
+              inj_history_net_us[history_idx] = net_pulse_us;
+              inj_history_pulses[history_idx] = delta_pulses;
+              history_idx = (history_idx + 1) % INJ_HISTORY_SAMPLES;
+            }
           }
 
           float raw_duty = 0.0f;

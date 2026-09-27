@@ -3,6 +3,7 @@
 #include "globals.h"
 
 void processPushStart(unsigned long now = 0);
+bool isEngineRunning(unsigned long now = 0);
 void setRelays(bool acc, bool ign, bool start);
 void setupPushStartPins();
 void enterPowerDownSleep();
@@ -17,6 +18,6 @@ void queueTone(int beeps, unsigned long onMs, unsigned long offMs, unsigned long
 void updateToneStateMachine(unsigned long now = 0);
 bool isTonePlaying();
 void playUnlockToggleTone(bool disabled);
-void playLockdownToggleTone(bool lockdownActive);
 void playAuthWarningTone();
+void playAuthSuccessTone();
 void processUnlockSignals(unsigned long now = 0);

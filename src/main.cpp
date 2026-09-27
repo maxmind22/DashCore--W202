@@ -5,6 +5,8 @@
 #include "pushstart.h"
 #include "can_comm.h"
 #include "fuel.h"
+#include "security.h"
+#include <Fonts/FreeSansBold24pt7b.h>
 
 //=================== setup ===============//
 void setup()
@@ -17,6 +19,8 @@ void setup()
   digitalWrite(PIN_3V3_DIGITAL_GATE, HIGH); // Power 3.3V pull-ups/level shifter
 
   delay(30); // Allow voltage rails to stabilize
+  Serial.begin(250000);
+  delay(20); // Let UART stabilize
 
   // Release any GPIO holds from previous deep sleep
   gpio_hold_dis((gpio_num_t)PIN_RELAY_ACC);
@@ -26,6 +30,7 @@ void setup()
   gpio_hold_dis((gpio_num_t)field_relay_pin);
   gpio_hold_dis((gpio_num_t)buzzer_pin);
   gpio_hold_dis((gpio_num_t)PIN_3V3_DIGITAL_GATE);
+  gpio_hold_dis((gpio_num_t)PIN_RELAY_LOCK);
   gpio_deep_sleep_hold_dis();
 
   setupPushStartPins();
@@ -37,7 +42,7 @@ void setup()
   regulatorTaskRunning = true;
   stoppedToAcc = false;
 
-  recoverI2CBus(21, 22);
+  recoverI2CBus(PIN_I2C_SDA, PIN_I2C_SCL);
   Wire.begin();
   Wire.setClock(100000); // Slower clock for better noise immunity in engine bay
   Wire.setTimeOut(20);   // Abort I2C transaction if it takes > 20ms
@@ -50,7 +55,7 @@ void setup()
   }
   WiFi.mode(WIFI_OFF);
   WiFi.disconnect(true);
-  btStop();
+  setupBLESecurity(); // Initialize BLE scanner to detect phone (auto-shuts down upon detection)
   tv.begin();
   tv.copyAfterSwap = true;
 
@@ -81,8 +86,6 @@ void setup()
   pinModeFast(coolant_level_pin, INPUT);
   pinMode(field_relay_pin, OUTPUT);
   digitalWriteFast(field_relay_pin, LOW); // Start with field relay off
-  Serial.begin(250000);
-  delay(50); // Let UART stabilize
 
   SPI.begin();
   mcp2515.reset();
@@ -120,21 +123,7 @@ void loop()
   static unsigned long lastCanSendTimeMs = 0;
   if (now - lastCanSendTimeMs >= CAN_HEALTH_SEND_INTERVAL_MS)
   {
-    bool regulator_ok =
-        (regulatorTaskHandle == NULL) || (now - last_regulator_heartbeat < REGULATOR_HEARTBEAT_TIMEOUT_MS);
-    health_state = regulator_ok ? 100 : 0;
-
-    canMsgTx.can_id = 0x03;
-    canMsgTx.can_dlc = 8;
-    canMsgTx.data[0] = health_state;
-    canMsgTx.data[1] = 0;
-    canMsgTx.data[2] = 0;
-    canMsgTx.data[3] = 0;
-    canMsgTx.data[4] = 0;
-    canMsgTx.data[5] = 0;
-    canMsgTx.data[6] = 0;
-    canMsgTx.data[7] = 0;
-    mcp2515.sendMessage(&canMsgTx);
+    sendCanHealthFrame(now);
     lastCanSendTimeMs = now;
   }
 
@@ -185,20 +174,21 @@ void loop()
   float local_current_A_filtered = current_A_filtered;
   portEXIT_CRITICAL(&dataMux);
 
-  fuel_in_temporary =
-      local_ads_fuel; // Use pre-fetched value from regulatorTask
-  if (fuel_in_temporary < /*2190 max*/ 22000 &&
-      fuel_in_temporary > 1200 /*1326 min*/)
+  fuel_in_temporary = local_ads_fuel; // Pre-fetched value from regulatorTask
+  static bool fuel_initialized = false;
+  if (fuel_in_temporary < 22000 && fuel_in_temporary > 1200)
   {
     raw = fuel_in_temporary;
+    if (!fuel_initialized)
+    {
+      smoothVal = (float)raw;
+      filtered = raw;
+      lastValue = raw;
+      fuel_initialized = true;
+    }
   }
-  if (lastTime == 0)
-  {
-    smoothVal = (float)raw;
-    filtered = raw;
-    lastValue = raw;
-  }
-  else
+
+  if (fuel_initialized)
   {
     int delta = abs(raw - lastValue);
     if (delta <= 2000)
@@ -222,12 +212,12 @@ void loop()
       last_fuel_correction = now;
     }
     lastValue = filtered;
+    smoothVal =
+        0.001f * filtered +
+        (1.0f - 0.001f) * smoothVal; // Exponential moving average for smoothing
+    percent = (int)getFuelPercent(smoothVal);
+    percent = constrain(percent, 0, 100);
   }
-  smoothVal =
-      0.001f * filtered +
-      (1.0f - 0.001f) * smoothVal; // Exponential moving average for smoothing
-  percent = (int)getFuelPercent(smoothVal);
-  percent = constrain(percent, 0, 100);
 
   //-------------------- Coolant level
   coolant_level = digitalReadFast(coolant_level_pin);
@@ -236,8 +226,8 @@ void loop()
   //==============================================//
 
   // CAN drain (catch anything that arrived during frame sync)
-  checkCanErrors();
   drainCanRxBuffer(now);
+  checkCanErrors(now);
 
   portENTER_CRITICAL(&dataMux);
   rpm = new_rpm;
@@ -248,42 +238,55 @@ void loop()
   int spd_in = spd_l;
 
   // --------------- filter SPD ----------------
-  if (lastTime == 0)
+  bool canTimedOut = (now - lastPacketTime > FRONT_MCU_CAN_TIMEOUT_MS);
+  if (lastTime == 0 || canTimedOut)
   {
     last_spd = spd_in;
-  }
-  if (abs(spd_in - last_spd) <= 10)
-  { // sample accepted
     spd = spd_in;
-    goodSamples2++;
   }
   else
   {
-    spd = last_spd; // sample rejected, set it to previous good value
-    badSamples2++;
-  }
-  if (now - last_spd_correction >= 5000)
-  { // sample error correction
-    if (goodSamples2 < badSamples2)
-    {
+    if (abs(spd_in - last_spd) <= 10)
+    { // sample accepted
       spd = spd_in;
+      goodSamples2++;
     }
-    goodSamples2 = 0;
-    badSamples2 = 0;
-    last_spd_correction = now;
+    else
+    {
+      spd = last_spd; // sample rejected, set it to previous good value
+      badSamples2++;
+    }
+    if (now - last_spd_correction >= 5000)
+    { // sample error correction
+      if (goodSamples2 < badSamples2)
+      {
+        spd = spd_in;
+      }
+      goodSamples2 = 0;
+      badSamples2 = 0;
+      last_spd_correction = now;
+    }
   }
 
   if (spd != last_spd || lastTime == 0)
   {
+    // Clear previous speed number area (prevents character overlap with custom fonts)
+    tv.fillRect(80, 149, 85, 38, 0x00);
 
-    tv.setCursor(72, 150);
-    tv.setTextColor(0xFF, 0x00);
-    tv.setTextSize(5);
-    char spdStr[4];
-    snprintf(spdStr, sizeof(spdStr), "%3d", spd);
-    tv.print(spdStr);
+    tv.setFont(&FreeSansBold24pt7b);
+    tv.setTextColor(0xFF);
     tv.setTextSize(1);
+    char spdStr[6];
+    snprintf(spdStr, sizeof(spdStr), "%d", spd);
 
+    int16_t x1, y1;
+    uint16_t w, h;
+    tv.getTextBounds(spdStr, 0, 0, &x1, &y1, &w, &h);
+    int xPos = 160 - w;      // Right-align against x = 160
+    tv.setCursor(xPos, 184); // Baseline at y = 184
+    tv.print(spdStr);
+
+    tv.setFont(); // Reset to default font for remaining UI elements
     last_spd = spd;
   }
 
@@ -478,7 +481,31 @@ void loop()
     lastRpmUpdateTime = now;
   }
 
-  temp_out = map((int)raw2, 250, 950, 40, 120);
+  // Calibrated for 2.3kΩ pull-down: 40°C = 437 ADC, 60°C = 636 ADC, 91°C = 846 ADC, 96°C = 871 ADC, 120°C = 990 ADC
+  if (raw2 <= 437)
+  {
+    temp_out = 40;
+  }
+  else if (raw2 >= 990)
+  {
+    temp_out = 120;
+  }
+  else if (raw2 < 636)
+  {
+    temp_out = map((int)raw2, 437, 636, 40, 60);
+  }
+  else if (raw2 < 846)
+  {
+    temp_out = map((int)raw2, 636, 846, 60, 91);
+  }
+  else if (raw2 < 871)
+  {
+    temp_out = map((int)raw2, 846, 871, 91, 96);
+  }
+  else
+  {
+    temp_out = map((int)raw2, 871, 990, 96, 120);
+  }
   temp_out = constrain(temp_out, 40, 120);
 
   if (now - lastPacketTime > FRONT_MCU_CAN_TIMEOUT_MS)
@@ -566,12 +593,22 @@ void loop()
 
     if (injector_state == 1 && rpm > 0)
     {
-      // Calculate fuel saved using the 1-second pre-cutoff average net pulse width
+      // Calculate fuel saved using the pre-cutoff net pulse width (fallback 1500us net)
+      float net_saved_pulse_us = (last_active_inj_pulse_us >= 500.0f)
+                                     ? last_active_inj_pulse_us
+                                     : 1500.0f;
       float saved_inj_time_us =
-          ((float)rpm / 120.0f) * last_active_inj_pulse_us * elapsed_sec;
+          ((float)rpm / 120.0f) * net_saved_pulse_us * elapsed_sec;
       float fuel_saved_interval =
           (saved_inj_time_us / 1000000.0f) *
           (INJECTOR_FLOW_RATE_CC_MIN / 60.0f / 1000.0f) * (float)NUM_INJECTORS;
+      total_fuel_saved_liters += fuel_saved_interval;
+    }
+    else if (currentState == STATE_AUTO_STOP)
+    {
+      // Calculate fuel saved during Auto Start-Stop based on baseline idle rate
+      float fuel_saved_interval =
+          (BASELINE_IDLE_FUEL_L_PER_HR / 3600.0f) * elapsed_sec;
       total_fuel_saved_liters += fuel_saved_interval;
     }
 
@@ -581,7 +618,8 @@ void loop()
     spd_delta_pulses = 0;
 
     float speed_val = (float)spd;
-    bool is_moving = (interval_dist_km > 0.0001f || speed_val > 0.0f);
+    // Standard automotive threshold: calculate L/100km only when moving >= 3 km/h
+    bool is_moving = (speed_val >= 3.0f);
 
     // Calculate instant consumption
     if (is_moving)
@@ -589,8 +627,10 @@ void loop()
       float dist_for_calc = (interval_dist_km > 0.0001f)
                                 ? interval_dist_km
                                 : ((speed_val / 3600.0f) * elapsed_sec);
-      // inst_val in L/100km
+      // inst_val in L/100km, clamped to 99.9 to prevent text overflow
       inst_val = (fuel_consumed_liters / dist_for_calc) * 100.0f;
+      if (inst_val > 99.9f)
+        inst_val = 99.9f;
     }
     else
     {
@@ -614,19 +654,19 @@ void loop()
     char bufInst[20];
     if (is_moving)
     {
-      snprintf(bufInst, sizeof(bufInst), "%5.1f L/100Km  ", inst_val);
+      snprintf(bufInst, sizeof(bufInst), "%4.1f L/100km", inst_val);
     }
     else
     {
-      snprintf(bufInst, sizeof(bufInst), "%5.1f L/h       ", inst_val);
+      snprintf(bufInst, sizeof(bufInst), "%4.1f L/h", inst_val);
     }
-    tv.fillRect(90, 210, 165, 16, 0x00); // Clear previous instant readout
+    tv.fillRect(90, 210, 160, 16, 0x00); // Clear previous instant readout
     tv.setCursor(90, 210);
     tv.print(bufInst);
     tv.setTextSize(1);
 
     char bufAvg[20];
-    snprintf(bufAvg, sizeof(bufAvg), "AVG:%5.1f L/100km  ", avg_l_100km);
+    snprintf(bufAvg, sizeof(bufAvg), "AVG:%5.1f L/100km", avg_l_100km);
     tv.fillRect(FUEL_X + FUEL_WIDTH + 5, FUEL_Y, 120, 8,
                 0x00); // Clear previous AVG readout
     tv.setCursor(FUEL_X + FUEL_WIDTH + 5, FUEL_Y);
@@ -634,7 +674,7 @@ void loop()
     tv.print(bufAvg);
 
     char bufTrip[20];
-    snprintf(bufTrip, sizeof(bufTrip), "TRIP:%6.1f km     ", total_distance_km);
+    snprintf(bufTrip, sizeof(bufTrip), "TRIP:%6.1f km", total_distance_km);
     tv.fillRect(FUEL_X + FUEL_WIDTH + 5, FUEL_Y + 20, 120, 8,
                 0x00); // Clear previous TRIP readout
     tv.setCursor(FUEL_X + FUEL_WIDTH + 5, FUEL_Y + 20);
@@ -642,7 +682,7 @@ void loop()
     tv.print(bufTrip);
 
     char bufUsed[20];
-    snprintf(bufUsed, sizeof(bufUsed), "USED:%5.1f L       ",
+    snprintf(bufUsed, sizeof(bufUsed), "USED:%5.1f L",
              total_fuel_liters);
     tv.fillRect(FUEL_X + FUEL_WIDTH + 5, FUEL_Y + 40, 120, 8,
                 0x00); // Clear previous USED readout
@@ -650,21 +690,19 @@ void loop()
     tv.setTextColor(0xFF, 0x00);
     tv.print(bufUsed);
 
-    char bufSaved[14];
+    char bufSaved[16];
     if (total_fuel_saved_liters < 1.0f)
     {
-      snprintf(bufSaved, sizeof(bufSaved), "SAVED:%5.3f L       ",
+      snprintf(bufSaved, sizeof(bufSaved), "SAVED:%5.3f L",
                total_fuel_saved_liters);
     }
     else
     {
-      snprintf(bufSaved, sizeof(bufSaved), "SAVED:%5.2f L       ",
+      snprintf(bufSaved, sizeof(bufSaved), "SAVED:%5.2f L",
                total_fuel_saved_liters);
     }
-    // tv.setCursor(FUEL_X + FUEL_WIDTH + 150, FUEL_Y + 20);
     tv.fillRect(FUEL_X + FUEL_WIDTH + 130, FUEL_Y, 80, 8, 0x00); // Clear previous SAVED readout
     tv.setCursor(FUEL_X + FUEL_WIDTH + 130, FUEL_Y);
-    // tv.setCursor(FUEL_X + FUEL_WIDTH + 5, FUEL_Y + 60);
     tv.setTextColor(0xFF, 0x00);
     tv.print(bufSaved);
 
@@ -673,13 +711,13 @@ void loop()
     {
       float rem_fuel_l = (percent / 100.0f) * FUEL_TANK_CAPACITY_LITERS;
       float rem_km = (rem_fuel_l / avg_l_100km) * 100.0f;
-      snprintf(bufRem, sizeof(bufRem), "REM:%4.0fkm ", rem_km);
+      snprintf(bufRem, sizeof(bufRem), "REM:%4.0fkm", rem_km);
     }
     else
     {
-      snprintf(bufRem, sizeof(bufRem), "REM:---km ");
+      snprintf(bufRem, sizeof(bufRem), "REM:---km");
     }
-    tv.fillRect(FUEL_X + FUEL_WIDTH + 150, FUEL_Y + 40, 57, 8,
+    tv.fillRect(FUEL_X + FUEL_WIDTH + 150, FUEL_Y + 40, 60, 8,
                 0x00); // Clear previous REM readout
     tv.setCursor(FUEL_X + FUEL_WIDTH + 150, FUEL_Y + 40);
     tv.setTextColor(0xFF, 0x00);
@@ -692,6 +730,8 @@ void loop()
   oil_level = (int)oil_level_t;
   warnings(now);
   processPushStart(now);
-
+  // debug
+  // Serial.print("current: ");
+  // Serial.println(current_A_filtered);
   esp_task_wdt_reset();
 }

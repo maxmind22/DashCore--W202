@@ -11,9 +11,10 @@
 #define regulator_pin 9
 
 // W202 C200 instrument cluster speed pulse (205/55R16, 48 ABS teeth, falling edge)
-#define PULSES_PER_KM 24179
+#define PULSES_PER_KM 24714UL
 #define SPD_WINDOW_MS 100UL
-#define SPD_STALE_TIMEOUT_US 500000UL
+#define RPM_STALE_TIMEOUT_US 1000000UL
+
 
 const int tempPin = A0;
 const int fan = 5;
@@ -24,23 +25,30 @@ const int ac = A1;
 #define DFCO_ENGAGE_RPM 1500
 #define DFCO_DISENGAGE_RPM 1000
 #define DFCO_ENGAGE_DELAY_MS 1000
-#define DFCO_ENGINE_WARM_ADC 440
-#define DFCO_INJ_WINDOW_TICKS 8000 // 8000 ticks @ 0.5us/tick = 4000us
+#define DFCO_ENGINE_WARM_ADC 636 // Engine warm (>60°C with 2.3kΩ pull-down)
+#define DFCO_INJ_WINDOW_TICKS 8000 // 8000 ticks @ 0.5us/tick = 4000us (safe window before next cylinder fires)
+#define MAX_INJ_ACTIVE_MS 30       // 30ms max pulse timeout to prevent telemetry lockup
 
 // --- Failsafe ---
 #define HEARTBEAT_TIMEOUT_MS 1000
 #define REGULATOR_FAIL_THRESHOLD 3
 
-// --- Fan Control ---
-#define FAN_TEMP_MIN_ADC 690
-#define FAN_TEMP_MAX_ADC 730
+// --- Fan Control (Calibrated for 2.3kΩ pull-down: 92°C = 851 ADC, 95°C = 866 ADC, 96°C = 871 ADC, 102°C = 901 ADC) ---
+#define FAN_TEMP_MIN_ADC 866   // Turn on at 95°C (gentle ~18% speed)
+#define FAN_TEMP_HYST_ADC 15   // Turn off below 851 (92°C, 3°C hysteresis to prevent short-cycling)
+#define FAN_TEMP_MAX_ADC 901   // Full 100% fan speed at 102°C (thermostat fully open)
 #define FAN_AC_MIN_ADC 50
 #define FAN_AC_MAX_ADC 500
-#define FAN_DUTY_MIN 20
+#define FAN_DUTY_MIN 45        // ~18% PWM to reliably start Toyota fan module without stall/hum
 #define FAN_DUTY_MAX 255
 
 // --- Speed ---
 #define MAX_SPEED_KMH 220
+
+// --- Oil Level Filter (W202 S11 Switch: LOW = OK, HIGH = Low Oil with 47k pull-up) ---
+#define OIL_LOW_PERSIST_MS 30000UL   // 30s sustained low oil to trigger warning (rejects slosh)
+#define OIL_OK_RECOVERY_MS 10000UL   // 10s continuous OK to clear warning
+#define OIL_CHECK_MIN_RPM 500        // Engine running qualification threshold
 
 // --- CAN ---
 #define CAN_SEND_INTERVAL_MS 50
@@ -48,27 +56,29 @@ const int ac = A1;
 
 uint8_t oil_level = 0;
 unsigned long last_check = 0;
+uint8_t regulator_fail_count = 0;
 
 // Variables shared with ISR MUST be volatile
 volatile uint32_t lastTime = 0;
 volatile uint32_t period = 0;
 volatile uint16_t spd_pulse_count = 0;
 volatile uint32_t total_spd_pulses = 0;
-volatile uint32_t spd_last_pulse_us = 0;
 volatile uint32_t total_inj_time_us = 0;
+
 volatile uint16_t total_inj_pulses = 0;
 volatile uint16_t inj_start_ticks = 0;
-volatile uint32_t last_inj_pulse_width = 0;
 volatile uint16_t inj_end_ticks = 0;
+volatile bool inj_just_ended = false;
 volatile bool inj_active = false;
-volatile bool injDisable = false;
-volatile bool inj_has_data = false;
 
-// These are only used in loop(), so they do NOT need to be volatile
+// State variables (loop only)
 uint32_t rpm = 0;
-uint32_t last_rpm = 0;
 uint32_t spd = 0;
 uint16_t spd_s = 0;
+bool injDisable = false;
+bool eco_inj_cut_cmd = false;
+bool eco_inj_cut_active = false;
+bool fan_active = false;
 
 float temp_avg = 0.0f;    // Float for EMA temp
 float acState_avg = 0.0f; // Float for EMA AC
@@ -94,14 +104,14 @@ void spdISR()
 {
   spd_pulse_count++;
   total_spd_pulses++;
-  spd_last_pulse_us = micros();
 }
+
+
 // injector ISR
 ISR(PCINT2_vect)
 {
-
   uint16_t inj_now_ticks = TCNT1;
-  if (!(PIND & _BV(PD7)))
+  if (!(PIND & _BV(PD7))) // Injector firing (active low)
   {
     if (!inj_active)
     {
@@ -109,38 +119,43 @@ ISR(PCINT2_vect)
       inj_active = true;
     }
   }
-  else
+  else // Injector closed
   {
     if (inj_active)
     {
       uint16_t pulse_ticks = inj_now_ticks - inj_start_ticks;
-      last_inj_pulse_width = pulse_ticks >> 1; // Convert 0.5us ticks (Prescaler 8) to us
-      total_inj_time_us += last_inj_pulse_width;
-      total_inj_pulses++;
+      if (pulse_ticks >= 400) // Glitch filter: ignore inductive spikes < 200us (400 * 0.5us)
+      {
+        uint32_t pulse_width = pulse_ticks >> 1; // Convert 0.5us ticks (Prescaler 8) to us
+        total_inj_time_us += pulse_width;
+        total_inj_pulses++;
+      }
       inj_active = false;
-      inj_has_data = true;
       inj_end_ticks = inj_now_ticks;
+      inj_just_ended = true;
     }
   }
 }
 
 //=================== CAN Diagnostics ==================//
-void checkCanErrors()
+void checkCanErrors(unsigned long now)
 {
   uint8_t errFlags = mcp2515.getErrorFlags();
   if (errFlags != 0)
   {
+    // Clear overflow flags in EFLG without wiping CANINTF unread interrupt flags
     if (errFlags & (MCP2515::EFLG_RX0OVR | MCP2515::EFLG_RX1OVR))
     {
-      mcp2515.clearRXnOVR();
+      mcp2515.clearRXnOVRFlags();
     }
-    // Only completely reset the chip if it goes into Bus-Off (fatal state).
-    // Do NOT interfere if it's just in Error Passive (TXEP/RXEP); it will self-recover.
-    if (errFlags & MCP2515::EFLG_TXBO)
+    // Only reset the chip on fatal Bus-Off (TXBO) with 1000ms cooldown to avoid reset thrashing / CPU starvation
+    static unsigned long lastResetAttempt = 0;
+    if ((errFlags & MCP2515::EFLG_TXBO) && (now - lastResetAttempt >= 1000))
     {
       mcp2515.reset();
       mcp2515.setBitrate(CAN_500KBPS, MCP_8MHZ);
       mcp2515.setNormalOneShotMode();
+      lastResetAttempt = now;
     }
   }
 }
@@ -164,10 +179,11 @@ void setup()
   pinModeFast(spd_pin, INPUT);
   pinModeFast(th_pin, INPUT);
   pinModeFast(inj_pin, OUTPUT);
+  digitalWriteFast(inj_pin, LOW); // Normal state: injectors connected
   pinMode(ac, INPUT);
   pinModeFast(oil_level_pin, INPUT);
   pinModeFast(regulator_pin, OUTPUT);
-  digitalWrite(regulator_pin, HIGH);
+  digitalWriteFast(regulator_pin, LOW); // Safe state on boot
   Serial.begin(115200);
 
   // Attach interrupts
@@ -177,9 +193,6 @@ void setup()
   pinModeFast(inj_sense_pin, INPUT);
   PCICR |= (1 << PCIE2); // Enable PCINT2 group (Port D)
   PCMSK2 = _BV(PCINT23);
-  // PCMSK2 |= (1 << PCINT23); // Mask to ONLY pin 7 (PCINT23) — any future Port D
-  // pins used with PCINT MUST also be added here,
-  // otherwise unintended ISR(PCINT2_vect) calls will occur.
 
   // Initialize Timer1 for high-precision fuel injection pulse timing (0.5us per tick @ 16MHz)
   TCCR1A = 0;
@@ -190,7 +203,7 @@ void setup()
   mcp2515.setBitrate(CAN_500KBPS, MCP_8MHZ);
   mcp2515.setNormalOneShotMode();
 
-  wdt_enable(WDTO_500MS);
+  wdt_enable(WDTO_2S);
 }
 
 void loop()
@@ -198,21 +211,58 @@ void loop()
   unsigned long currentMillis = millis();
   unsigned long currentMicros = micros();
 
+  // Watchdog check for stuck injector active state (evaluated in loop without ISR overhead)
+  static unsigned long inj_active_start_ms = 0;
+  if (inj_active)
+  {
+    if (inj_active_start_ms == 0)
+      inj_active_start_ms = currentMillis;
+    else if (currentMillis - inj_active_start_ms > MAX_INJ_ACTIVE_MS)
+    {
+      inj_active = false;
+      inj_active_start_ms = 0;
+    }
+  }
+  else
+  {
+    inj_active_start_ms = 0;
+  }
+
   //=================== Read Sensors & Control Fan (Every 500ms) ======================//
   if (currentMillis - lastSensorTime >= CAN_SENSOR_READ_INTERVAL_MS)
   {
     float temp_t = analogRead(tempPin);
-    static bool temp_initialized = false; // Initialize averages on first run or use float-based exponential moving average
+    static bool temp_initialized = false;
     if (!temp_initialized)
     {
       temp_avg = temp_t;
       temp_initialized = true;
     }
     else
-      temp_avg = temp_avg + (temp_t - temp_avg) * 0.0625f; // 1/16 = 0.0625
-    int dutyCycle_temp = map((int)temp_avg, FAN_TEMP_MIN_ADC, FAN_TEMP_MAX_ADC, FAN_DUTY_MIN, FAN_DUTY_MAX);
-    dutyCycle_temp = constrain(dutyCycle_temp, 0, FAN_DUTY_MAX);
+    {
+      temp_avg += (temp_t - temp_avg) * 0.0625f;
+    }
 
+    // Fan temperature control with hysteresis
+    int dutyCycle_temp = 0;
+    if (fan_active)
+    {
+      if (temp_avg < (FAN_TEMP_MIN_ADC - FAN_TEMP_HYST_ADC))
+        fan_active = false;
+    }
+    else
+    {
+      if (temp_avg >= FAN_TEMP_MIN_ADC)
+        fan_active = true;
+    }
+    if (fan_active)
+    {
+      dutyCycle_temp = map((int)temp_avg, FAN_TEMP_MIN_ADC, FAN_TEMP_MAX_ADC, FAN_DUTY_MIN, FAN_DUTY_MAX);
+      dutyCycle_temp = constrain(dutyCycle_temp, FAN_DUTY_MIN, FAN_DUTY_MAX);
+    }
+
+
+    // AC fan control
     float acState_t = analogRead(ac);
     static bool ac_initialized = false;
     if (!ac_initialized)
@@ -221,14 +271,77 @@ void loop()
       ac_initialized = true;
     }
     else
-      acState_avg = acState_avg + (acState_t - acState_avg) * 0.125f; // 1/8 = 0.125
-    int dutyCycle_ac = map((int)acState_avg, FAN_AC_MIN_ADC, FAN_AC_MAX_ADC, FAN_DUTY_MIN, FAN_DUTY_MAX);
-    dutyCycle_ac = constrain(dutyCycle_ac, 0, FAN_DUTY_MAX);
+    {
+      acState_avg += (acState_t - acState_avg) * 0.125f;
+    }
 
+    int dutyCycle_ac = 0;
+    if (acState_avg >= FAN_AC_MIN_ADC)
+    {
+      dutyCycle_ac = map((int)acState_avg, FAN_AC_MIN_ADC, FAN_AC_MAX_ADC, FAN_DUTY_MIN, FAN_DUTY_MAX);
+      dutyCycle_ac = constrain(dutyCycle_ac, FAN_DUTY_MIN, FAN_DUTY_MAX);
+    }
     int dutyCycle = max(dutyCycle_temp, dutyCycle_ac);
     analogWrite(fan, dutyCycle);
 
-    oil_level = digitalReadFast(oil_level_pin);
+    // --- OEM-Style Oil Level Filter (Mercedes W202 / S11) ---
+    // Hardware: 47k pull-up to D6 -> Sensor -> GND.
+    // Tested state: LOW = Oil OK, HIGH = Low Oil.
+    // Damping: Requires 30s sustained LOW oil reading (HIGH) while engine is running (RPM >= 500)
+    // to reject cornering/braking slosh. Requires 10s continuous OK (LOW) to clear warning.
+    uint8_t raw_oil = digitalReadFast(oil_level_pin);
+    static uint32_t oil_low_accum_ms = 0;
+    static uint32_t oil_ok_accum_ms = 0;
+
+    if (rpm >= OIL_CHECK_MIN_RPM)
+    {
+      if (raw_oil == HIGH) // Sensor reports low oil
+      {
+        oil_ok_accum_ms = 0;
+        if (oil_low_accum_ms < OIL_LOW_PERSIST_MS)
+        {
+          oil_low_accum_ms += CAN_SENSOR_READ_INTERVAL_MS;
+        }
+        if (oil_low_accum_ms >= OIL_LOW_PERSIST_MS)
+        {
+          oil_level = 1; // Assert low oil warning after 30s sustained condition
+        }
+      }
+      else // Sensor reports oil level OK
+      {
+        if (oil_low_accum_ms >= CAN_SENSOR_READ_INTERVAL_MS)
+        {
+          oil_low_accum_ms -= CAN_SENSOR_READ_INTERVAL_MS;
+        }
+        else
+        {
+          oil_low_accum_ms = 0;
+        }
+
+        if (oil_ok_accum_ms < OIL_OK_RECOVERY_MS)
+        {
+          oil_ok_accum_ms += CAN_SENSOR_READ_INTERVAL_MS;
+        }
+        if (oil_ok_accum_ms >= OIL_OK_RECOVERY_MS)
+        {
+          oil_level = 0; // Clear warning after 10s continuous OK
+          oil_low_accum_ms = 0;
+        }
+      }
+    }
+    else
+    {
+      // Engine stopped or cranking: pause/decay low oil accumulation to prevent false alerts when parked
+      if (oil_low_accum_ms >= CAN_SENSOR_READ_INTERVAL_MS)
+      {
+        oil_low_accum_ms -= CAN_SENSOR_READ_INTERVAL_MS;
+      }
+      else
+      {
+        oil_low_accum_ms = 0;
+      }
+      oil_ok_accum_ms = 0;
+    }
 
     lastSensorTime = currentMillis;
   }
@@ -236,34 +349,53 @@ void loop()
   //=================== Calculate RPM (Every loop) ======================//
   noInterrupts();
   uint32_t p = period;
+  uint32_t last_rpm_edge = lastTime;
   interrupts();
-  if (p > 0)
-  {
-    uint32_t calc = 60000000UL / p;
-    rpm = calc / 2; // Only update with valid readings  // Real engine RPM (2 pulses per rev)
-  }
 
-  //=================== Control Injectors =====================//
+  if (currentMicros - last_rpm_edge > RPM_STALE_TIMEOUT_US || p == 0)
+  {
+    rpm = 0;
+  }
+  else if (p >= 2500UL)
+  {
+    rpm = 30000000UL / p; // 60,000,000 / (p * 2 pulses/rev)
+  }
+  // If p < 2500UL (noise glitch > 12,000 RPM), retain previous valid rpm reading
+
+  //=================== Control Injectors (DFCO) =====================//
   int th_Pos = digitalReadFast(th_pin);
   static unsigned long last_inj_check = 0;
+
+  // Read end ticks and elapsed time atomically
+  noInterrupts();
+  uint16_t elapsed_ticks = (uint16_t)(TCNT1 - inj_end_ticks);
+  bool just_ended = inj_just_ended;
+  bool inj_busy = inj_active;
+  interrupts();
+
+  if (just_ended && elapsed_ticks >= DFCO_INJ_WINDOW_TICKS)
+  {
+    noInterrupts();
+    inj_just_ended = false; // Safe window expired, prevent 16-bit timer wraparound aliasing
+    interrupts();
+  }
 
   if (rpm > DFCO_ENGAGE_RPM && th_Pos == 1 && temp_avg > DFCO_ENGINE_WARM_ADC)
   {
     if (last_inj_check == 0)
       last_inj_check = currentMillis; // Start 1000ms timer
-    if (currentMillis - last_inj_check >= DFCO_ENGAGE_DELAY_MS && injDisable == false)
+    if (currentMillis - last_inj_check >= DFCO_ENGAGE_DELAY_MS && !injDisable)
     {
-      bool inj_state = false;
-      uint16_t inj_end_ticks_t = 0;
-      noInterrupts();
-      inj_end_ticks_t = inj_end_ticks; // Capture the value of inj_end_ticks atomically
-      inj_state = inj_active;
-      interrupts();
-      uint16_t elapsed_ticks = (uint16_t)(TCNT1 - inj_end_ticks_t);
-      if (!inj_state && elapsed_ticks < DFCO_INJ_WINDOW_TICKS) // 8000 ticks @ 0.5us/tick = 4000us
+      // Safe cut window: right after monitored injector finishes, before the next cylinder fires
+      if (!inj_busy && just_ended && elapsed_ticks < DFCO_INJ_WINDOW_TICKS)
       {
-        digitalWriteFast(inj_pin, HIGH);
-        injDisable = true;
+        noInterrupts();
+        if (!inj_active) {   // Re-verify no pulse started since snapshot
+          digitalWriteFast(inj_pin, HIGH);
+          injDisable = true;
+          inj_just_ended = false;
+        }
+        interrupts();
       }
     }
   }
@@ -272,11 +404,45 @@ void loop()
     last_inj_check = 0; // Reset timer if condition no longer met
   }
 
-  // Deactivation is instant when throttle is released or RPM drops below hysteresis limit
-  if ((th_Pos == 0 || rpm < DFCO_DISENGAGE_RPM) && injDisable == true)
+  // Deactivation is instant when throttle is opened or RPM drops below hysteresis limit
+  if ((th_Pos == 0 || rpm < DFCO_DISENGAGE_RPM) && injDisable)
   {
     injDisable = false;
-    digitalWriteFast(inj_pin, LOW);
+    // Only bring pin LOW if Auto Start-Stop is not actively cutting injectors
+    if (!eco_inj_cut_cmd && !eco_inj_cut_active)
+    {
+      digitalWriteFast(inj_pin, LOW);
+    }
+  }
+
+  //=================== Auto Start-Stop Safe Injector Cut =====================//
+  if (eco_inj_cut_cmd)
+  {
+    if (!eco_inj_cut_active)
+    {
+      // Safe cut: if engine is already stopped (rpm == 0) or in the safe inter-injector window
+      if (!inj_busy && (rpm == 0 || (just_ended && elapsed_ticks < DFCO_INJ_WINDOW_TICKS)))
+      {
+        noInterrupts();
+        if (!inj_active) {   // Re-verify no pulse started since snapshot
+          digitalWriteFast(inj_pin, HIGH);
+          eco_inj_cut_active = true;
+          inj_just_ended = false;
+        }
+        interrupts();
+      }
+    }
+  }
+  else
+  {
+    if (eco_inj_cut_active)
+    {
+      eco_inj_cut_active = false;
+      if (!injDisable)
+      {
+        digitalWriteFast(inj_pin, LOW);
+      }
+    }
   }
 
   //==================== Calculate Vehicle Speed (Every 100ms) ====================//
@@ -285,17 +451,12 @@ void loop()
     noInterrupts();
     uint16_t count = spd_pulse_count;
     spd_pulse_count = 0;
-    uint32_t last_pulse = spd_last_pulse_us;
     interrupts();
 
-    if (currentMicros - last_pulse > SPD_STALE_TIMEOUT_US)
+    if (count > 0)
     {
-      spd = 0;
-    }
-    else if (count > 0)
-    {
-      // km/h = pulses * 3600000 / (PULSES_PER_KM * window_ms)
-      spd = (uint32_t)count * 3600000UL / (PULSES_PER_KM * SPD_WINDOW_MS);
+      // Rounded km/h calculation: (count * 3600000 + half_divisor) / divisor
+      spd = ((uint32_t)count * 3600000UL + 1235700UL) / (PULSES_PER_KM * SPD_WINDOW_MS);
     }
     else
     {
@@ -308,28 +469,50 @@ void loop()
 
   static int alive = 0;
   // Process CAN and auto-recover errors
-  checkCanErrors();
-  if (mcp2515.readMessage(&canMsgRx) == MCP2515::ERROR_OK)
+  for (uint8_t i = 0; i < 10 && mcp2515.readMessage(&canMsgRx) == MCP2515::ERROR_OK; i++)
   {
     if (canMsgRx.can_id == 0x03)
     {
       alive = canMsgRx.data[0];
+      eco_inj_cut_cmd = (canMsgRx.data[1] & 0x01) != 0;
       last_check = currentMillis;
+
+      // Regulator failsafe hysteresis
+      if (alive == 100)
+      {
+        regulator_fail_count = 0;
+        digitalWriteFast(regulator_pin, HIGH);
+      }
+      else
+      {
+        if (regulator_fail_count < REGULATOR_FAIL_THRESHOLD)
+        {
+          regulator_fail_count++;
+        }
+        if (regulator_fail_count >= REGULATOR_FAIL_THRESHOLD)
+        {
+          digitalWriteFast(regulator_pin, LOW);
+        }
+      }
     }
   }
+  checkCanErrors(currentMillis);
 
   // Failsafe timeout: if no message in 1000ms, assume dead
   if (currentMillis - last_check > HEARTBEAT_TIMEOUT_MS)
   {
     alive = 0;
+    eco_inj_cut_cmd = false;              // Safe state: clear fuel cut so engine can run
+    digitalWriteFast(regulator_pin, LOW); // De-energize field disconnect relay
   }
+
   //================= Send to Display MCU (Every 50ms) ===============//
   if (currentMillis - lastCanSendTime >= CAN_SEND_INTERVAL_MS)
   {
     static uint8_t seq_02 = 0;
 
-    uint8_t injDisable_s = (uint8_t)injDisable;
-    uint16_t rpm_s = (uint16_t)(rpm);
+    uint8_t injDisable_s = (uint8_t)(injDisable || eco_inj_cut_active);
+    uint16_t rpm_s = (uint16_t)rpm;
     uint16_t temp_s = (uint16_t)temp_avg;
 
     // CAN ID 0x02: Instantaneous Status (DLC 8)
@@ -378,19 +561,5 @@ void loop()
     lastCanSendTime = currentMillis;
   }
 
-  //================= Regulator Failsafe ===============//
-  static uint8_t regFailCount = 0;
-  if (alive != 100)
-  {
-    if (++regFailCount >= REGULATOR_FAIL_THRESHOLD)
-    {
-      digitalWriteFast(regulator_pin, LOW);
-    }
-  }
-  else
-  {
-    regFailCount = 0;
-    digitalWriteFast(regulator_pin, HIGH);
-  }
   wdt_reset();
 }
