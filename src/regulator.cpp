@@ -168,6 +168,8 @@ void regulatorTask(void *pvParameters) {
     uint16_t in_rpm = rpm;
     SystemState in_state = currentState;
     unsigned long in_last_packet = lastPacketTime;
+    float in_vac = vacuum_psi;
+    unsigned long in_last_vac = lastVacPacketTime;
     portEXIT_CRITICAL(&dataMux);
 
     bool frontMcuConnected = (millis() - in_last_packet < FRONT_MCU_CAN_TIMEOUT_MS);
@@ -203,6 +205,29 @@ void regulatorTask(void *pvParameters) {
     float err_v = REGULATOR_V_TARGET - new_v;
     float p_term_v = Kp_v * err_v;
     float target_pwm_v = p_term_v + integral_v;
+
+    // --- Load-Aware Acceleration De-Excitation (Option B: Full Field Cutoff) ---
+    static bool accel_cutoff_active = false;
+
+    bool vac_connected = (millis() - in_last_vac <= FRONT_MCU_TIMEOUT_MS);
+    bool voltage_safe_for_cutoff = (new_v >= REGULATOR_V_CUTOFF_FLOOR);
+
+    if (engine_charging_allowed && vac_connected && !delay_active) {
+      if (!accel_cutoff_active) {
+        // Trigger cutoff when driver accelerates hard (low manifold vacuum) and battery voltage is healthy
+        if (in_vac <= REGULATOR_LOAD_CUTOFF_VAC_PSI && voltage_safe_for_cutoff) {
+          accel_cutoff_active = true;
+        }
+      } else {
+        // Disengage cutoff if driver eases off or voltage drops below safety floor
+        bool vacuum_recovered = (in_vac >= REGULATOR_LOAD_REENGAGE_VAC_PSI);
+        if (vacuum_recovered || !voltage_safe_for_cutoff) {
+          accel_cutoff_active = false;
+        }
+      }
+    } else {
+      accel_cutoff_active = false;
+    }
 
     // Current PI Controller (Ceiling 20.00A charge into battery)
     float err_i = REGULATOR_I_LIMIT - new_c;
@@ -240,7 +265,7 @@ void regulatorTask(void *pvParameters) {
     float max_step_up = REGULATOR_RAMP_UP_PER_SEC * dt;
     float max_step_down = REGULATOR_RAMP_DOWN_PER_SEC * dt;
 
-    if (!engine_charging_allowed || delay_active || sensor_error || relay_latched) {
+    if (!engine_charging_allowed || delay_active || sensor_error || relay_latched || accel_cutoff_active) {
       active_pwm = 0.0f;
       integral_v = 0.0f;
       integral_i = 0.0f;

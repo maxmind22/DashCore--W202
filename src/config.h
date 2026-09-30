@@ -45,6 +45,11 @@
 #define REGULATOR_NOMINAL_RPM 1500.0f       // Baseline RPM for gain scheduling / Front MCU offline
 #define FUEL_ADC_INTERVAL_US 2000000UL      // Fuel sender ADC read interval (2s)
 
+// --- Load-Aware Alternator De-Excitation (Option B: Full Field Cutoff) ---
+#define REGULATOR_LOAD_CUTOFF_VAC_PSI 2.0f   // Manifold vacuum <= 2.0 psi: cut alternator field (0A drag)
+#define REGULATOR_LOAD_REENGAGE_VAC_PSI 3.0f // Manifold vacuum >= 3.0 psi: re-engage alternator
+#define REGULATOR_V_CUTOFF_FLOOR 12.60f      // Safety floor: abort cutoff if battery drops below 12.60V
+
 // --- Alternator Regulator Calibration ---
 #define CURRENT_SENSOR_OFFSET_MV 2495.44f  // FS500E2T zero-current offset (calibrated from 2500.0 nominal)
 #define CURRENT_SENSOR_MV_PER_A  4.0f      // FS500E2T sensitivity (mV per Amp)
@@ -111,6 +116,15 @@ const unsigned long ENGINE_STALL_DEBOUNCE_MS = 1500; // Require 1.5s persistent 
 #define VACUUM_DISPLAY_Y 38
 #define ECO_VACUUM_THRESHOLD_PSI 2.0f // Below 2.0 psi vacuum = low vacuum / power enrichment
 #define ECO_VACUUM_HYST_PSI 0.5f      // Hysteresis to prevent indicator flickering
+
+// --- Vacuum Leak Warning Configuration ---
+#define VAC_LEAK_MIN_TEMP_C 60        // Only detect when engine is warm (>60°C)
+#define VAC_LEAK_MAX_SPD_KMH 3        // Must be stationary (idle)
+#define VAC_LEAK_MIN_RPM 550          // Normal idle speed lower bound
+#define VAC_LEAK_MAX_RPM 950          // Normal idle speed upper bound
+#define VAC_LEAK_THRESHOLD_PSI 5.0f   // Healthy warm idle is 8-11 psi; below 5.0 psi indicates leak
+#define VAC_LEAK_PERSIST_MS 5000UL    // 5 seconds continuous low vacuum to trigger warning
+#define VAC_LEAK_CLEAR_PSI 6.5f       // Recovery threshold
 
 // Fuel/Trip Constants
 #define PULSES_PER_KM 24714
