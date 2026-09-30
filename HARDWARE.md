@@ -77,6 +77,7 @@ flowchart TD
         Inj_In["ECU Injector Signal"] -->|"PC817 Opto<br/>Pin D7 (PCINT23)"| NanoCore
         AC_In["Automatic A/C Signal"] -->|"Resistor Divider<br/>Pin A1 (ac)"| NanoCore
         Temp_In["Engine Temp NTC"] -->|"Divider<br/>Pin A0 (tempPin)"| NanoCore
+        MAP_In["Toyota Vacuum/MAP Sensor<br/>(89420-02010 / 02020)"] -->|"Pin A2 (map_pin)"| NanoCore
         Oil_In["Oil Level Sensor"] -->|"Pin D6 (oil_level_pin)"| NanoCore
 
         %% Outputs

@@ -104,6 +104,14 @@ const unsigned long ENGINE_STALL_DEBOUNCE_MS = 1500; // Require 1.5s persistent 
 #define WARNING_X 50
 #define WARNING_Y 20
 
+// Eco Indicator & Vacuum Display layout constants
+#define ECO_INDICATOR_X 205
+#define ECO_INDICATOR_Y 18
+#define VACUUM_DISPLAY_X 182
+#define VACUUM_DISPLAY_Y 38
+#define ECO_VACUUM_THRESHOLD_PSI 2.0f // Below 2.0 psi vacuum = low vacuum / power enrichment
+#define ECO_VACUUM_HYST_PSI 0.5f      // Hysteresis to prevent indicator flickering
+
 // Fuel/Trip Constants
 #define PULSES_PER_KM 24714
 const float PULSES_PER_KM_F = 24714.33f;
