@@ -88,6 +88,21 @@ flowchart TD
     end
 ```
 
+### Toyota MAP Sensor (89420-02010) Verified Pinout
+
+> **⚠️ WARNING:** Most online references show Pin 1=PIM, Pin 2=VC, Pin 3=E2.
+> This was physically verified to be **WRONG** for our sensor. The correct pinout
+> (looking at the sensor body, male pins, lock ridge on top) is:
+
+| Pin (on sensor) | Function | Arduino Nano Connection |
+| :--- | :--- | :--- |
+| **1** | **GND** (E2) | Nano GND |
+| **2** | **Signal** (PIM) | Nano Pin A2 (`map_pin`) |
+| **3** | **+5V** (VC) | Nano 5V |
+
+- Atmospheric (engine off): ~4.0V on Pin 2 (~780 ADC counts)
+- Idle vacuum: ~0.9–1.4V on Pin 2
+
 ---
 
 ## 📌 Exhaustive ESP32 Cabin Controller Pin & Hardware Mapping
