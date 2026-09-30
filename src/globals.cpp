@@ -79,6 +79,8 @@ volatile int spd = 0;
 volatile uint16_t spd_t = 0;
 uint16_t raw2;
 unsigned long lastPacketTime = 0;
+float vacuum_psi = 0.0f;
+unsigned long lastVacPacketTime = 0;
 uint8_t oil_level_t = 0;
 int oil_level = 0;
 int last_clear = 0;

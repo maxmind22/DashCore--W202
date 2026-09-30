@@ -332,6 +332,78 @@ void loop()
       strcpy(last_bufInj, bufInj);
     }
 
+    // --- ECO Warning Indicator & Vacuum (PSI) Display ---
+    // Show nothing when driving economically. Only show red "ECO" when wasteful.
+    static bool eco_warning_active = false;
+    static bool eco_warning_drawn = false;
+    static bool vac_drawn = false;
+    static char last_bufVac[16] = "";
+
+    bool engine_running = (currentState == STATE_RUNNING && rpm >= ENGINE_STARTED_RPM);
+    bool vac_valid = (now - lastVacPacketTime <= FRONT_MCU_TIMEOUT_MS);
+
+    if (engine_running && vac_valid)
+    {
+      // Hysteresis: activate warning if vacuum < 2.0 psi, clear if vacuum >= 2.5 psi
+      if (!eco_warning_active && vacuum_psi < ECO_VACUUM_THRESHOLD_PSI)
+      {
+        eco_warning_active = true;
+      }
+      else if (eco_warning_active && vacuum_psi >= (ECO_VACUUM_THRESHOLD_PSI + ECO_VACUUM_HYST_PSI))
+      {
+        eco_warning_active = false;
+      }
+
+      // Red "ECO" warning: only drawn when NOT economical
+      if (eco_warning_active)
+      {
+        if (!eco_warning_drawn)
+        {
+          tv.setCursor(ECO_INDICATOR_X, ECO_INDICATOR_Y);
+          tv.setTextColor(0xE0, 0x00); // Red
+          tv.setTextSize(2);
+          tv.print("ECO");
+          tv.setTextSize(1);
+          eco_warning_drawn = true;
+        }
+      }
+      else
+      {
+        if (eco_warning_drawn)
+        {
+          tv.fillRect(ECO_INDICATOR_X, ECO_INDICATOR_Y, 38, 16, 0x00);
+          eco_warning_drawn = false;
+        }
+      }
+
+      // Vacuum PSI readout (always visible while engine running)
+      char bufVac[16];
+      snprintf(bufVac, sizeof(bufVac), "VAC:%4.1fpsi", vacuum_psi);
+      if (strcmp(bufVac, last_bufVac) != 0)
+      {
+        tv.setCursor(VACUUM_DISPLAY_X, VACUUM_DISPLAY_Y);
+        tv.setTextColor(0xFF, 0x00);
+        tv.print(bufVac);
+        strcpy(last_bufVac, bufVac);
+        vac_drawn = true;
+      }
+    }
+    else
+    {
+      if (eco_warning_drawn)
+      {
+        tv.fillRect(ECO_INDICATOR_X, ECO_INDICATOR_Y, 38, 16, 0x00);
+        eco_warning_drawn = false;
+      }
+      if (vac_drawn)
+      {
+        tv.fillRect(VACUUM_DISPLAY_X, VACUUM_DISPLAY_Y, 74, 8, 0x00);
+        vac_drawn = false;
+        last_bufVac[0] = '\0';
+      }
+      eco_warning_active = false;
+    }
+
     lastMetricsUpdateTime = now;
   }
 

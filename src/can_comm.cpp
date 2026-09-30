@@ -171,6 +171,11 @@ void drainCanRxBuffer(unsigned long now) {
         }
       }
       lastPacketTime = now;
+    } else if (canMsg.can_id == 0x05) {
+      uint8_t raw_vac_x10 = canMsg.data[0];
+      vacuum_psi = (float)raw_vac_x10 / 10.0f;
+      lastVacPacketTime = now;
+      lastPacketTime = now;
     }
   }
 }

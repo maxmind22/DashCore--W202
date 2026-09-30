@@ -77,6 +77,8 @@ extern volatile int spd;
 extern volatile uint16_t spd_t;
 extern uint16_t raw2;
 extern unsigned long lastPacketTime;
+extern float vacuum_psi;
+extern unsigned long lastVacPacketTime;
 extern uint8_t oil_level_t;
 extern int oil_level;
 extern int last_clear;

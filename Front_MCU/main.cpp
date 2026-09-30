@@ -15,17 +15,29 @@
 #define SPD_WINDOW_MS 100UL
 #define RPM_STALE_TIMEOUT_US 1000000UL
 
-
 const int tempPin = A0;
 const int fan = 5;
 const int ac = A1;
+const int map_pin = A2;
 #define inj_sense_pin 7
+
+// --- MAP / Vacuum Sensor (Toyota 89420-02010 / 89420-02020) ---
+#define MAP_EMA_ALPHA 0.20f
+#define MAP_CALIB_ATM_DEFAULT 780   // ~3.8V at sea level atmospheric pressure (~101.3 kPa)
+#define MAP_ADC_TO_PSI 0.02035f     // Conversion factor from ADC counts to PSI vacuum
+#define MAP_READ_INTERVAL_MS 20
+
+float map_adc_avg = (float)MAP_CALIB_ATM_DEFAULT;
+uint16_t map_atm_adc = MAP_CALIB_ATM_DEFAULT;
+float vac_psi = 0.0f;
+uint8_t vac_psi_x10 = 0;
+unsigned long lastMapReadTime = 0;
 
 // --- DFCO Configuration ---
 #define DFCO_ENGAGE_RPM 1500
 #define DFCO_DISENGAGE_RPM 1000
 #define DFCO_ENGAGE_DELAY_MS 1000
-#define DFCO_ENGINE_WARM_ADC 636 // Engine warm (>60°C with 2.3kΩ pull-down)
+#define DFCO_ENGINE_WARM_ADC 636   // Engine warm (>60°C with 2.3kΩ pull-down)
 #define DFCO_INJ_WINDOW_TICKS 8000 // 8000 ticks @ 0.5us/tick = 4000us (safe window before next cylinder fires)
 #define MAX_INJ_ACTIVE_MS 30       // 30ms max pulse timeout to prevent telemetry lockup
 
@@ -34,21 +46,21 @@ const int ac = A1;
 #define REGULATOR_FAIL_THRESHOLD 3
 
 // --- Fan Control (Calibrated for 2.3kΩ pull-down: 92°C = 851 ADC, 95°C = 866 ADC, 96°C = 871 ADC, 102°C = 901 ADC) ---
-#define FAN_TEMP_MIN_ADC 866   // Turn on at 95°C (gentle ~18% speed)
-#define FAN_TEMP_HYST_ADC 15   // Turn off below 851 (92°C, 3°C hysteresis to prevent short-cycling)
-#define FAN_TEMP_MAX_ADC 901   // Full 100% fan speed at 102°C (thermostat fully open)
+#define FAN_TEMP_MIN_ADC 866 // Turn on at 95°C (gentle ~18% speed)
+#define FAN_TEMP_HYST_ADC 15 // Turn off below 851 (92°C, 3°C hysteresis to prevent short-cycling)
+#define FAN_TEMP_MAX_ADC 901 // Full 100% fan speed at 102°C (thermostat fully open)
 #define FAN_AC_MIN_ADC 50
 #define FAN_AC_MAX_ADC 500
-#define FAN_DUTY_MIN 45        // ~18% PWM to reliably start Toyota fan module without stall/hum
+#define FAN_DUTY_MIN 45 // ~18% PWM to reliably start Toyota fan module without stall/hum
 #define FAN_DUTY_MAX 255
 
 // --- Speed ---
 #define MAX_SPEED_KMH 220
 
 // --- Oil Level Filter (W202 S11 Switch: LOW = OK, HIGH = Low Oil with 47k pull-up) ---
-#define OIL_LOW_PERSIST_MS 30000UL   // 30s sustained low oil to trigger warning (rejects slosh)
-#define OIL_OK_RECOVERY_MS 10000UL   // 10s continuous OK to clear warning
-#define OIL_CHECK_MIN_RPM 500        // Engine running qualification threshold
+#define OIL_LOW_PERSIST_MS 30000UL // 30s sustained low oil to trigger warning (rejects slosh)
+#define OIL_OK_RECOVERY_MS 10000UL // 10s continuous OK to clear warning
+#define OIL_CHECK_MIN_RPM 500      // Engine running qualification threshold
 
 // --- CAN ---
 #define CAN_SEND_INTERVAL_MS 50
@@ -105,7 +117,6 @@ void spdISR()
   spd_pulse_count++;
   total_spd_pulses++;
 }
-
 
 // injector ISR
 ISR(PCINT2_vect)
@@ -175,6 +186,7 @@ void setup()
 
   pinMode(fan, OUTPUT);
   pinMode(tempPin, INPUT);
+  pinMode(map_pin, INPUT);
   pinModeFast(rpm_pin, INPUT);
   pinModeFast(spd_pin, INPUT);
   pinModeFast(th_pin, INPUT);
@@ -184,13 +196,14 @@ void setup()
   pinModeFast(oil_level_pin, INPUT);
   pinModeFast(regulator_pin, OUTPUT);
   digitalWriteFast(regulator_pin, LOW); // Safe state on boot
-  Serial.begin(115200);
+  // Serial.begin(115200);
 
   // Attach interrupts
   attachInterrupt(digitalPinToInterrupt(rpm_pin), rpmISR, FALLING);
   attachInterrupt(digitalPinToInterrupt(spd_pin), spdISR, FALLING);
 
   pinModeFast(inj_sense_pin, INPUT);
+
   PCICR |= (1 << PCIE2); // Enable PCINT2 group (Port D)
   PCMSK2 = _BV(PCINT23);
 
@@ -228,6 +241,39 @@ void loop()
     inj_active_start_ms = 0;
   }
 
+  //=================== Read MAP Sensor & Calculate Vacuum (Every 20ms) ===================//
+  static bool map_initialized = false;
+  if (currentMillis - lastMapReadTime >= MAP_READ_INTERVAL_MS)
+  {
+    float map_raw = (float)analogRead(map_pin);
+    if (!map_initialized)
+    {
+      map_adc_avg = map_raw;
+      map_initialized = true;
+    }
+    else
+    {
+      map_adc_avg += (map_raw - map_adc_avg) * MAP_EMA_ALPHA;
+    }
+
+    // Atmospheric baseline: when engine is stopped (RPM == 0), manifold pressure is barometric
+    if (rpm == 0 && map_adc_avg >= 500.0f && map_adc_avg <= 950.0f)
+    {
+      map_atm_adc = (uint16_t)(map_adc_avg + 0.5f);
+    }
+
+    // Gauge vacuum below atmospheric: delta from barometric reference
+    float vac_counts = (float)map_atm_adc - map_adc_avg;
+    if (vac_counts < 0.0f)
+      vac_counts = 0.0f;
+    vac_psi = vac_counts * MAP_ADC_TO_PSI;
+    if (vac_psi > 15.0f)
+      vac_psi = 15.0f;
+    vac_psi_x10 = (uint8_t)(vac_psi * 10.0f + 0.5f);
+
+    lastMapReadTime = currentMillis;
+  }
+
   //=================== Read Sensors & Control Fan (Every 500ms) ======================//
   if (currentMillis - lastSensorTime >= CAN_SENSOR_READ_INTERVAL_MS)
   {
@@ -260,7 +306,6 @@ void loop()
       dutyCycle_temp = map((int)temp_avg, FAN_TEMP_MIN_ADC, FAN_TEMP_MAX_ADC, FAN_DUTY_MIN, FAN_DUTY_MAX);
       dutyCycle_temp = constrain(dutyCycle_temp, FAN_DUTY_MIN, FAN_DUTY_MAX);
     }
-
 
     // AC fan control
     float acState_t = analogRead(ac);
@@ -390,7 +435,8 @@ void loop()
       if (!inj_busy && just_ended && elapsed_ticks < DFCO_INJ_WINDOW_TICKS)
       {
         noInterrupts();
-        if (!inj_active) {   // Re-verify no pulse started since snapshot
+        if (!inj_active)
+        { // Re-verify no pulse started since snapshot
           digitalWriteFast(inj_pin, HIGH);
           injDisable = true;
           inj_just_ended = false;
@@ -424,7 +470,8 @@ void loop()
       if (!inj_busy && (rpm == 0 || (just_ended && elapsed_ticks < DFCO_INJ_WINDOW_TICKS)))
       {
         noInterrupts();
-        if (!inj_active) {   // Re-verify no pulse started since snapshot
+        if (!inj_active)
+        { // Re-verify no pulse started since snapshot
           digitalWriteFast(inj_pin, HIGH);
           eco_inj_cut_active = true;
           inj_just_ended = false;
@@ -556,6 +603,15 @@ void loop()
     canMsgTx.data[5] = (inj_pulses_snap >> 8) & 0xFF;
     canMsgTx.data[6] = spd_pulses_snap & 0xFF;
     canMsgTx.data[7] = (spd_pulses_snap >> 8) & 0xFF;
+    mcp2515.sendMessage(&canMsgTx);
+
+    // CAN ID 0x05: Vacuum / Manifold Telemetry (DLC 4)
+    canMsgTx.can_id = 0x05;
+    canMsgTx.can_dlc = 4;
+    canMsgTx.data[0] = vac_psi_x10;                                     // Vacuum in 0.1 PSI (e.g. 85 = 8.5 psi)
+    canMsgTx.data[1] = (uint8_t)((uint16_t)map_adc_avg & 0xFF);        // Raw MAP ADC low byte
+    canMsgTx.data[2] = (uint8_t)(((uint16_t)map_adc_avg >> 8) & 0xFF); // Raw MAP ADC high byte
+    canMsgTx.data[3] = (vac_psi < 2.0f) ? 1 : 0;                        // High load / power enrichment flag
     mcp2515.sendMessage(&canMsgTx);
 
     lastCanSendTime = currentMillis;
