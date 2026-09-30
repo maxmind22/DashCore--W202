@@ -561,6 +561,7 @@ void loop()
     uint8_t injDisable_s = (uint8_t)(injDisable || eco_inj_cut_active);
     uint16_t rpm_s = (uint16_t)rpm;
     uint16_t temp_s = (uint16_t)temp_avg;
+    uint8_t th_state = (uint8_t)digitalReadFast(th_pin); // 1 = closed (idle), 0 = open
 
     // CAN ID 0x02: Instantaneous Status (DLC 8)
     canMsgTx.can_id = 0x02;
@@ -571,7 +572,7 @@ void loop()
     canMsgTx.data[3] = spd_s >> 8;
     canMsgTx.data[4] = rpm_s & 0xFF;
     canMsgTx.data[5] = rpm_s >> 8;
-    canMsgTx.data[6] = (injDisable_s & 0x01) | ((oil_level & 0x01) << 1);
+    canMsgTx.data[6] = (injDisable_s & 0x01) | ((oil_level & 0x01) << 1) | ((th_state & 0x01) << 2);
     canMsgTx.data[7] = seq_02++;
     mcp2515.sendMessage(&canMsgTx);
 
