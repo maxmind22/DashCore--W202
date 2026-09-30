@@ -126,6 +126,13 @@ const unsigned long ENGINE_STALL_DEBOUNCE_MS = 1500; // Require 1.5s persistent 
 #define VAC_LEAK_PERSIST_MS 5000UL    // 5 seconds continuous low vacuum to trigger warning
 #define VAC_LEAK_CLEAR_PSI 6.5f       // Recovery threshold
 
+// --- Air Filter Restriction Diagnostic Configuration ---
+#define AIR_FILTER_CHECK_MIN_RPM 4000          // High revs where volumetric airflow demand is highest
+#define AIR_FILTER_MIN_INJ_DUTY 55.0f          // High injector duty cycle confirms wide-open throttle (WOT)
+#define AIR_FILTER_RESTRICTION_VAC_PSI 1.8f    // Healthy WOT vacuum is < 0.5 psi; >= 1.8 psi indicates choked intake
+#define AIR_FILTER_DETECT_PERSIST_MS 1500UL    // Condition must persist continuously for 1.5 seconds
+#define AIR_FILTER_ALERT_HOLD_MS 15000UL       // Display warning for 15s so driver safely views it after the pull
+
 // Fuel/Trip Constants
 #define PULSES_PER_KM 24714
 const float PULSES_PER_KM_F = 24714.33f;
