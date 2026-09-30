@@ -103,6 +103,7 @@ bool temp_on = true;
 bool conn_on = true;
 int overspeed_state = 0;
 uint8_t injector_state = 0;
+uint8_t th_switch_state = 1;
 bool inj_on = true;
 const int over_speed_on = 500;
 const int over_speed_off = 170;

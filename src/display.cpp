@@ -342,6 +342,73 @@ void warnings(unsigned long now)
     air_filter_drawn = false;
   }
 
+  // -------- Idle Switch Misadjustment / Cable Stretch Diagnostic --------//
+  // Detects stretched cable or misadjusted microswitch: engine is warm and idling with deep
+  // manifold vacuum (>= 7.5 psi), but the throttle microswitch never clicked closed (th_switch_state == 0).
+  // Without the switch closing, DFCO fuel-cut is silently disabled on every deceleration!
+  static unsigned long idle_sw_fault_start_ms = 0;
+  static bool idle_sw_fault_active = false;
+  static bool idle_sw_drawn = false;
+
+  bool idle_sw_conditions = (currentState == STATE_RUNNING &&
+                             rpm >= VAC_LEAK_MIN_RPM && rpm <= VAC_LEAK_MAX_RPM &&
+                             spd <= VAC_LEAK_MAX_SPD_KMH &&
+                             temp_out >= VAC_LEAK_MIN_TEMP_C &&
+                             vac_valid);
+
+  if (idle_sw_conditions)
+  {
+    if (vacuum_psi >= IDLE_SW_FAULT_VAC_PSI && th_switch_state == 0)
+    {
+      if (idle_sw_fault_start_ms == 0)
+      {
+        idle_sw_fault_start_ms = now;
+      }
+      else if (now - idle_sw_fault_start_ms >= IDLE_SW_FAULT_PERSIST_MS)
+      {
+        idle_sw_fault_active = true;
+      }
+    }
+    else if (th_switch_state == 1)
+    {
+      idle_sw_fault_start_ms = 0;
+      idle_sw_fault_active = false;
+    }
+  }
+  else
+  {
+    idle_sw_fault_start_ms = 0;
+    if (th_switch_state == 1)
+    {
+      idle_sw_fault_active = false;
+    }
+  }
+
+  if (idle_sw_fault_active && !vac_leak_active && !air_filter_active && priority == 0)
+  {
+    if (lowBlinkState)
+    {
+      if (!idle_sw_drawn)
+      {
+        tv.setCursor(WARNING_X + 15, WARNING_Y + 50);
+        tv.setTextColor(0xFF);
+        tv.print("CHECK IDLE SWITCH");
+        idle_sw_drawn = true;
+      }
+      buzzer_state = 1;
+    }
+    else if (idle_sw_drawn)
+    {
+      tv.fillRect(WARNING_X + 15, WARNING_Y + 50, 106, 8, 0x00);
+      idle_sw_drawn = false;
+    }
+  }
+  else if (idle_sw_drawn)
+  {
+    tv.fillRect(WARNING_X + 15, WARNING_Y + 50, 106, 8, 0x00);
+    idle_sw_drawn = false;
+  }
+
   // -------- Auto Start-Stop Active Indicator --------//
   static bool ecoStopDrawn = false;
   if (currentState == STATE_AUTO_STOP)

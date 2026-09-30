@@ -101,6 +101,7 @@ extern bool temp_on;
 extern bool conn_on;
 extern int overspeed_state;
 extern uint8_t injector_state;
+extern uint8_t th_switch_state;
 extern bool inj_on;
 extern const int over_speed_on;
 extern const int over_speed_off;

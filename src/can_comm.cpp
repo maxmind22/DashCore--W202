@@ -73,6 +73,7 @@ void drainCanRxBuffer(unsigned long now) {
       uint8_t flags = canMsg.data[6];
       uint8_t new_inj_state = flags & 0x01;
       oil_level_t = (flags >> 1) & 0x01;
+      th_switch_state = (flags >> 2) & 0x01;
       uint8_t rx_seq_02 = canMsg.data[7];
 
       if (seq_02_synced && (now - lastPacketTime <= FRONT_MCU_CAN_TIMEOUT_MS)) {

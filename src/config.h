@@ -133,6 +133,10 @@ const unsigned long ENGINE_STALL_DEBOUNCE_MS = 1500; // Require 1.5s persistent 
 #define AIR_FILTER_DETECT_PERSIST_MS 1500UL    // Condition must persist continuously for 1.5 seconds
 #define AIR_FILTER_ALERT_HOLD_MS 15000UL       // Display warning for 15s so driver safely views it after the pull
 
+// --- Idle Switch Misadjustment / Cable Stretch Diagnostic Configuration ---
+#define IDLE_SW_FAULT_VAC_PSI 7.5f     // Healthy warm idle vacuum is 8-11 psi; >= 7.5 psi confirms idle
+#define IDLE_SW_FAULT_PERSIST_MS 4000UL // 4 seconds continuous idle with open switch triggers warning
+
 // Fuel/Trip Constants
 #define PULSES_PER_KM 24714
 const float PULSES_PER_KM_F = 24714.33f;
