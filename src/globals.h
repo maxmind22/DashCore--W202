@@ -57,6 +57,7 @@ extern uint32_t accumulated_inj_pulses;
 extern uint32_t spd_delta_pulses;
 extern uint32_t can_packets_lost_02;
 extern float live_inj_duty_cycle;
+extern float live_net_pulse_us;
 extern RTC_DATA_ATTR float total_fuel_liters;
 extern RTC_DATA_ATTR float total_distance_km;
 extern RTC_DATA_ATTR float compounded_r_int;
