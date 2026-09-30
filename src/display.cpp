@@ -211,6 +211,76 @@ void warnings(unsigned long now)
     phoneKeyWarningDrawn = false;
   }
 
+  // -------- Vacuum Leak / Engine Health Warning --------//
+  // Triggers if manifold vacuum at warm idle remains consistently < 5.0 psi for 5 continuous seconds
+  static unsigned long vac_leak_start_ms = 0;
+  static bool vac_leak_active = false;
+  static bool vac_leak_drawn = false;
+
+  bool vac_valid = (now - lastVacPacketTime <= FRONT_MCU_TIMEOUT_MS);
+  bool idle_conditions = (currentState == STATE_RUNNING &&
+                          rpm >= VAC_LEAK_MIN_RPM && rpm <= VAC_LEAK_MAX_RPM &&
+                          spd <= VAC_LEAK_MAX_SPD_KMH &&
+                          temp_out >= VAC_LEAK_MIN_TEMP_C &&
+                          vac_valid);
+
+  if (idle_conditions)
+  {
+    if (vacuum_psi < VAC_LEAK_THRESHOLD_PSI)
+    {
+      if (vac_leak_start_ms == 0)
+      {
+        vac_leak_start_ms = now;
+      }
+      else if (now - vac_leak_start_ms >= VAC_LEAK_PERSIST_MS)
+      {
+        vac_leak_active = true;
+      }
+    }
+    else if (vacuum_psi >= VAC_LEAK_CLEAR_PSI)
+    {
+      vac_leak_start_ms = 0;
+      vac_leak_active = false;
+    }
+  }
+  else
+  {
+    if (!vac_leak_active)
+    {
+      vac_leak_start_ms = 0;
+    }
+    else if (vacuum_psi >= VAC_LEAK_CLEAR_PSI)
+    {
+      vac_leak_active = false;
+      vac_leak_start_ms = 0;
+    }
+  }
+
+  if (vac_leak_active && priority == 0)
+  {
+    if (lowBlinkState)
+    {
+      if (!vac_leak_drawn)
+      {
+        tv.setCursor(WARNING_X + 35, WARNING_Y + 50);
+        tv.setTextColor(0xFF);
+        tv.print("CHECK VACUUM");
+        vac_leak_drawn = true;
+      }
+      buzzer_state = 1;
+    }
+    else if (vac_leak_drawn)
+    {
+      tv.fillRect(WARNING_X + 35, WARNING_Y + 50, 78, 8, 0x00);
+      vac_leak_drawn = false;
+    }
+  }
+  else if (vac_leak_drawn)
+  {
+    tv.fillRect(WARNING_X + 35, WARNING_Y + 50, 78, 8, 0x00);
+    vac_leak_drawn = false;
+  }
+
   // -------- Auto Start-Stop Active Indicator --------//
   static bool ecoStopDrawn = false;
   if (currentState == STATE_AUTO_STOP)
