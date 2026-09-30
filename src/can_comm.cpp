@@ -156,6 +156,9 @@ void drainCanRxBuffer(unsigned long now) {
           uint16_t current_rpm = (rpm > 0) ? rpm : new_rpm;
           if (delta_pulses > 0 && current_rpm > 0) {
             float avg_net_pulse_us = net_pulse_us / (float)delta_pulses;
+            if (avg_net_pulse_us >= 400.0f) {
+              live_net_pulse_us = 0.25f * avg_net_pulse_us + 0.75f * live_net_pulse_us;
+            }
             // Engine cycle period for 1 injector (4-stroke: 1 injection per 2 revs = 120,000,000 / RPM us)
             float cycle_period_us = 120000000.0f / (float)current_rpm;
             raw_duty = (avg_net_pulse_us / cycle_period_us) * 100.0f;

@@ -59,6 +59,7 @@ uint32_t accumulated_inj_pulses = 0;
 uint32_t spd_delta_pulses = 0;
 uint32_t can_packets_lost_02 = 0;
 float live_inj_duty_cycle = 0.0f;
+float live_net_pulse_us = 2000.0f;
 RTC_DATA_ATTR float total_fuel_liters = 0.0f;
 RTC_DATA_ATTR float total_distance_km = 0.0f;
 RTC_DATA_ATTR float compounded_r_int = 0.0f;

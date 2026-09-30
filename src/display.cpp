@@ -409,6 +409,71 @@ void warnings(unsigned long now)
     idle_sw_drawn = false;
   }
 
+  // -------- Leaking FPR / Chronic Rich Idle Diagnostic --------//
+  // Detects a torn fuel pressure regulator diaphragm: strong manifold vacuum at warm idle
+  // draws unmetered fuel through the vacuum hose into the intake, forcing the ECU's closed-loop
+  // fuel trim to bottom out and collapse injector pulse width abnormally low (< 1350us).
+  static unsigned long fpr_leak_start_ms = 0;
+  static bool fpr_leak_active = false;
+  static bool fpr_leak_drawn = false;
+
+  bool fpr_diag_conditions = (currentState == STATE_RUNNING &&
+                              rpm >= VAC_LEAK_MIN_RPM && rpm <= VAC_LEAK_MAX_RPM &&
+                              spd <= VAC_LEAK_MAX_SPD_KMH &&
+                              temp_out >= FPR_LEAK_MIN_TEMP_C &&
+                              th_switch_state == 1 &&
+                              injector_state == 0 &&
+                              vac_valid);
+
+  if (fpr_diag_conditions)
+  {
+    if (vacuum_psi >= FPR_LEAK_MIN_VAC_PSI && live_net_pulse_us > 400.0f && live_net_pulse_us < FPR_LEAK_MAX_PULSE_US)
+    {
+      if (fpr_leak_start_ms == 0)
+      {
+        fpr_leak_start_ms = now;
+      }
+      else if (now - fpr_leak_start_ms >= FPR_LEAK_DETECT_PERSIST_MS)
+      {
+        fpr_leak_active = true;
+      }
+    }
+    else if (live_net_pulse_us >= (FPR_LEAK_MAX_PULSE_US + 200.0f))
+    {
+      fpr_leak_start_ms = 0;
+      fpr_leak_active = false;
+    }
+  }
+  else
+  {
+    fpr_leak_start_ms = 0;
+  }
+
+  if (fpr_leak_active && !vac_leak_active && !air_filter_active && !idle_sw_fault_active && priority == 0)
+  {
+    if (lowBlinkState)
+    {
+      if (!fpr_leak_drawn)
+      {
+        tv.setCursor(WARNING_X + 25, WARNING_Y + 50);
+        tv.setTextColor(0xFF);
+        tv.print("CHECK FPR LEAK");
+        fpr_leak_drawn = true;
+      }
+      buzzer_state = 1;
+    }
+    else if (fpr_leak_drawn)
+    {
+      tv.fillRect(WARNING_X + 25, WARNING_Y + 50, 88, 8, 0x00);
+      fpr_leak_drawn = false;
+    }
+  }
+  else if (fpr_leak_drawn)
+  {
+    tv.fillRect(WARNING_X + 25, WARNING_Y + 50, 88, 8, 0x00);
+    fpr_leak_drawn = false;
+  }
+
   // -------- Auto Start-Stop Active Indicator --------//
   static bool ecoStopDrawn = false;
   if (currentState == STATE_AUTO_STOP)
