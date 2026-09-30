@@ -409,69 +409,100 @@ void warnings(unsigned long now)
     idle_sw_drawn = false;
   }
 
-  // -------- Leaking FPR / Chronic Rich Idle Diagnostic --------//
-  // Detects a torn fuel pressure regulator diaphragm: strong manifold vacuum at warm idle
-  // draws unmetered fuel through the vacuum hose into the intake, forcing the ECU's closed-loop
-  // fuel trim to bottom out and collapse injector pulse width abnormally low (< 1350us).
-  static unsigned long fpr_leak_start_ms = 0;
-  static bool fpr_leak_active = false;
-  static bool fpr_leak_drawn = false;
+  // -------- Bidirectional Fuel System Diagnostic (Rich FPR Leak vs Lean Fuel Starvation) --------//
+  // Normal M111 warm idle net pulse is 1800 - 2400us.
+  // 1. Rich / Low Pulse (< 1350us): ECU negative trim pinned; raw fuel entering (torn FPR diaphragm,
+  //    dripping/stuck-open injector, blocked fuel return line).
+  // 2. Lean / High Pulse (> 3000us): ECU positive trim pinned; fuel starvation (weak/dying fuel pump,
+  //    clogged fuel filter, FPR stuck open with low rail pressure, partially clogged/varnished injectors).
+  static unsigned long fuel_diag_rich_start_ms = 0;
+  static unsigned long fuel_diag_lean_start_ms = 0;
+  static uint8_t fuel_diag_fault = 0; // 0 = OK, 1 = Rich (FPR leak), 2 = Lean (Fuel pump / filter)
+  static bool fuel_diag_drawn = false;
 
-  bool fpr_diag_conditions = (currentState == STATE_RUNNING &&
-                              rpm >= VAC_LEAK_MIN_RPM && rpm <= VAC_LEAK_MAX_RPM &&
-                              spd <= VAC_LEAK_MAX_SPD_KMH &&
-                              temp_out >= FPR_LEAK_MIN_TEMP_C &&
-                              th_switch_state == 1 &&
-                              injector_state == 0 &&
-                              vac_valid);
+  bool fuel_diag_conditions = (currentState == STATE_RUNNING &&
+                               rpm >= VAC_LEAK_MIN_RPM && rpm <= VAC_LEAK_MAX_RPM &&
+                               spd <= VAC_LEAK_MAX_SPD_KMH &&
+                               temp_out >= FPR_LEAK_MIN_TEMP_C &&
+                               th_switch_state == 1 &&
+                               injector_state == 0 &&
+                               vac_valid &&
+                               vacuum_psi >= FPR_LEAK_MIN_VAC_PSI);
 
-  if (fpr_diag_conditions)
+  if (fuel_diag_conditions)
   {
-    if (vacuum_psi >= FPR_LEAK_MIN_VAC_PSI && live_net_pulse_us > 400.0f && live_net_pulse_us < FPR_LEAK_MAX_PULSE_US)
+    // Rich Check: Abnormally low pulse width (< 1350us)
+    if (live_net_pulse_us > 400.0f && live_net_pulse_us < FPR_LEAK_MAX_PULSE_US)
     {
-      if (fpr_leak_start_ms == 0)
+      if (fuel_diag_rich_start_ms == 0)
       {
-        fpr_leak_start_ms = now;
+        fuel_diag_rich_start_ms = now;
       }
-      else if (now - fpr_leak_start_ms >= FPR_LEAK_DETECT_PERSIST_MS)
+      else if (now - fuel_diag_rich_start_ms >= FPR_LEAK_DETECT_PERSIST_MS)
       {
-        fpr_leak_active = true;
+        fuel_diag_fault = 1;
       }
     }
     else if (live_net_pulse_us >= (FPR_LEAK_MAX_PULSE_US + 200.0f))
     {
-      fpr_leak_start_ms = 0;
-      fpr_leak_active = false;
+      fuel_diag_rich_start_ms = 0;
+      if (fuel_diag_fault == 1) fuel_diag_fault = 0;
+    }
+
+    // Lean Check: Abnormally high pulse width (> 3000us)
+    if (live_net_pulse_us > FUEL_STARV_MIN_PULSE_US)
+    {
+      if (fuel_diag_lean_start_ms == 0)
+      {
+        fuel_diag_lean_start_ms = now;
+      }
+      else if (now - fuel_diag_lean_start_ms >= FPR_LEAK_DETECT_PERSIST_MS)
+      {
+        fuel_diag_fault = 2;
+      }
+    }
+    else if (live_net_pulse_us <= (FUEL_STARV_MIN_PULSE_US - 200.0f))
+    {
+      fuel_diag_lean_start_ms = 0;
+      if (fuel_diag_fault == 2) fuel_diag_fault = 0;
     }
   }
   else
   {
-    fpr_leak_start_ms = 0;
+    fuel_diag_rich_start_ms = 0;
+    fuel_diag_lean_start_ms = 0;
   }
 
-  if (fpr_leak_active && !vac_leak_active && !air_filter_active && !idle_sw_fault_active && priority == 0)
+  if (fuel_diag_fault > 0 && !vac_leak_active && !air_filter_active && !idle_sw_fault_active && priority == 0)
   {
     if (lowBlinkState)
     {
-      if (!fpr_leak_drawn)
+      if (!fuel_diag_drawn)
       {
-        tv.setCursor(WARNING_X + 25, WARNING_Y + 50);
+        tv.setCursor(WARNING_X + 22, WARNING_Y + 50);
         tv.setTextColor(0xFF);
-        tv.print("CHECK FPR LEAK");
-        fpr_leak_drawn = true;
+        if (fuel_diag_fault == 1)
+        {
+          tv.print("CHECK FPR LEAK");
+        }
+        else
+        {
+          tv.print("CHECK FUEL PUMP");
+        }
+        fuel_diag_drawn = true;
       }
       buzzer_state = 1;
     }
-    else if (fpr_leak_drawn)
+    else if (fuel_diag_drawn)
     {
-      tv.fillRect(WARNING_X + 25, WARNING_Y + 50, 88, 8, 0x00);
-      fpr_leak_drawn = false;
+      tv.fillRect(WARNING_X + 20, WARNING_Y + 50, 96, 8, 0x00);
+      fuel_diag_drawn = false;
     }
   }
-  else if (fpr_leak_drawn)
+  else if (fuel_diag_drawn)
   {
-    tv.fillRect(WARNING_X + 25, WARNING_Y + 50, 88, 8, 0x00);
-    fpr_leak_drawn = false;
+    tv.fillRect(WARNING_X + 20, WARNING_Y + 50, 96, 8, 0x00);
+    fuel_diag_drawn = false;
   }
 
   // -------- Auto Start-Stop Active Indicator --------//
