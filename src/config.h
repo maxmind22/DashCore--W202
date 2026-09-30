@@ -137,10 +137,11 @@ const unsigned long ENGINE_STALL_DEBOUNCE_MS = 1500; // Require 1.5s persistent 
 #define IDLE_SW_FAULT_VAC_PSI 7.5f     // Healthy warm idle vacuum is 8-11 psi; >= 7.5 psi confirms idle
 #define IDLE_SW_FAULT_PERSIST_MS 4000UL // 4 seconds continuous idle with open switch triggers warning
 
-// --- Fuel Pressure Regulator (FPR) Leak / Rich Idle Diagnostic Configuration ---
-#define FPR_LEAK_MIN_TEMP_C 75        // Must be fully warm (warm-up enrichment completely ended)
-#define FPR_LEAK_MIN_VAC_PSI 7.5f     // Strong idle vacuum creates max pressure differential across FPR diaphragm
-#define FPR_LEAK_MAX_PULSE_US 1350.0f // Normal M111 idle is 1800-2400us; < 1350us indicates ECU negative fuel trim bottomed out
+// --- Bidirectional Fuel System Diagnostic Configuration ---
+#define FPR_LEAK_MIN_TEMP_C 75          // Must be fully warm (warm-up enrichment completely ended)
+#define FPR_LEAK_MIN_VAC_PSI 7.5f       // Strong idle vacuum confirms closed-throttle idle
+#define FPR_LEAK_MAX_PULSE_US 1350.0f   // < 1350us: rich trim (torn FPR diaphragm, dripping injector, blocked return)
+#define FUEL_STARV_MIN_PULSE_US 3000.0f // > 3000us: lean trim (weak fuel pump, clogged filter, low rail pressure, clogged injector)
 #define FPR_LEAK_DETECT_PERSIST_MS 8000UL // 8 seconds continuous abnormal idle to confirm steady-state condition
 
 // Fuel/Trip Constants
