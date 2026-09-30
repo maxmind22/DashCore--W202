@@ -281,6 +281,67 @@ void warnings(unsigned long now)
     vac_leak_drawn = false;
   }
 
+  // -------- Air Filter / Intake Restriction Diagnostic --------//
+  // Triggers if manifold vacuum at high RPM under wide-open throttle (high inj duty) stays >= 1.8 psi
+  static unsigned long air_filter_detect_start_ms = 0;
+  static unsigned long air_filter_alert_until_ms = 0;
+  static bool air_filter_drawn = false;
+
+  bool high_load_wot = (currentState == STATE_RUNNING &&
+                        rpm >= AIR_FILTER_CHECK_MIN_RPM &&
+                        live_inj_duty_cycle >= AIR_FILTER_MIN_INJ_DUTY &&
+                        vac_valid);
+
+  if (high_load_wot)
+  {
+    if (vacuum_psi >= AIR_FILTER_RESTRICTION_VAC_PSI)
+    {
+      if (air_filter_detect_start_ms == 0)
+      {
+        air_filter_detect_start_ms = now;
+      }
+      else if (now - air_filter_detect_start_ms >= AIR_FILTER_DETECT_PERSIST_MS)
+      {
+        air_filter_alert_until_ms = now + AIR_FILTER_ALERT_HOLD_MS;
+      }
+    }
+    else
+    {
+      air_filter_detect_start_ms = 0;
+    }
+  }
+  else
+  {
+    air_filter_detect_start_ms = 0;
+  }
+
+  bool air_filter_active = (now < air_filter_alert_until_ms);
+
+  if (air_filter_active && !vac_leak_active && priority == 0)
+  {
+    if (lowBlinkState)
+    {
+      if (!air_filter_drawn)
+      {
+        tv.setCursor(WARNING_X + 20, WARNING_Y + 50);
+        tv.setTextColor(0xFF);
+        tv.print("CHECK AIR FILTER");
+        air_filter_drawn = true;
+      }
+      buzzer_state = 1;
+    }
+    else if (air_filter_drawn)
+    {
+      tv.fillRect(WARNING_X + 20, WARNING_Y + 50, 98, 8, 0x00);
+      air_filter_drawn = false;
+    }
+  }
+  else if (air_filter_drawn)
+  {
+    tv.fillRect(WARNING_X + 20, WARNING_Y + 50, 98, 8, 0x00);
+    air_filter_drawn = false;
+  }
+
   // -------- Auto Start-Stop Active Indicator --------//
   static bool ecoStopDrawn = false;
   if (currentState == STATE_AUTO_STOP)
