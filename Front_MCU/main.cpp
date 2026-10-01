@@ -22,7 +22,7 @@ const int map_pin = A3;
 #define inj_sense_pin 7
 
 // --- MAP / Vacuum Sensor (Toyota 89420-02010 / 89420-02020) ---
-#define MAP_EMA_ALPHA 0.20f
+#define MAP_EMA_ALPHA 0.80f
 #define MAP_CALIB_ATM_DEFAULT 780 // ~3.8V at sea level atmospheric pressure (~101.3 kPa)
 #define MAP_ADC_TO_PSI 0.02035f   // Conversion factor from ADC counts to PSI vacuum
 #define MAP_READ_INTERVAL_MS 20
