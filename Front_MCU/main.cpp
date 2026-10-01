@@ -222,7 +222,6 @@ void setup()
 void loop()
 {
   unsigned long currentMillis = millis();
-  unsigned long currentMicros = micros();
 
   // Watchdog check for stuck injector active state (evaluated in loop without ISR overhead)
   static unsigned long inj_active_start_ms = 0;
@@ -393,11 +392,12 @@ void loop()
 
   //=================== Calculate RPM (Every loop) ======================//
   noInterrupts();
+  uint32_t now_us = micros();
   uint32_t p = period;
   uint32_t last_rpm_edge = lastTime;
   interrupts();
 
-  if (currentMicros - last_rpm_edge > RPM_STALE_TIMEOUT_US || p == 0)
+  if (now_us - last_rpm_edge > RPM_STALE_TIMEOUT_US || p == 0)
   {
     rpm = 0;
   }
@@ -451,9 +451,25 @@ void loop()
   }
 
   // Deactivation is instant when throttle is opened or RPM drops below hysteresis limit
-  if ((th_Pos == 0 || rpm < DFCO_DISENGAGE_RPM) && injDisable)
+  // Require confirmation before disengaging on low RPM to ignore transient tachometer glitches
+  static uint8_t low_rpm_confirm_count = 0;
+  bool rpm_disengage = false;
+  if (rpm < DFCO_DISENGAGE_RPM)
+  {
+    if (++low_rpm_confirm_count >= 3)
+    {
+      rpm_disengage = true;
+    }
+  }
+  else
+  {
+    low_rpm_confirm_count = 0;
+  }
+
+  if ((th_Pos == 0 || rpm_disengage) && injDisable)
   {
     injDisable = false;
+    low_rpm_confirm_count = 0;
     // Only bring pin LOW if Auto Start-Stop is not actively cutting injectors
     if (!eco_inj_cut_cmd && !eco_inj_cut_active)
     {
@@ -553,7 +569,7 @@ void loop()
     digitalWriteFast(regulator_pin, LOW); // De-energize field disconnect relay
   }
 
-  //================= Send to Display MCU (Every 50ms) ===============//
+  //================= Send to Display MCU: 0x02 & 0x04 (Every 50ms) ===============//
   if (currentMillis - lastCanSendTime >= CAN_SEND_INTERVAL_MS)
   {
     static uint8_t seq_02 = 0;
@@ -563,16 +579,17 @@ void loop()
     uint16_t temp_s = (uint16_t)temp_avg;
     uint8_t th_state = (uint8_t)digitalReadFast(th_pin); // 1 = closed (idle), 0 = open
 
-    // CAN ID 0x02: Instantaneous Status (DLC 8)
+    // CAN ID 0x02: Instantaneous Status & Vacuum (DLC 8)
     canMsgTx.can_id = 0x02;
     canMsgTx.can_dlc = 8;
-    canMsgTx.data[0] = temp_s & 0xFF;
-    canMsgTx.data[1] = temp_s >> 8;
-    canMsgTx.data[2] = spd_s & 0xFF;
-    canMsgTx.data[3] = spd_s >> 8;
-    canMsgTx.data[4] = rpm_s & 0xFF;
-    canMsgTx.data[5] = rpm_s >> 8;
-    canMsgTx.data[6] = (injDisable_s & 0x01) | ((oil_level & 0x01) << 1) | ((th_state & 0x01) << 2);
+    canMsgTx.data[0] = temp_s & 0xFF;        // Raw Temp ADC low byte
+    canMsgTx.data[1] = (temp_s >> 8) & 0xFF; // Raw Temp ADC high byte
+    canMsgTx.data[2] = (uint8_t)spd_s;       // Vehicle speed (0..220 km/h)
+    canMsgTx.data[3] = rpm_s & 0xFF;         // RPM low byte
+    canMsgTx.data[4] = (rpm_s >> 8) & 0xFF;  // RPM high byte
+    canMsgTx.data[5] = vac_psi_x10;          // Vacuum in 0.1 PSI (e.g. 66 = 6.6 psi)
+    canMsgTx.data[6] = (injDisable_s & 0x01) | ((oil_level & 0x01) << 1) | ((th_state & 0x01) << 2) |
+                       (((temp_avg >= DFCO_ENGINE_WARM_ADC && vac_psi < 2.0f) ? 1 : 0) << 3);
     canMsgTx.data[7] = seq_02++;
     mcp2515.sendMessage(&canMsgTx);
 
@@ -604,15 +621,6 @@ void loop()
     canMsgTx.data[5] = (inj_pulses_snap >> 8) & 0xFF;
     canMsgTx.data[6] = spd_pulses_snap & 0xFF;
     canMsgTx.data[7] = (spd_pulses_snap >> 8) & 0xFF;
-    mcp2515.sendMessage(&canMsgTx);
-
-    // CAN ID 0x05: Vacuum / Manifold Telemetry (DLC 4)
-    canMsgTx.can_id = 0x05;
-    canMsgTx.can_dlc = 4;
-    canMsgTx.data[0] = vac_psi_x10;                                    // Vacuum in 0.1 PSI (e.g. 85 = 8.5 psi)
-    canMsgTx.data[1] = (uint8_t)((uint16_t)map_adc_avg & 0xFF);        // Raw MAP ADC low byte
-    canMsgTx.data[2] = (uint8_t)(((uint16_t)map_adc_avg >> 8) & 0xFF); // Raw MAP ADC high byte
-    canMsgTx.data[3] = (temp_avg >= DFCO_ENGINE_WARM_ADC && vac_psi < 2.0f) ? 1 : 0; // High load / power enrichment flag (warm only)
     mcp2515.sendMessage(&canMsgTx);
 
     lastCanSendTime = currentMillis;

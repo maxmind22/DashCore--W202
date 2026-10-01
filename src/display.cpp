@@ -218,10 +218,12 @@ void warnings(unsigned long now)
   static bool vac_leak_drawn = false;
 
   bool vac_valid = (now - lastVacPacketTime <= FRONT_MCU_TIMEOUT_MS);
-  bool idle_conditions = (currentState == STATE_RUNNING &&
+  bool idle_conditions = (MAP_SENSOR_ENABLED &&
+                          currentState == STATE_RUNNING &&
                           rpm >= VAC_LEAK_MIN_RPM && rpm <= VAC_LEAK_MAX_RPM &&
                           spd <= VAC_LEAK_MAX_SPD_KMH &&
                           temp_out >= VAC_LEAK_MIN_TEMP_C &&
+                          th_switch_state == 1 &&
                           vac_valid);
 
   if (idle_conditions)
@@ -245,15 +247,9 @@ void warnings(unsigned long now)
   }
   else
   {
-    if (!vac_leak_active)
-    {
-      vac_leak_start_ms = 0;
-    }
-    else if (vacuum_psi >= VAC_LEAK_CLEAR_PSI)
-    {
-      vac_leak_active = false;
-      vac_leak_start_ms = 0;
-    }
+    // Auto-clear immediately when exiting idle (e.g. driving away, stepping on gas, or cold engine)
+    vac_leak_start_ms = 0;
+    vac_leak_active = false;
   }
 
   if (vac_leak_active && priority == 0)
@@ -267,7 +263,7 @@ void warnings(unsigned long now)
         tv.print("CHECK VACUUM");
         vac_leak_drawn = true;
       }
-      buzzer_state = 1;
+      // Silent visual warning only (no buzzer)
     }
     else if (vac_leak_drawn)
     {
@@ -287,9 +283,11 @@ void warnings(unsigned long now)
   static unsigned long air_filter_alert_until_ms = 0;
   static bool air_filter_drawn = false;
 
-  bool high_load_wot = (currentState == STATE_RUNNING &&
+  bool high_load_wot = (MAP_SENSOR_ENABLED &&
+                        currentState == STATE_RUNNING &&
                         rpm >= AIR_FILTER_CHECK_MIN_RPM &&
                         live_inj_duty_cycle >= AIR_FILTER_MIN_INJ_DUTY &&
+                        temp_out >= AIR_FILTER_MIN_TEMP_C &&
                         vac_valid);
 
   if (high_load_wot)
@@ -313,6 +311,10 @@ void warnings(unsigned long now)
   else
   {
     air_filter_detect_start_ms = 0;
+    if (!MAP_SENSOR_ENABLED || temp_out < AIR_FILTER_MIN_TEMP_C)
+    {
+      air_filter_alert_until_ms = 0;
+    }
   }
 
   bool air_filter_active = (now < air_filter_alert_until_ms);
@@ -328,7 +330,7 @@ void warnings(unsigned long now)
         tv.print("CHECK AIR FILTER");
         air_filter_drawn = true;
       }
-      buzzer_state = 1;
+      // Silent visual warning only (no buzzer)
     }
     else if (air_filter_drawn)
     {
@@ -350,7 +352,8 @@ void warnings(unsigned long now)
   static bool idle_sw_fault_active = false;
   static bool idle_sw_drawn = false;
 
-  bool idle_sw_conditions = (currentState == STATE_RUNNING &&
+  bool idle_sw_conditions = (MAP_SENSOR_ENABLED &&
+                             currentState == STATE_RUNNING &&
                              rpm >= VAC_LEAK_MIN_RPM && rpm <= VAC_LEAK_MAX_RPM &&
                              spd <= VAC_LEAK_MAX_SPD_KMH &&
                              temp_out >= VAC_LEAK_MIN_TEMP_C &&
@@ -378,10 +381,7 @@ void warnings(unsigned long now)
   else
   {
     idle_sw_fault_start_ms = 0;
-    if (th_switch_state == 1)
-    {
-      idle_sw_fault_active = false;
-    }
+    idle_sw_fault_active = false;
   }
 
   if (idle_sw_fault_active && !vac_leak_active && !air_filter_active && priority == 0)
@@ -395,7 +395,7 @@ void warnings(unsigned long now)
         tv.print("CHECK IDLE SWITCH");
         idle_sw_drawn = true;
       }
-      buzzer_state = 1;
+      // Silent visual warning only (no buzzer)
     }
     else if (idle_sw_drawn)
     {
@@ -426,8 +426,7 @@ void warnings(unsigned long now)
                                temp_out >= FPR_LEAK_MIN_TEMP_C &&
                                th_switch_state == 1 &&
                                injector_state == 0 &&
-                               vac_valid &&
-                               vacuum_psi >= FPR_LEAK_MIN_VAC_PSI);
+                               (!MAP_SENSOR_ENABLED || (vac_valid && vacuum_psi >= FPR_LEAK_MIN_VAC_PSI)));
 
   if (fuel_diag_conditions)
   {
@@ -471,6 +470,10 @@ void warnings(unsigned long now)
   {
     fuel_diag_rich_start_ms = 0;
     fuel_diag_lean_start_ms = 0;
+    if (temp_out < FPR_LEAK_MIN_TEMP_C)
+    {
+      fuel_diag_fault = 0;
+    }
   }
 
   if (fuel_diag_fault > 0 && !vac_leak_active && !air_filter_active && !idle_sw_fault_active && priority == 0)

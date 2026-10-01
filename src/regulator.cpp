@@ -170,6 +170,7 @@ void regulatorTask(void *pvParameters) {
     unsigned long in_last_packet = lastPacketTime;
     float in_vac = vacuum_psi;
     unsigned long in_last_vac = lastVacPacketTime;
+    int in_temp = temp_out;
     portEXIT_CRITICAL(&dataMux);
 
     bool frontMcuConnected = (millis() - in_last_packet < FRONT_MCU_CAN_TIMEOUT_MS);
@@ -211,8 +212,9 @@ void regulatorTask(void *pvParameters) {
 
     bool vac_connected = (millis() - in_last_vac <= FRONT_MCU_TIMEOUT_MS);
     bool voltage_safe_for_cutoff = (new_v >= REGULATOR_V_CUTOFF_FLOOR);
+    bool engine_warm = (in_temp >= REGULATOR_LOAD_MIN_TEMP_C);
 
-    if (engine_charging_allowed && vac_connected && !delay_active) {
+    if (MAP_SENSOR_ENABLED && engine_charging_allowed && vac_connected && engine_warm && !delay_active) {
       if (!accel_cutoff_active) {
         // Trigger cutoff when driver accelerates hard (low manifold vacuum) and battery voltage is healthy
         if (in_vac <= REGULATOR_LOAD_CUTOFF_VAC_PSI && voltage_safe_for_cutoff) {
