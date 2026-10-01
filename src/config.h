@@ -45,10 +45,16 @@
 #define REGULATOR_NOMINAL_RPM 1500.0f       // Baseline RPM for gain scheduling / Front MCU offline
 #define FUEL_ADC_INTERVAL_US 2000000UL      // Fuel sender ADC read interval (2s)
 
+// --- MAP / Vacuum Sensor Feature Toggle ---
+// Set to true to enable load-aware alternator cutoff, manifold vacuum HUD warnings,
+// and vacuum-dependent intake/fuel diagnostics.
+#define MAP_SENSOR_ENABLED true
+
 // --- Load-Aware Alternator De-Excitation (Option B: Full Field Cutoff) ---
 #define REGULATOR_LOAD_CUTOFF_VAC_PSI 2.0f   // Manifold vacuum <= 2.0 psi: cut alternator field (0A drag)
 #define REGULATOR_LOAD_REENGAGE_VAC_PSI 3.0f // Manifold vacuum >= 3.0 psi: re-engage alternator
 #define REGULATOR_V_CUTOFF_FLOOR 12.60f      // Safety floor: abort cutoff if battery drops below 12.60V
+#define REGULATOR_LOAD_MIN_TEMP_C 60         // Minimum coolant temp (°C) before allowing load-based alternator de-excitation
 
 // --- Alternator Regulator Calibration ---
 #define CURRENT_SENSOR_OFFSET_MV 2495.44f  // FS500E2T zero-current offset (calibrated from 2500.0 nominal)
@@ -123,9 +129,9 @@ const unsigned long ENGINE_STALL_DEBOUNCE_MS = 1500; // Require 1.5s persistent 
 #define VAC_LEAK_MAX_SPD_KMH 3        // Must be stationary (idle)
 #define VAC_LEAK_MIN_RPM 550          // Normal idle speed lower bound
 #define VAC_LEAK_MAX_RPM 950          // Normal idle speed upper bound
-#define VAC_LEAK_THRESHOLD_PSI 5.0f   // Healthy warm idle is 8-11 psi; below 5.0 psi indicates leak
-#define VAC_LEAK_PERSIST_MS 5000UL    // 5 seconds continuous low vacuum to trigger warning
-#define VAC_LEAK_CLEAR_PSI 6.5f       // Recovery threshold
+#define VAC_LEAK_THRESHOLD_PSI 3.0f   // Calibrated for 6.6 psi idle: below 3.0 psi indicates leak (normal idle with A/C is ~4.5-5.5 psi)
+#define VAC_LEAK_PERSIST_MS 15000UL   // 15 seconds continuous low vacuum to trigger warning
+#define VAC_LEAK_CLEAR_PSI 4.2f       // Recovery threshold
 
 // --- Air Filter Restriction Diagnostic Configuration ---
 #define AIR_FILTER_CHECK_MIN_RPM 4000          // High revs where volumetric airflow demand is highest
@@ -133,14 +139,15 @@ const unsigned long ENGINE_STALL_DEBOUNCE_MS = 1500; // Require 1.5s persistent 
 #define AIR_FILTER_RESTRICTION_VAC_PSI 1.8f    // Healthy WOT vacuum is < 0.5 psi; >= 1.8 psi indicates choked intake
 #define AIR_FILTER_DETECT_PERSIST_MS 1500UL    // Condition must persist continuously for 1.5 seconds
 #define AIR_FILTER_ALERT_HOLD_MS 15000UL       // Display warning for 15s so driver safely views it after the pull
+#define AIR_FILTER_MIN_TEMP_C 60               // Minimum coolant temp (°C) before evaluating air filter restriction
 
 // --- Idle Switch Misadjustment / Cable Stretch Diagnostic Configuration ---
-#define IDLE_SW_FAULT_VAC_PSI 7.5f     // Healthy warm idle vacuum is 8-11 psi; >= 7.5 psi confirms idle
+#define IDLE_SW_FAULT_VAC_PSI 5.8f     // Calibrated for 6.6 psi warm idle: >= 5.8 psi confirms idle
 #define IDLE_SW_FAULT_PERSIST_MS 4000UL // 4 seconds continuous idle with open switch triggers warning
 
 // --- Bidirectional Fuel System Diagnostic Configuration ---
 #define FPR_LEAK_MIN_TEMP_C 75          // Must be fully warm (warm-up enrichment completely ended)
-#define FPR_LEAK_MIN_VAC_PSI 7.5f       // Strong idle vacuum confirms closed-throttle idle
+#define FPR_LEAK_MIN_VAC_PSI 5.8f       // Calibrated for 6.6 psi warm idle: >= 5.8 psi confirms closed-throttle idle
 #define FPR_LEAK_MAX_PULSE_US 1350.0f   // < 1350us: rich trim (torn FPR diaphragm, dripping injector, blocked return)
 #define FUEL_STARV_MIN_PULSE_US 3000.0f // > 3000us: lean trim (weak fuel pump, clogged filter, low rail pressure, clogged injector)
 #define FPR_LEAK_DETECT_PERSIST_MS 8000UL // 8 seconds continuous abnormal idle to confirm steady-state condition

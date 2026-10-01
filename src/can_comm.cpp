@@ -67,9 +67,16 @@ void drainCanRxBuffer(unsigned long now) {
   for (int i = 0; i < 6; i++) {
     if (mcp2515.readMessage(&canMsg) != MCP2515::ERROR_OK) break;
     if (canMsg.can_id == 0x02) {
-      raw2 = (uint16_t)((canMsg.data[1] << 8) | canMsg.data[0]);
-      spd_t = (uint16_t)((canMsg.data[3] << 8) | canMsg.data[2]);
-      new_rpm = (uint16_t)((canMsg.data[5] << 8) | canMsg.data[4]);
+      raw2 = (uint16_t)(canMsg.data[0] | (canMsg.data[1] << 8));
+      spd_t = (uint16_t)canMsg.data[2];
+      new_rpm = (uint16_t)(canMsg.data[3] | (canMsg.data[4] << 8));
+
+      uint8_t raw_vac_x10 = canMsg.data[5];
+      portENTER_CRITICAL(&dataMux);
+      vacuum_psi = (float)raw_vac_x10 / 10.0f;
+      lastVacPacketTime = now;
+      portEXIT_CRITICAL(&dataMux);
+
       uint8_t flags = canMsg.data[6];
       uint8_t new_inj_state = flags & 0x01;
       oil_level_t = (flags >> 1) & 0x01;
