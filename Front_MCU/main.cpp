@@ -18,13 +18,13 @@
 const int tempPin = A0;
 const int fan = 5;
 const int ac = A1;
-const int map_pin = A2;
+const int map_pin = A3;
 #define inj_sense_pin 7
 
 // --- MAP / Vacuum Sensor (Toyota 89420-02010 / 89420-02020) ---
 #define MAP_EMA_ALPHA 0.20f
-#define MAP_CALIB_ATM_DEFAULT 780   // ~3.8V at sea level atmospheric pressure (~101.3 kPa)
-#define MAP_ADC_TO_PSI 0.02035f     // Conversion factor from ADC counts to PSI vacuum
+#define MAP_CALIB_ATM_DEFAULT 780 // ~3.8V at sea level atmospheric pressure (~101.3 kPa)
+#define MAP_ADC_TO_PSI 0.02035f   // Conversion factor from ADC counts to PSI vacuum
 #define MAP_READ_INTERVAL_MS 20
 
 float map_adc_avg = (float)MAP_CALIB_ATM_DEFAULT;
@@ -196,7 +196,7 @@ void setup()
   pinModeFast(oil_level_pin, INPUT);
   pinModeFast(regulator_pin, OUTPUT);
   digitalWriteFast(regulator_pin, LOW); // Safe state on boot
-  // Serial.begin(115200);
+  Serial.begin(115200);
 
   // Attach interrupts
   attachInterrupt(digitalPinToInterrupt(rpm_pin), rpmISR, FALLING);
@@ -609,14 +609,14 @@ void loop()
     // CAN ID 0x05: Vacuum / Manifold Telemetry (DLC 4)
     canMsgTx.can_id = 0x05;
     canMsgTx.can_dlc = 4;
-    canMsgTx.data[0] = vac_psi_x10;                                     // Vacuum in 0.1 PSI (e.g. 85 = 8.5 psi)
+    canMsgTx.data[0] = vac_psi_x10;                                    // Vacuum in 0.1 PSI (e.g. 85 = 8.5 psi)
     canMsgTx.data[1] = (uint8_t)((uint16_t)map_adc_avg & 0xFF);        // Raw MAP ADC low byte
     canMsgTx.data[2] = (uint8_t)(((uint16_t)map_adc_avg >> 8) & 0xFF); // Raw MAP ADC high byte
-    canMsgTx.data[3] = (vac_psi < 2.0f) ? 1 : 0;                        // High load / power enrichment flag
+    canMsgTx.data[3] = (temp_avg >= DFCO_ENGINE_WARM_ADC && vac_psi < 2.0f) ? 1 : 0; // High load / power enrichment flag (warm only)
     mcp2515.sendMessage(&canMsgTx);
 
     lastCanSendTime = currentMillis;
   }
-
+  // Serial.println(map_adc_avg);
   wdt_reset();
 }
