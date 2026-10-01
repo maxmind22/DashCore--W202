@@ -341,16 +341,25 @@ void loop()
 
     bool engine_running = (currentState == STATE_RUNNING && rpm >= ENGINE_STARTED_RPM);
     bool vac_valid = (now - lastVacPacketTime <= FRONT_MCU_TIMEOUT_MS);
+    bool engine_warm = (temp_out >= ECO_MIN_TEMP_C);
 
     if (engine_running && vac_valid)
     {
-      // Hysteresis: activate warning if vacuum < 2.0 psi, clear if vacuum >= 2.5 psi
-      if (!eco_warning_active && vacuum_psi < ECO_VACUUM_THRESHOLD_PSI)
+      if (engine_warm)
       {
-        eco_warning_active = true;
+        // Hysteresis: activate warning if vacuum < 2.0 psi, clear if vacuum >= 2.5 psi
+        if (!eco_warning_active && vacuum_psi < ECO_VACUUM_THRESHOLD_PSI)
+        {
+          eco_warning_active = true;
+        }
+        else if (eco_warning_active && vacuum_psi >= (ECO_VACUUM_THRESHOLD_PSI + ECO_VACUUM_HYST_PSI))
+        {
+          eco_warning_active = false;
+        }
       }
-      else if (eco_warning_active && vacuum_psi >= (ECO_VACUUM_THRESHOLD_PSI + ECO_VACUUM_HYST_PSI))
+      else
       {
+        // Suppress economy check while warming up (< 60°C) as cold fast-idle air reduces vacuum
         eco_warning_active = false;
       }
 

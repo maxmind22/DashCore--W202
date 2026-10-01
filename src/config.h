@@ -116,6 +116,7 @@ const unsigned long ENGINE_STALL_DEBOUNCE_MS = 1500; // Require 1.5s persistent 
 #define VACUUM_DISPLAY_Y 38
 #define ECO_VACUUM_THRESHOLD_PSI 2.0f // Below 2.0 psi vacuum = low vacuum / power enrichment
 #define ECO_VACUUM_HYST_PSI 0.5f      // Hysteresis to prevent indicator flickering
+#define ECO_MIN_TEMP_C 60             // Minimum coolant temp (°C) before checking economy (cold start fast idle drops vacuum)
 
 // --- Vacuum Leak Warning Configuration ---
 #define VAC_LEAK_MIN_TEMP_C 60        // Only detect when engine is warm (>60°C)
