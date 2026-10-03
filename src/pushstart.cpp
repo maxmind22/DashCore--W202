@@ -319,15 +319,17 @@ void enterPowerDownSleep()
 
   // 12. Enter deep sleep — CPU halts here, wakes up via reset
   currentState = STATE_SLEEP;
+  rtc_run_marker = 0;
+  rtc_run_marker_inv = 0;
   esp_deep_sleep_start();
 }
 
-void setupPushStartPins()
+void setupPushStartPins(bool keepRunningRelays)
 {
   pinMode(PIN_RELAY_ACC, OUTPUT);
   pinMode(PIN_RELAY_IGN, OUTPUT);
   pinMode(PIN_RELAY_START, OUTPUT);
-  setRelays(false, false, false);
+  setRelays(keepRunningRelays, keepRunningRelays, false);
 
   pinMode(PIN_RELAY_LOCK, OUTPUT);
   digitalWrite(PIN_RELAY_LOCK, LOW);
@@ -352,10 +354,14 @@ void processPushStart(unsigned long now)
                 CRANK_SOLENOID } crankStage = CRANK_PRIME;
   static unsigned long crankStageTime = 0;
   static unsigned long lastEngineStopTime = 0;
+  // Set by the long-press emergency stop. While latched, auto-sync must NOT re-enable IGN:
+  // at speed the wheels keep the engine turning (> ENGINE_STARTED_RPM) after ignition is cut.
+  // Cleared when the vehicle is confirmed stationary (live CAN) or the button is pressed again.
+  static bool emergencyStopLatched = false;
 
   // Auto-synchronize to STATE_RUNNING if engine is detected running while in standby/acc/ign
   // (e.g. after MCU reset while driving, or manual push/roll start)
-  if (currentState != STATE_RUNNING && currentState != STATE_CRANKING)
+  if (currentState != STATE_RUNNING && currentState != STATE_CRANKING && !emergencyStopLatched)
   {
     if (now - lastPacketTime < FRONT_MCU_CAN_TIMEOUT_MS &&
         (rpm >= ENGINE_STARTED_RPM || new_rpm >= ENGINE_STARTED_RPM))
@@ -411,6 +417,21 @@ void processPushStart(unsigned long now)
         lastButtonPressTime = now; // avoid immediate short-press transition
         resetFuelTripData(now);
       }
+      else if (currentState == STATE_RUNNING)
+      {
+        // Emergency Engine Stop: Long press (3s) forces engine shutdown regardless of speed
+        lastButtonPressTime = now;
+        lastEngineStopTime = now;
+        standstillStartTime = 0;
+        isEcoRestart = false;
+        ecoInjCutActive = false;
+        setRelays(true, false, false); // Keep ACC ON, cut IGN and START
+        currentState = STATE_ACC;
+        stoppedToAcc = true;
+        standbyStartTime = now;
+        emergencyStopLatched = true;   // Prevent auto-sync from re-enabling IGN while rolling
+        queueTone(3, 100, 100, now); // 3 rapid beeps confirm emergency shutdown
+      }
     }
   }
   else
@@ -431,6 +452,17 @@ void processPushStart(unsigned long now)
   if (btnEdgeDown)
   {
     standbyStartTime = now;
+  }
+
+  // Release the emergency-stop latch once the driver presses the button again (explicit intent)
+  // or the vehicle is confirmed stationary with the engine stopped over a live CAN link.
+  if (emergencyStopLatched)
+  {
+    bool canAlive = (now - lastPacketTime < FRONT_MCU_CAN_TIMEOUT_MS);
+    if (btnEdgeDown || (canAlive && spd == 0 && rpm < ENGINE_STARTED_RPM))
+    {
+      emergencyStopLatched = false;
+    }
   }
 
 
@@ -834,11 +866,14 @@ void processPushStart(unsigned long now)
       zeroRpmStartTime = 0;
     }
 
-    // Handle Engine Stop Button Press (Only if vehicle is stationary)
+    // Handle Engine Stop Button Press (Only if vehicle is confirmed stationary)
+    // spd is forced to 0 when CAN times out, so a live link is required to trust it.
+    // Without CAN, use the 3 s long-press emergency stop instead.
     if (btnShortPressed && (now - lastButtonPressTime >= BUTTON_COOLDOWN_MS))
     {
-      if (spd == 0)
-      { // Safety check: speed must be zero
+      bool canAlive = (now - lastPacketTime < FRONT_MCU_CAN_TIMEOUT_MS);
+      if (spd == 0 && canAlive)
+      { // Safety check: speed must be confirmed zero
         lastButtonPressTime = now;
         lastEngineStopTime = now;
         standstillStartTime = 0;

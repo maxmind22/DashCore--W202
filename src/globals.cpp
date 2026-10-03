@@ -16,6 +16,8 @@ RTC_DATA_ATTR SystemState currentState = STATE_SLEEP;
 RTC_DATA_ATTR bool vehicleLockDisabled = false;
 volatile bool phoneAuthorized = false;
 RTC_DATA_ATTR bool phoneAuthBypassed = false;
+RTC_NOINIT_ATTR uint32_t rtc_run_marker;     // Intentionally uninitialized (see globals.h)
+RTC_NOINIT_ATTR uint32_t rtc_run_marker_inv; // Bitwise complement for validation
 
 unsigned long standbyStartTime = 0;
 unsigned long lastButtonPressTime = 0;
@@ -81,6 +83,9 @@ volatile uint16_t spd_t = 0;
 uint16_t raw2;
 unsigned long lastPacketTime = 0;
 float vacuum_psi = 0.0f;
+RTC_DATA_ATTR float baro_psi = 14.7f;
+bool map_sensor_fault = false;
+uint8_t ac_switch_state = 0;
 unsigned long lastVacPacketTime = 0;
 uint8_t oil_level_t = 0;
 int oil_level = 0;

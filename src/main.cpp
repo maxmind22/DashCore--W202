@@ -11,18 +11,7 @@
 //=================== setup ===============//
 void setup()
 {
-  // 1. Immediately turn on the switched rails
-  pinMode(PIN_5V_GATE, OUTPUT);
-  digitalWrite(PIN_5V_GATE, HIGH); // Enable Relay
-
-  pinMode(PIN_3V3_DIGITAL_GATE, OUTPUT);
-  digitalWrite(PIN_3V3_DIGITAL_GATE, HIGH); // Power 3.3V pull-ups/level shifter
-
-  delay(30); // Allow voltage rails to stabilize
-  Serial.begin(250000);
-  delay(20); // Let UART stabilize
-
-  // Release any GPIO holds from previous deep sleep
+  // Release any GPIO holds from previous deep sleep FIRST so pins can be driven
   gpio_hold_dis((gpio_num_t)PIN_RELAY_ACC);
   gpio_hold_dis((gpio_num_t)PIN_RELAY_IGN);
   gpio_hold_dis((gpio_num_t)PIN_RELAY_START);
@@ -33,14 +22,48 @@ void setup()
   gpio_hold_dis((gpio_num_t)PIN_RELAY_LOCK);
   gpio_deep_sleep_hold_dis();
 
-  setupPushStartPins();
+  // 0. Crash recovery: restore ACC/IGN immediately (before any delay) if the MCU was reset
+  // unexpectedly (panic / task WDT / brownout) while the engine was running.
+  // Power-on: RTC_NOINIT memory holds garbage. Deep-sleep wake: always an intentional stop.
+  esp_reset_reason_t resetReason = esp_reset_reason();
+  bool crashWhileRunning = (resetReason != ESP_RST_POWERON &&
+                            resetReason != ESP_RST_DEEPSLEEP &&
+                            rtc_run_marker == RTC_RUN_MARKER_MAGIC &&
+                            rtc_run_marker_inv == ~RTC_RUN_MARKER_MAGIC);
 
-  // Initialize system state to Standby with 2-minute sleep timeout on all
-  // boots/resets
-  currentState = STATE_STANDBY;
+  setupPushStartPins(crashWhileRunning);
+
+  if (crashWhileRunning)
+  {
+    currentState = STATE_RUNNING; // RTC_DATA_ATTR was re-initialized by the bootloader
+    lastEngineStartTime = millis();
+  }
+  else
+  {
+    // Initialize system state to Standby with 2-minute sleep timeout on normal boot/wake
+    currentState = STATE_STANDBY;
+    rtc_run_marker = 0;
+    rtc_run_marker_inv = 0;
+  }
   standbyStartTime = millis();
   regulatorTaskRunning = true;
   stoppedToAcc = false;
+
+  // 1. Turn on the switched rails
+  pinMode(PIN_5V_GATE, OUTPUT);
+  digitalWrite(PIN_5V_GATE, HIGH); // Enable Relay
+
+  pinMode(PIN_3V3_DIGITAL_GATE, OUTPUT);
+  digitalWrite(PIN_3V3_DIGITAL_GATE, HIGH); // Power 3.3V pull-ups/level shifter
+
+  delay(30); // Allow voltage rails to stabilize
+  Serial.begin(250000);
+  delay(20); // Let UART stabilize
+
+  if (crashWhileRunning)
+  {
+    Serial.printf("[SAFETY] Unexpected reset (reason %d) while engine running — ACC/IGN restored.\n", (int)resetReason);
+  }
 
   recoverI2CBus(PIN_I2C_SDA, PIN_I2C_SCL);
   Wire.begin();
@@ -362,8 +385,27 @@ void loop()
     vac_drawn = true;
   }
 
-  // Instant Red "ECO" warning: drawn immediately when low vacuum, removed immediately when recovered
-  bool eco_warning_active = (MAP_SENSOR_ENABLED && (currentState == STATE_RUNNING || rpm >= ENGINE_STARTED_RPM) && (vacuum_psi < ECO_VACUUM_THRESHOLD_PSI));
+  // Red "ECO" warning with hysteresis to eliminate flickering near threshold
+  static bool eco_warning_latched = false;
+  float eff_eco_thresh = ECO_VACUUM_THRESHOLD_PSI * getBaroScale();
+  float eff_eco_hyst = ECO_VACUUM_HYST_PSI * getBaroScale();
+
+  if (MAP_SENSOR_ENABLED && !map_sensor_fault && (currentState == STATE_RUNNING || rpm >= ENGINE_STARTED_RPM))
+  {
+    if (!eco_warning_latched && vacuum_psi < eff_eco_thresh)
+    {
+      eco_warning_latched = true;
+    }
+    else if (eco_warning_latched && vacuum_psi >= (eff_eco_thresh + eff_eco_hyst))
+    {
+      eco_warning_latched = false;
+    }
+  }
+  else
+  {
+    eco_warning_latched = false;
+  }
+  bool eco_warning_active = eco_warning_latched;
   if (eco_warning_active != eco_warning_drawn)
   {
     if (eco_warning_active)
@@ -777,6 +819,18 @@ void loop()
   oil_level = (int)oil_level_t;
   warnings(now);
   processPushStart(now);
+
+  // Mirror RUNNING state into reset-surviving RTC memory for crash recovery in setup()
+  if (currentState == STATE_RUNNING)
+  {
+    rtc_run_marker = RTC_RUN_MARKER_MAGIC;
+    rtc_run_marker_inv = ~RTC_RUN_MARKER_MAGIC;
+  }
+  else if (rtc_run_marker != 0)
+  {
+    rtc_run_marker = 0;
+    rtc_run_marker_inv = 0;
+  }
   // debug
   // Serial.print("current: ");
   // Serial.println(current_A_filtered);
