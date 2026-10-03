@@ -30,8 +30,15 @@ void checkCanErrors(unsigned long now) {
 }
 
 void sendCanHealthFrame(unsigned long now) {
+  (void)now;
+  // Read the cross-core heartbeat exactly once, then compute a signed age.
+  // If core 0 wrote a heartbeat slightly newer than curMs, the age is negative => alive.
+  unsigned long curMs = millis();
+  uint32_t hb = last_regulator_heartbeat;
+  int32_t hb_age_ms = (int32_t)(curMs - hb);
   bool regulator_ok =
-      (regulatorTaskHandle != NULL) && (now - last_regulator_heartbeat < REGULATOR_HEARTBEAT_TIMEOUT_MS);
+      (regulatorTaskHandle != NULL) &&
+      (hb_age_ms < (int32_t)REGULATOR_HEARTBEAT_TIMEOUT_MS);
   health_state = regulator_ok ? 100 : 0;
 
   canMsgTx.can_id = 0x03;
@@ -72,15 +79,29 @@ void drainCanRxBuffer(unsigned long now) {
       new_rpm = (uint16_t)(canMsg.data[3] | (canMsg.data[4] << 8));
 
       uint8_t raw_vac_x10 = canMsg.data[5];
-      portENTER_CRITICAL(&dataMux);
-      vacuum_psi = (float)raw_vac_x10 / 10.0f;
-      lastVacPacketTime = now;
-      portEXIT_CRITICAL(&dataMux);
-
       uint8_t flags = canMsg.data[6];
       uint8_t new_inj_state = flags & 0x01;
       oil_level_t = (flags >> 1) & 0x01;
       th_switch_state = (flags >> 2) & 0x01;
+      ac_switch_state = (flags >> 4) & 0x01;
+      bool is_baro = (flags >> 5) & 0x01;
+      map_sensor_fault = (flags >> 6) & 0x01;
+
+      portENTER_CRITICAL(&dataMux);
+      if (is_baro) {
+        float r_baro = (float)raw_vac_x10 / 10.0f;
+        if (r_baro >= 8.0f && r_baro <= 16.5f) {
+          baro_psi = r_baro;
+        }
+        if (new_rpm == 0 && rpm == 0) {
+          vacuum_psi = 0.0f;
+        }
+      } else {
+        vacuum_psi = (float)raw_vac_x10 / 10.0f;
+      }
+      lastVacPacketTime = now;
+      portEXIT_CRITICAL(&dataMux);
+
       uint8_t rx_seq_02 = canMsg.data[7];
 
       if (seq_02_synced && (now - lastPacketTime <= FRONT_MCU_CAN_TIMEOUT_MS)) {
@@ -181,13 +202,6 @@ void drainCanRxBuffer(unsigned long now) {
           spd_delta_pulses += delta_spd;
         }
       }
-      lastPacketTime = now;
-    } else if (canMsg.can_id == 0x05) {
-      uint8_t raw_vac_x10 = canMsg.data[0];
-      portENTER_CRITICAL(&dataMux);
-      vacuum_psi = (float)raw_vac_x10 / 10.0f;
-      lastVacPacketTime = now;
-      portEXIT_CRITICAL(&dataMux);
       lastPacketTime = now;
     }
   }

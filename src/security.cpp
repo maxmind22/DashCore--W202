@@ -16,6 +16,8 @@
 #define SERVICE_UUID        "12345678-1234-1234-1234-123456789abc"
 #define CHARACTERISTIC_UUID "87654321-4321-4321-4321-cba987654321"
 
+#define DEBUG_PRINT_SECRETS 0 // Set 1 to print raw IRK keys and pairing PIN to Serial
+
 // --- NVS-persisted IRK store (pair once → detected forever) ---
 #define MAX_PERSISTED_IRKS 8
 #define NVS_IRK_NAMESPACE  "ble_irks"
@@ -94,10 +96,14 @@ static void loadPersistedIRKs()
     }
     else
     {
+#if DEBUG_PRINT_SECRETS
       Serial.printf("[SECURITY] Loaded persisted IRK #%u: { ", i);
       for (int k = 0; k < 16; k++)
         Serial.printf("0x%02X%s", persistedIRKs[i][k], (k == 15) ? "" : ", ");
       Serial.println(" }");
+#else
+      Serial.printf("[SECURITY] Loaded persisted IRK #%u: [REDACTED]\n", i);
+#endif
     }
   }
   prefs.end();
@@ -181,6 +187,7 @@ static bool persistNewIRK(const uint8_t irk[16])
   }
   prefs.end();
 
+#if DEBUG_PRINT_SECRETS
   Serial.printf("\n🔐 [SECURITY] NEW IRK auto-persisted to NVS (slot #%u):\n", persistedIRKCount - 1);
   Serial.print("   { ");
   for (int i = 0; i < 16; i++)
@@ -190,6 +197,9 @@ static bool persistNewIRK(const uint8_t irk[16])
       Serial.print("\n     ");
   }
   Serial.println(" }");
+#else
+  Serial.printf("\n🔐 [SECURITY] NEW IRK auto-persisted to NVS (slot #%u): [REDACTED]\n", persistedIRKCount - 1);
+#endif
   Serial.println("   ✅ This phone will be detected passively from now on — no more pairing needed!\n");
 
   return true;
@@ -300,6 +310,7 @@ static int secStoreIteratorCallback(int obj_type, union ble_store_value *val, vo
     persistNewIRK(val->sec.irk);
     memcpy(dynamicBondedIRK, val->sec.irk, 16);
     dynamicIRKPresent = true;
+#if DEBUG_PRINT_SECRETS
     Serial.println("\n🔑 [SECURITY] Active Bonded Phone IRK extracted from Bond Store:");
     Serial.print("   { ");
     for (int i = 0; i < 16; i++)
@@ -309,6 +320,9 @@ static int secStoreIteratorCallback(int obj_type, union ble_store_value *val, vo
         Serial.print("\n     ");
     }
     Serial.println(" }\n");
+#else
+    Serial.println("\n🔑 [SECURITY] Active Bonded Phone IRK extracted from Bond Store: [REDACTED]\n");
+#endif
     bool *found = (bool *)cookie;
     if (found)
       *found = true;
@@ -442,15 +456,23 @@ class SecurityServerCallbacks : public NimBLEServerCallbacks
 
   uint32_t onPassKeyRequest() override
   {
+#if DEBUG_PRINT_SECRETS
     Serial.printf("[SECURITY] Passkey requested by phone — providing PIN: %06u\n", (unsigned int)BLE_PAIRING_PIN);
+#else
+    Serial.println("[SECURITY] Passkey requested by phone — providing PIN: [REDACTED]");
+#endif
     return BLE_PAIRING_PIN;
   }
 
   bool onConfirmPIN(uint32_t pin) override
   {
     bool match = (pin == BLE_PAIRING_PIN);
+#if DEBUG_PRINT_SECRETS
     Serial.printf("[SECURITY] Numeric comparison PIN: %06u — %s\n",
                   (unsigned int)pin, match ? "ACCEPTED" : "REJECTED");
+#else
+    Serial.printf("[SECURITY] Numeric comparison PIN: [REDACTED] — %s\n", match ? "ACCEPTED" : "REJECTED");
+#endif
     return match;
   }
 

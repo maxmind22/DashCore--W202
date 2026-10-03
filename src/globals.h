@@ -15,6 +15,13 @@ extern RTC_DATA_ATTR bool vehicleLockDisabled;
 extern volatile bool phoneAuthorized;
 extern RTC_DATA_ATTR bool phoneAuthBypassed;
 
+// Crash-recovery marker: RTC_DATA_ATTR is re-initialized by the bootloader on every
+// reset except deep-sleep wake, so a panic/WDT/brownout reset would lose currentState.
+// RTC_NOINIT_ATTR is never touched by the bootloader and survives those resets.
+#define RTC_RUN_MARKER_MAGIC 0x52554E21UL // "RUN!"
+extern RTC_NOINIT_ATTR uint32_t rtc_run_marker;
+extern RTC_NOINIT_ATTR uint32_t rtc_run_marker_inv;
+
 extern unsigned long standbyStartTime;
 extern unsigned long lastButtonPressTime;
 extern bool stoppedToAcc;
@@ -79,6 +86,9 @@ extern volatile uint16_t spd_t;
 extern uint16_t raw2;
 extern unsigned long lastPacketTime;
 extern float vacuum_psi;
+extern RTC_DATA_ATTR float baro_psi;
+extern bool map_sensor_fault;
+extern uint8_t ac_switch_state;
 extern unsigned long lastVacPacketTime;
 extern uint8_t oil_level_t;
 extern int oil_level;

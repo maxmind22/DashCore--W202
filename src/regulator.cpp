@@ -57,6 +57,18 @@ void stopRegulatorTask() {
   digitalWriteFast(field_relay_pin, LOW);
 }
 
+static int16_t readADC_Timeout(uint8_t channel, uint32_t timeout_ms = 25) {
+  if (channel > 3) return -1;
+  adc.startADCReading(MUX_BY_CHANNEL[channel], /*continuous=*/false);
+  uint32_t start = millis();
+  while (!adc.conversionComplete()) {
+    if (millis() - start >= timeout_ms) {
+      return -1; // Timed out waiting for conversion (I2C failure or disconnected sensor)
+    }
+    vTaskDelay(1);
+  }
+  return adc.getLastConversionResults();
+}
 
 void regulatorTask(void *pvParameters) {
   esp_task_wdt_add(NULL);
@@ -96,8 +108,8 @@ void regulatorTask(void *pvParameters) {
     }
 
     // --- 1. ADC Voltage and Current Measurement ---
-    int voltage_raw = adc.readADC_SingleEnded(0);
-    int16_t current_raw_t = adc.readADC_SingleEnded(1);
+    int16_t voltage_raw = readADC_Timeout(0, 25);
+    int16_t current_raw_t = readADC_Timeout(1, 25);
 
     esp_task_wdt_reset(); // Reset WDT after potentially blocking I2C reads
 
@@ -210,19 +222,20 @@ void regulatorTask(void *pvParameters) {
     // --- Load-Aware Acceleration De-Excitation (Option B: Full Field Cutoff) ---
     static bool accel_cutoff_active = false;
 
-    bool vac_connected = (millis() - in_last_vac <= FRONT_MCU_TIMEOUT_MS);
+    bool vac_connected = (millis() - in_last_vac <= FRONT_MCU_TIMEOUT_MS) && !map_sensor_fault;
     bool voltage_safe_for_cutoff = (new_v >= REGULATOR_V_CUTOFF_FLOOR);
     bool engine_warm = (in_temp >= REGULATOR_LOAD_MIN_TEMP_C);
+    float baro_scale = getBaroScale();
 
     if (MAP_SENSOR_ENABLED && engine_charging_allowed && vac_connected && engine_warm && !delay_active) {
       if (!accel_cutoff_active) {
         // Trigger cutoff when driver accelerates hard (low manifold vacuum) and battery voltage is healthy
-        if (in_vac <= REGULATOR_LOAD_CUTOFF_VAC_PSI && voltage_safe_for_cutoff) {
+        if (in_vac <= (REGULATOR_LOAD_CUTOFF_VAC_PSI * baro_scale) && voltage_safe_for_cutoff) {
           accel_cutoff_active = true;
         }
       } else {
         // Disengage cutoff if driver eases off or voltage drops below safety floor
-        bool vacuum_recovered = (in_vac >= REGULATOR_LOAD_REENGAGE_VAC_PSI);
+        bool vacuum_recovered = (in_vac >= (REGULATOR_LOAD_REENGAGE_VAC_PSI * baro_scale));
         if (vacuum_recovered || !voltage_safe_for_cutoff) {
           accel_cutoff_active = false;
         }
@@ -324,7 +337,7 @@ void regulatorTask(void *pvParameters) {
     // --- 10. Sample Auxiliary Fuel ADC (every 2s) ---
     int new_fuel_val = -1;
     if (current_micros - last_fuel_time >= FUEL_ADC_INTERVAL_US) {
-      int read_f = adc.readADC_SingleEnded(2);
+      int16_t read_f = readADC_Timeout(2, 25);
       if (read_f >= 0) {
         new_fuel_val = read_f;
       }

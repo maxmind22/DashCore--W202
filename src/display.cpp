@@ -170,7 +170,7 @@ void warnings(unsigned long now)
     }
     buzzer_state = 1;
   }
-  else if (!lowBlinkState && chg == 1)
+  else if ((!lowBlinkState || local_charge_state != 1) && chg == 1)
   {
     tv.fillRect(WARNING_X + 10, WARNING_Y + 10, 140, 8, 0x00);
     chg = 0;
@@ -180,12 +180,17 @@ void warnings(unsigned long now)
   {
     if (chg2 == 0)
     {
-      tv.setCursor(WARNING_X + 50, WARNING_Y + 30);
+      tv.setCursor(WARNING_X + 40, WARNING_Y + 10);
       tv.setTextColor(0xFF);
       tv.print("BATTERY LOW !");
       chg2 = 1;
     }
     buzzer_state = 1;
+  }
+  else if ((!lowBlinkState || local_charge_state != 2) && chg2 == 1)
+  {
+    tv.fillRect(WARNING_X + 40, WARNING_Y + 10, 84, 8, 0x00);
+    chg2 = 0;
   }
 
   // -------- Phone Key Detection Warning --------//
@@ -217,7 +222,7 @@ void warnings(unsigned long now)
   static bool vac_leak_active = false;
   static bool vac_leak_drawn = false;
 
-  bool vac_valid = (now - lastVacPacketTime <= FRONT_MCU_TIMEOUT_MS);
+  bool vac_valid = (now - lastVacPacketTime <= FRONT_MCU_TIMEOUT_MS) && !map_sensor_fault;
   bool idle_conditions = (MAP_SENSOR_ENABLED &&
                           currentState == STATE_RUNNING &&
                           rpm >= VAC_LEAK_MIN_RPM && rpm <= VAC_LEAK_MAX_RPM &&
@@ -226,9 +231,12 @@ void warnings(unsigned long now)
                           th_switch_state == 1 &&
                           vac_valid);
 
+  float eff_vac_leak_thresh = VAC_LEAK_THRESHOLD_PSI * getBaroScale();
+  float eff_vac_leak_clear = VAC_LEAK_CLEAR_PSI * getBaroScale();
+
   if (idle_conditions)
   {
-    if (vacuum_psi < VAC_LEAK_THRESHOLD_PSI)
+    if (vacuum_psi < eff_vac_leak_thresh)
     {
       if (vac_leak_start_ms == 0)
       {
@@ -239,7 +247,7 @@ void warnings(unsigned long now)
         vac_leak_active = true;
       }
     }
-    else if (vacuum_psi >= VAC_LEAK_CLEAR_PSI)
+    else if (vacuum_psi >= eff_vac_leak_clear)
     {
       vac_leak_start_ms = 0;
       vac_leak_active = false;
@@ -292,7 +300,7 @@ void warnings(unsigned long now)
 
   if (high_load_wot)
   {
-    if (vacuum_psi >= AIR_FILTER_RESTRICTION_VAC_PSI)
+    if (vacuum_psi >= (AIR_FILTER_RESTRICTION_VAC_PSI * getBaroScale()))
     {
       if (air_filter_detect_start_ms == 0)
       {
@@ -361,7 +369,7 @@ void warnings(unsigned long now)
 
   if (idle_sw_conditions)
   {
-    if (vacuum_psi >= IDLE_SW_FAULT_VAC_PSI && th_switch_state == 0)
+    if (vacuum_psi >= (IDLE_SW_FAULT_VAC_PSI * getBaroScale()) && th_switch_state == 0)
     {
       if (idle_sw_fault_start_ms == 0)
       {
@@ -426,7 +434,7 @@ void warnings(unsigned long now)
                                temp_out >= FPR_LEAK_MIN_TEMP_C &&
                                th_switch_state == 1 &&
                                injector_state == 0 &&
-                               (!MAP_SENSOR_ENABLED || (vac_valid && vacuum_psi >= FPR_LEAK_MIN_VAC_PSI)));
+                               (!MAP_SENSOR_ENABLED || (vac_valid && vacuum_psi >= (FPR_LEAK_MIN_VAC_PSI * getBaroScale()))));
 
   if (fuel_diag_conditions)
   {

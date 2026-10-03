@@ -45,10 +45,19 @@
 #define REGULATOR_NOMINAL_RPM 1500.0f       // Baseline RPM for gain scheduling / Front MCU offline
 #define FUEL_ADC_INTERVAL_US 2000000UL      // Fuel sender ADC read interval (2s)
 
-// --- MAP / Vacuum Sensor Feature Toggle ---
+// --- MAP / Vacuum Sensor Feature Toggle & Dynamic Barometric Scaling ---
 // Set to true to enable load-aware alternator cutoff, manifold vacuum HUD warnings,
 // and vacuum-dependent intake/fuel diagnostics.
 #define MAP_SENSOR_ENABLED true
+#define REFERENCE_BARO_PSI 14.7f // Standard atmospheric pressure at sea level (101.3 kPa)
+
+extern RTC_DATA_ATTR float baro_psi;
+inline float getBaroScale() {
+  if (baro_psi >= 8.0f && baro_psi <= 16.5f) {
+    return baro_psi / REFERENCE_BARO_PSI;
+  }
+  return 1.0f;
+}
 
 // --- Load-Aware Alternator De-Excitation (Option B: Full Field Cutoff) ---
 #define REGULATOR_LOAD_CUTOFF_VAC_PSI 2.0f   // Manifold vacuum <= 2.0 psi: cut alternator field (0A drag)

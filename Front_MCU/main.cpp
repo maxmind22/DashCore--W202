@@ -22,15 +22,19 @@ const int map_pin = A3;
 #define inj_sense_pin 7
 
 // --- MAP / Vacuum Sensor (Toyota 89420-02010 / 89420-02020) ---
-#define MAP_EMA_ALPHA 0.80f
+#define MAP_EMA_ALPHA 0.25f       // 0.25 EMA filter for smooth signal with ~60ms settling
 #define MAP_CALIB_ATM_DEFAULT 780 // ~3.8V at sea level atmospheric pressure (~101.3 kPa)
 #define MAP_ADC_TO_PSI 0.02035f   // Conversion factor from ADC counts to PSI vacuum
 #define MAP_READ_INTERVAL_MS 20
+#define MAP_FAULT_MIN_ADC 10      // Broken wire / ground short
+#define MAP_FAULT_MAX_ADC 1015    // 5V short / disconnected pull-up
 
 float map_adc_avg = (float)MAP_CALIB_ATM_DEFAULT;
 uint16_t map_atm_adc = MAP_CALIB_ATM_DEFAULT;
 float vac_psi = 0.0f;
 uint8_t vac_psi_x10 = 0;
+uint8_t baro_psi_x10 = 147;       // Default 14.7 PSI at sea level (147 in 0.1 PSI)
+bool map_sensor_fault = false;
 unsigned long lastMapReadTime = 0;
 
 // --- DFCO Configuration ---
@@ -245,21 +249,35 @@ void loop()
   if (currentMillis - lastMapReadTime >= MAP_READ_INTERVAL_MS)
   {
     float map_raw = (float)analogRead(map_pin);
-    if (!map_initialized)
+    if (map_raw < MAP_FAULT_MIN_ADC || map_raw > MAP_FAULT_MAX_ADC)
     {
-      map_adc_avg = map_raw;
-      map_initialized = true;
+      map_sensor_fault = true;
     }
     else
     {
-      map_adc_avg += (map_raw - map_adc_avg) * MAP_EMA_ALPHA;
+      map_sensor_fault = false;
+      if (!map_initialized)
+      {
+        map_adc_avg = map_raw;
+        map_initialized = true;
+      }
+      else
+      {
+        map_adc_avg += (map_raw - map_adc_avg) * MAP_EMA_ALPHA;
+      }
+
+      // Atmospheric baseline: when engine is stopped (RPM == 0), manifold pressure is barometric
+      if (rpm == 0 && map_adc_avg >= 500.0f && map_adc_avg <= 950.0f)
+      {
+        map_atm_adc = (uint16_t)(map_adc_avg + 0.5f);
+      }
     }
 
-    // Atmospheric baseline: when engine is stopped (RPM == 0), manifold pressure is barometric
-    if (rpm == 0 && map_adc_avg >= 500.0f && map_adc_avg <= 950.0f)
-    {
-      map_atm_adc = (uint16_t)(map_adc_avg + 0.5f);
-    }
+    // Calculate barometric PSI (scaled relative to nominal default 780 ADC = 14.7 PSI)
+    float baro_psi_f = 14.7f * ((float)map_atm_adc / (float)MAP_CALIB_ATM_DEFAULT);
+    if (baro_psi_f > 16.5f) baro_psi_f = 16.5f;
+    if (baro_psi_f < 8.0f)  baro_psi_f = 8.0f;
+    baro_psi_x10 = (uint8_t)(baro_psi_f * 10.0f + 0.5f);
 
     // Gauge vacuum below atmospheric: delta from barometric reference
     float vac_counts = (float)map_atm_adc - map_adc_avg;
@@ -578,8 +596,14 @@ void loop()
     uint16_t rpm_s = (uint16_t)rpm;
     uint16_t temp_s = (uint16_t)temp_avg;
     uint8_t th_state = (uint8_t)digitalReadFast(th_pin); // 1 = closed (idle), 0 = open
+    uint8_t ac_state = (acState_avg >= FAN_AC_MIN_ADC) ? 1 : 0;
 
-    // CAN ID 0x02: Instantaneous Status & Vacuum (DLC 8)
+    // Send barometric baseline when engine is stopped (rpm == 0, where vacuum is 0.0 PSI anyway).
+    // When engine is running (rpm > 0), send live vacuum 100% of the time without interruption.
+    bool send_baro = (rpm == 0);
+    uint8_t vac_or_baro = send_baro ? baro_psi_x10 : vac_psi_x10;
+
+    // CAN ID 0x02: Instantaneous Status & Vacuum/Baro (DLC 8)
     canMsgTx.can_id = 0x02;
     canMsgTx.can_dlc = 8;
     canMsgTx.data[0] = temp_s & 0xFF;        // Raw Temp ADC low byte
@@ -587,9 +611,14 @@ void loop()
     canMsgTx.data[2] = (uint8_t)spd_s;       // Vehicle speed (0..220 km/h)
     canMsgTx.data[3] = rpm_s & 0xFF;         // RPM low byte
     canMsgTx.data[4] = (rpm_s >> 8) & 0xFF;  // RPM high byte
-    canMsgTx.data[5] = vac_psi_x10;          // Vacuum in 0.1 PSI (e.g. 66 = 6.6 psi)
-    canMsgTx.data[6] = (injDisable_s & 0x01) | ((oil_level & 0x01) << 1) | ((th_state & 0x01) << 2) |
-                       (((temp_avg >= DFCO_ENGINE_WARM_ADC && vac_psi < 2.0f) ? 1 : 0) << 3);
+    canMsgTx.data[5] = vac_or_baro;          // Vacuum or Baro in 0.1 PSI
+    canMsgTx.data[6] = (injDisable_s & 0x01) |
+                       ((oil_level & 0x01) << 1) |
+                       ((th_state & 0x01) << 2) |
+                       // Bit 3 reserved
+                       ((ac_state & 0x01) << 4) |
+                       ((send_baro ? 1 : 0) << 5) |
+                       ((map_sensor_fault ? 1 : 0) << 6);
     canMsgTx.data[7] = seq_02++;
     mcp2515.sendMessage(&canMsgTx);
 
