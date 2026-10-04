@@ -222,7 +222,7 @@ void warnings(unsigned long now)
   static bool vac_leak_active = false;
   static bool vac_leak_drawn = false;
 
-  bool vac_valid = (now - lastVacPacketTime <= FRONT_MCU_TIMEOUT_MS) && !map_sensor_fault;
+  bool vac_valid = (now - lastVacPacketTime <= FRONT_MCU_TIMEOUT_MS) && !map_sensor_fault && isBaroValid();
   bool idle_conditions = (MAP_SENSOR_ENABLED &&
                           currentState == STATE_RUNNING &&
                           rpm >= VAC_LEAK_MIN_RPM && rpm <= VAC_LEAK_MAX_RPM &&
@@ -231,8 +231,8 @@ void warnings(unsigned long now)
                           th_switch_state == 1 &&
                           vac_valid);
 
-  float eff_vac_leak_thresh = VAC_LEAK_THRESHOLD_PSI * getBaroScale();
-  float eff_vac_leak_clear = VAC_LEAK_CLEAR_PSI * getBaroScale();
+  float eff_vac_leak_thresh = getVacLeakThreshPsi();
+  float eff_vac_leak_clear = getVacLeakClearPsi();
 
   if (idle_conditions)
   {
@@ -300,7 +300,7 @@ void warnings(unsigned long now)
 
   if (high_load_wot)
   {
-    if (vacuum_psi >= (AIR_FILTER_RESTRICTION_VAC_PSI * getBaroScale()))
+    if (vacuum_psi >= getAirFilterChokeVacPsi())
     {
       if (air_filter_detect_start_ms == 0)
       {
@@ -319,7 +319,7 @@ void warnings(unsigned long now)
   else
   {
     air_filter_detect_start_ms = 0;
-    if (!MAP_SENSOR_ENABLED || temp_out < AIR_FILTER_MIN_TEMP_C)
+    if (!MAP_SENSOR_ENABLED || !vac_valid || temp_out < AIR_FILTER_MIN_TEMP_C)
     {
       air_filter_alert_until_ms = 0;
     }
@@ -369,7 +369,7 @@ void warnings(unsigned long now)
 
   if (idle_sw_conditions)
   {
-    if (vacuum_psi >= (IDLE_SW_FAULT_VAC_PSI * getBaroScale()) && th_switch_state == 0)
+    if (vacuum_psi >= getIdleConfirmVacPsi() && th_switch_state == 0)
     {
       if (idle_sw_fault_start_ms == 0)
       {
@@ -434,7 +434,7 @@ void warnings(unsigned long now)
                                temp_out >= FPR_LEAK_MIN_TEMP_C &&
                                th_switch_state == 1 &&
                                injector_state == 0 &&
-                               (!MAP_SENSOR_ENABLED || (vac_valid && vacuum_psi >= (FPR_LEAK_MIN_VAC_PSI * getBaroScale()))));
+                               (!MAP_SENSOR_ENABLED || (vac_valid && vacuum_psi >= getIdleConfirmVacPsi())));
 
   if (fuel_diag_conditions)
   {

@@ -373,9 +373,18 @@ void loop()
     last_bufVac[0] = '\0';
   }
 
-  // Vacuum PSI readout: constantly visible, NEVER erased
+  bool vac_valid = (now - lastVacPacketTime <= FRONT_MCU_TIMEOUT_MS) && !map_sensor_fault && isBaroValid();
+
+  // Vacuum PSI readout: constantly visible, shows "VAC: --- " if disconnected or invalid
   char bufVac[16];
-  snprintf(bufVac, sizeof(bufVac), "VAC:%4.1fpsi", vacuum_psi);
+  if (vac_valid)
+  {
+    snprintf(bufVac, sizeof(bufVac), "VAC:%4.1fpsi", vacuum_psi);
+  }
+  else
+  {
+    snprintf(bufVac, sizeof(bufVac), "VAC: --- ");
+  }
   if (strcmp(bufVac, last_bufVac) != 0 || !vac_drawn)
   {
     tv.setCursor(VACUUM_DISPLAY_X, VACUUM_DISPLAY_Y);
@@ -387,16 +396,16 @@ void loop()
 
   // Red "ECO" warning with hysteresis to eliminate flickering near threshold
   static bool eco_warning_latched = false;
-  float eff_eco_thresh = ECO_VACUUM_THRESHOLD_PSI * getBaroScale();
-  float eff_eco_hyst = ECO_VACUUM_HYST_PSI * getBaroScale();
+  float eff_eco_thresh = getEcoWarningVacPsi();
+  float eff_eco_clear = getEcoClearVacPsi();
 
-  if (MAP_SENSOR_ENABLED && !map_sensor_fault && (currentState == STATE_RUNNING || rpm >= ENGINE_STARTED_RPM))
+  if (MAP_SENSOR_ENABLED && vac_valid && (currentState == STATE_RUNNING || rpm >= ENGINE_STARTED_RPM))
   {
     if (!eco_warning_latched && vacuum_psi < eff_eco_thresh)
     {
       eco_warning_latched = true;
     }
-    else if (eco_warning_latched && vacuum_psi >= (eff_eco_thresh + eff_eco_hyst))
+    else if (eco_warning_latched && vacuum_psi >= eff_eco_clear)
     {
       eco_warning_latched = false;
     }

@@ -89,9 +89,11 @@ void drainCanRxBuffer(unsigned long now) {
 
       portENTER_CRITICAL(&dataMux);
       if (is_baro) {
-        float r_baro = (float)raw_vac_x10 / 10.0f;
-        if (r_baro >= 8.0f && r_baro <= 16.5f) {
-          baro_psi = r_baro;
+        if (!map_sensor_fault) {
+          float r_baro = (float)raw_vac_x10 / 10.0f;
+          if (r_baro >= 8.0f && r_baro <= 16.5f) {
+            baro_psi = r_baro;
+          }
         }
         if (new_rpm == 0 && rpm == 0) {
           vacuum_psi = 0.0f;

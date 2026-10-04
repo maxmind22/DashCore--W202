@@ -45,25 +45,35 @@
 #define REGULATOR_NOMINAL_RPM 1500.0f       // Baseline RPM for gain scheduling / Front MCU offline
 #define FUEL_ADC_INTERVAL_US 2000000UL      // Fuel sender ADC read interval (2s)
 
-// --- MAP / Vacuum Sensor Feature Toggle & Dynamic Barometric Scaling ---
+// --- MAP / Vacuum Sensor Feature Toggle & Atmospheric Load Model ---
 // Set to true to enable load-aware alternator cutoff, manifold vacuum HUD warnings,
 // and vacuum-dependent intake/fuel diagnostics.
 #define MAP_SENSOR_ENABLED true
 #define REFERENCE_BARO_PSI 14.7f // Standard atmospheric pressure at sea level (101.3 kPa)
 
 extern RTC_DATA_ATTR float baro_psi;
+inline bool isBaroValid() {
+  return (baro_psi >= 8.0f && baro_psi <= 16.5f);
+}
 inline float getBaroScale() {
-  if (baro_psi >= 8.0f && baro_psi <= 16.5f) {
-    return baro_psi / REFERENCE_BARO_PSI;
-  }
-  return 1.0f;
+  return isBaroValid() ? (baro_psi / REFERENCE_BARO_PSI) : 0.0f;
 }
 
-// --- Load-Aware Alternator De-Excitation (Option B: Full Field Cutoff) ---
-#define REGULATOR_LOAD_CUTOFF_VAC_PSI 2.0f   // Manifold vacuum <= 2.0 psi: cut alternator field (0A drag)
-#define REGULATOR_LOAD_REENGAGE_VAC_PSI 3.0f // Manifold vacuum >= 3.0 psi: re-engage alternator
+// --- Load-Aware Alternator De-Excitation (Atmospheric Load Model) ---
+// Engine Load = 1.0 - (vacuum / P_atm)  =>  Vacuum = P_atm * (1.0 - Engine Load)
+// Cutoff engages during hard acceleration (load >= 82% of pre-crank baro) and
+// disengages when easing off into cruise (load <= 74%).
+#define LOAD_RATIO_ACCEL_CUTOFF   0.82f      // 82% engine load: cut alternator field (0A drag)
+#define LOAD_RATIO_ACCEL_REENGAGE 0.74f      // 74% engine load: re-engage alternator
 #define REGULATOR_V_CUTOFF_FLOOR 12.60f      // Safety floor: abort cutoff if battery drops below 12.60V
 #define REGULATOR_LOAD_MIN_TEMP_C 60         // Minimum coolant temp (°C) before allowing load-based alternator de-excitation
+
+inline float getAccelCutoffVacPsi() {
+  return baro_psi * (1.0f - LOAD_RATIO_ACCEL_CUTOFF);
+}
+inline float getAccelReengageVacPsi() {
+  return baro_psi * (1.0f - LOAD_RATIO_ACCEL_REENGAGE);
+}
 
 // --- Alternator Regulator Calibration ---
 #define CURRENT_SENSOR_OFFSET_MV 2495.44f  // FS500E2T zero-current offset (calibrated from 2500.0 nominal)
@@ -129,34 +139,55 @@ const unsigned long ENGINE_STALL_DEBOUNCE_MS = 1500; // Require 1.5s persistent 
 #define ECO_INDICATOR_Y 18
 #define VACUUM_DISPLAY_X 182
 #define VACUUM_DISPLAY_Y 38
-#define ECO_VACUUM_THRESHOLD_PSI 2.0f // Below 2.0 psi vacuum = low vacuum / power enrichment
-#define ECO_VACUUM_HYST_PSI 0.5f      // Hysteresis to prevent indicator flickering
-#define ECO_MIN_TEMP_C 60             // Minimum coolant temp (°C) before checking economy (cold start fast idle drops vacuum)
+#define LOAD_RATIO_ECO_WARNING    0.80f       // 80% engine load: instant ECO indicator
+#define LOAD_RATIO_ECO_CLEAR      0.72f       // 72% engine load: clear ECO indicator (hysteresis)
+#define ECO_MIN_TEMP_C 60                     // Minimum coolant temp (°C) before checking economy (cold start fast idle drops vacuum)
+
+inline float getEcoWarningVacPsi() {
+  return baro_psi * (1.0f - LOAD_RATIO_ECO_WARNING);
+}
+inline float getEcoClearVacPsi() {
+  return baro_psi * (1.0f - LOAD_RATIO_ECO_CLEAR);
+}
 
 // --- Vacuum Leak Warning Configuration ---
 #define VAC_LEAK_MIN_TEMP_C 60        // Only detect when engine is warm (>60°C)
 #define VAC_LEAK_MAX_SPD_KMH 3        // Must be stationary (idle)
 #define VAC_LEAK_MIN_RPM 550          // Normal idle speed lower bound
 #define VAC_LEAK_MAX_RPM 950          // Normal idle speed upper bound
-#define VAC_LEAK_THRESHOLD_PSI 3.0f   // Calibrated for 6.6 psi idle: below 3.0 psi indicates leak (normal idle with A/C is ~4.5-5.5 psi)
+#define LOAD_RATIO_VAC_LEAK_THRESH 0.22f // Warm idle vacuum < 22% of baro (~3.2 psi at sea level) indicates intake leak
+#define LOAD_RATIO_VAC_LEAK_CLEAR  0.30f // Recovery threshold: vacuum >= 30% of baro (~4.4 psi at sea level)
 #define VAC_LEAK_PERSIST_MS 15000UL   // 15 seconds continuous low vacuum to trigger warning
-#define VAC_LEAK_CLEAR_PSI 4.2f       // Recovery threshold
+
+inline float getVacLeakThreshPsi() {
+  return baro_psi * LOAD_RATIO_VAC_LEAK_THRESH;
+}
+inline float getVacLeakClearPsi() {
+  return baro_psi * LOAD_RATIO_VAC_LEAK_CLEAR;
+}
 
 // --- Air Filter Restriction Diagnostic Configuration ---
 #define AIR_FILTER_CHECK_MIN_RPM 4000          // High revs where volumetric airflow demand is highest
 #define AIR_FILTER_MIN_INJ_DUTY 55.0f          // High injector duty cycle confirms wide-open throttle (WOT)
-#define AIR_FILTER_RESTRICTION_VAC_PSI 1.8f    // Healthy WOT vacuum is < 0.5 psi; >= 1.8 psi indicates choked intake
+#define LOAD_RATIO_AIR_FILTER_CHOKE 0.12f      // WOT vacuum >= 12% of baro (~1.76 psi at sea level) indicates choked intake
 #define AIR_FILTER_DETECT_PERSIST_MS 1500UL    // Condition must persist continuously for 1.5 seconds
 #define AIR_FILTER_ALERT_HOLD_MS 15000UL       // Display warning for 15s so driver safely views it after the pull
 #define AIR_FILTER_MIN_TEMP_C 60               // Minimum coolant temp (°C) before evaluating air filter restriction
 
+inline float getAirFilterChokeVacPsi() {
+  return baro_psi * LOAD_RATIO_AIR_FILTER_CHOKE;
+}
+
 // --- Idle Switch Misadjustment / Cable Stretch Diagnostic Configuration ---
-#define IDLE_SW_FAULT_VAC_PSI 5.8f     // Calibrated for 6.6 psi warm idle: >= 5.8 psi confirms idle
-#define IDLE_SW_FAULT_PERSIST_MS 4000UL // 4 seconds continuous idle with open switch triggers warning
+#define LOAD_RATIO_IDLE_CONFIRM_VAC 0.40f      // Vacuum >= 40% of baro (~5.9 psi at sea level) confirms closed throttle
+#define IDLE_SW_FAULT_PERSIST_MS 4000UL        // 4 seconds continuous idle with open switch triggers warning
+
+inline float getIdleConfirmVacPsi() {
+  return baro_psi * LOAD_RATIO_IDLE_CONFIRM_VAC;
+}
 
 // --- Bidirectional Fuel System Diagnostic Configuration ---
 #define FPR_LEAK_MIN_TEMP_C 75          // Must be fully warm (warm-up enrichment completely ended)
-#define FPR_LEAK_MIN_VAC_PSI 5.8f       // Calibrated for 6.6 psi warm idle: >= 5.8 psi confirms closed-throttle idle
 #define FPR_LEAK_MAX_PULSE_US 1350.0f   // < 1350us: rich trim (torn FPR diaphragm, dripping injector, blocked return)
 #define FUEL_STARV_MIN_PULSE_US 3000.0f // > 3000us: lean trim (weak fuel pump, clogged filter, low rail pressure, clogged injector)
 #define FPR_LEAK_DETECT_PERSIST_MS 8000UL // 8 seconds continuous abnormal idle to confirm steady-state condition

@@ -83,7 +83,7 @@ volatile uint16_t spd_t = 0;
 uint16_t raw2;
 unsigned long lastPacketTime = 0;
 float vacuum_psi = 0.0f;
-RTC_DATA_ATTR float baro_psi = 14.7f;
+RTC_DATA_ATTR float baro_psi = 0.0f;
 bool map_sensor_fault = false;
 uint8_t ac_switch_state = 0;
 unsigned long lastVacPacketTime = 0;

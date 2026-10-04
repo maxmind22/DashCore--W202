@@ -222,20 +222,19 @@ void regulatorTask(void *pvParameters) {
     // --- Load-Aware Acceleration De-Excitation (Option B: Full Field Cutoff) ---
     static bool accel_cutoff_active = false;
 
-    bool vac_connected = (millis() - in_last_vac <= FRONT_MCU_TIMEOUT_MS) && !map_sensor_fault;
+    bool vac_connected = (millis() - in_last_vac <= FRONT_MCU_TIMEOUT_MS) && !map_sensor_fault && isBaroValid();
     bool voltage_safe_for_cutoff = (new_v >= REGULATOR_V_CUTOFF_FLOOR);
     bool engine_warm = (in_temp >= REGULATOR_LOAD_MIN_TEMP_C);
-    float baro_scale = getBaroScale();
 
     if (MAP_SENSOR_ENABLED && engine_charging_allowed && vac_connected && engine_warm && !delay_active) {
       if (!accel_cutoff_active) {
-        // Trigger cutoff when driver accelerates hard (low manifold vacuum) and battery voltage is healthy
-        if (in_vac <= (REGULATOR_LOAD_CUTOFF_VAC_PSI * baro_scale) && voltage_safe_for_cutoff) {
+        // Trigger cutoff when driver accelerates hard (load >= 82% of baro) and battery voltage is healthy
+        if (in_vac <= getAccelCutoffVacPsi() && voltage_safe_for_cutoff) {
           accel_cutoff_active = true;
         }
       } else {
-        // Disengage cutoff if driver eases off or voltage drops below safety floor
-        bool vacuum_recovered = (in_vac >= (REGULATOR_LOAD_REENGAGE_VAC_PSI * baro_scale));
+        // Disengage cutoff if driver eases off into cruise (load <= 74%) or voltage drops below safety floor
+        bool vacuum_recovered = (in_vac >= getAccelReengageVacPsi());
         if (vacuum_recovered || !voltage_safe_for_cutoff) {
           accel_cutoff_active = false;
         }
