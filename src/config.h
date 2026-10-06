@@ -59,20 +59,19 @@ inline float getBaroScale() {
   return isBaroValid() ? (baro_psi / REFERENCE_BARO_PSI) : 0.0f;
 }
 
-// --- Load-Aware Alternator De-Excitation (Atmospheric Load Model) ---
-// Engine Load = 1.0 - (vacuum / P_atm)  =>  Vacuum = P_atm * (1.0 - Engine Load)
-// Cutoff engages during hard acceleration (load >= 82% of pre-crank baro) and
-// disengages when easing off into cruise (load <= 74%).
-#define LOAD_RATIO_ACCEL_CUTOFF   0.82f      // 82% engine load: cut alternator field (0A drag)
-#define LOAD_RATIO_ACCEL_REENGAGE 0.74f      // 74% engine load: re-engage alternator
+// --- Load-Aware Alternator De-Excitation (Vacuum Threshold) ---
+// Cutoff engages whenever manifold vacuum drops below 3.0 psi (0A alternator drag) and
+// disengages when vacuum recovers above hysteresis threshold (>= 3.5 psi).
+#define REGULATOR_LOAD_CUTOFF_VAC_PSI   3.0f // Manifold vacuum < 3.0 psi: cut alternator field (0A drag)
+#define REGULATOR_LOAD_REENGAGE_VAC_PSI 3.5f // Manifold vacuum >= 3.5 psi: re-engage alternator (0.5 psi hysteresis)
 #define REGULATOR_V_CUTOFF_FLOOR 12.60f      // Safety floor: abort cutoff if battery drops below 12.60V
 #define REGULATOR_LOAD_MIN_TEMP_C 60         // Minimum coolant temp (°C) before allowing load-based alternator de-excitation
 
 inline float getAccelCutoffVacPsi() {
-  return baro_psi * (1.0f - LOAD_RATIO_ACCEL_CUTOFF);
+  return REGULATOR_LOAD_CUTOFF_VAC_PSI;
 }
 inline float getAccelReengageVacPsi() {
-  return baro_psi * (1.0f - LOAD_RATIO_ACCEL_REENGAGE);
+  return REGULATOR_LOAD_REENGAGE_VAC_PSI;
 }
 
 // --- Alternator Regulator Calibration ---
@@ -139,9 +138,11 @@ const unsigned long ENGINE_STALL_DEBOUNCE_MS = 1500; // Require 1.5s persistent 
 #define ECO_INDICATOR_Y 18
 #define VACUUM_DISPLAY_X 182
 #define VACUUM_DISPLAY_Y 38
-#define LOAD_RATIO_ECO_WARNING    0.80f       // 80% engine load: instant ECO indicator
-#define LOAD_RATIO_ECO_CLEAR      0.72f       // 72% engine load: clear ECO indicator (hysteresis)
+#define LOAD_RATIO_ECO_WARNING    0.93f       // 93% engine load (~1.0 psi vac): instant ECO indicator
+#define LOAD_RATIO_ECO_CLEAR      0.86f       // 86% engine load (~2.0 psi vac): clear ECO indicator (hysteresis)
 #define ECO_MIN_TEMP_C 60                     // Minimum coolant temp (°C) before checking economy (cold start fast idle drops vacuum)
+#define ECO_BEEP_ON_MS            200         // Pulsing beep ON duration while ECO is displayed (ms)
+#define ECO_BEEP_OFF_MS           200         // Pulsing beep OFF duration while ECO is displayed (ms)
 
 inline float getEcoWarningVacPsi() {
   return baro_psi * (1.0f - LOAD_RATIO_ECO_WARNING);
@@ -189,7 +190,7 @@ inline float getIdleConfirmVacPsi() {
 // --- Bidirectional Fuel System Diagnostic Configuration ---
 #define FPR_LEAK_MIN_TEMP_C 75          // Must be fully warm (warm-up enrichment completely ended)
 #define FPR_LEAK_MAX_PULSE_US 1350.0f   // < 1350us: rich trim (torn FPR diaphragm, dripping injector, blocked return)
-#define FUEL_STARV_MIN_PULSE_US 3000.0f // > 3000us: lean trim (weak fuel pump, clogged filter, low rail pressure, clogged injector)
+#define FUEL_STARV_MIN_PULSE_US 6000.0f // > 6000us (6ms): lean trim (weak fuel pump, clogged filter, low rail pressure, clogged injector)
 #define FPR_LEAK_DETECT_PERSIST_MS 8000UL // 8 seconds continuous abnormal idle to confirm steady-state condition
 
 // Fuel/Trip Constants
@@ -232,9 +233,9 @@ static const size_t NUM_AUTHORIZED_IRKS = sizeof(BLE_AUTHORIZED_IRKS) / sizeof(B
 #endif
 
 // Auto Start-Stop Constants & Wear-Protection Thresholds
-const unsigned long AUTO_STOP_STANDSTILL_DELAY_MS = 10000; // 10s standstill before stop
+const unsigned long AUTO_STOP_STANDSTILL_DELAY_MS = 2500;  // 2.5s standstill before stop
 const unsigned long AUTO_STOP_COOLDOWN_MS = 45000;         // 45s engine runtime cooldown between stops
-const int AUTO_STOP_MIN_TEMP_C = 82;                       // Coolant temp >= 82°C
+const int AUTO_STOP_MIN_TEMP_C = 75;                       // Coolant temp >= 75°C
 const int AUTO_STOP_MAX_TEMP_C = 98;                       // Coolant temp <= 98°C
 const float AUTO_STOP_MIN_VOLTAGE = 12.00f;                // Min battery voltage to allow stop
 const float AUTO_STOP_RESTART_VOLTAGE = 11.60f;            // Battery floor triggering auto-restart

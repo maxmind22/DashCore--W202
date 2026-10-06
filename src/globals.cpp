@@ -87,6 +87,7 @@ RTC_DATA_ATTR float baro_psi = 0.0f;
 bool map_sensor_fault = false;
 uint8_t ac_switch_state = 0;
 unsigned long lastVacPacketTime = 0;
+bool eco_warning_active = false;
 uint8_t oil_level_t = 0;
 int oil_level = 0;
 int last_clear = 0;

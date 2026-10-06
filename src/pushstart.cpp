@@ -361,7 +361,7 @@ void processPushStart(unsigned long now)
 
   // Auto-synchronize to STATE_RUNNING if engine is detected running while in standby/acc/ign
   // (e.g. after MCU reset while driving, or manual push/roll start)
-  if (currentState != STATE_RUNNING && currentState != STATE_CRANKING && !emergencyStopLatched)
+  if (currentState != STATE_RUNNING && currentState != STATE_CRANKING && currentState != STATE_AUTO_STOP && !emergencyStopLatched)
   {
     if (now - lastPacketTime < FRONT_MCU_CAN_TIMEOUT_MS &&
         (rpm >= ENGINE_STARTED_RPM || new_rpm >= ENGINE_STARTED_RPM))
@@ -449,9 +449,15 @@ void processPushStart(unsigned long now)
     buttonLongPressHandled = false;
   }
 
+  static bool brakeHeldOnPress = false;
   if (btnEdgeDown)
   {
+    brakeHeldOnPress = (digitalRead(PIN_INPUT_BRAKE) == LOW);
     standbyStartTime = now;
+  }
+  else if (currentBtnState == LOW && digitalRead(PIN_INPUT_BRAKE) == LOW)
+  {
+    brakeHeldOnPress = true;
   }
 
   // Release the emergency-stop latch once the driver presses the button again (explicit intent)
@@ -834,6 +840,7 @@ void processPushStart(unsigned long now)
         currentState = STATE_AUTO_STOP;
         autoStopStartTime = now;
         ecoInjCutActive = true; // Signal Front MCU over CAN 0x03 to cut injectors
+        sendCanHealthFrame(now); // Immediately command Front MCU to cut injectors without waiting for 200ms periodic timer
         standstillStartTime = 0;
         break;
       }
@@ -871,16 +878,16 @@ void processPushStart(unsigned long now)
     // Without CAN, use the 3 s long-press emergency stop instead.
     if (btnShortPressed && (now - lastButtonPressTime >= BUTTON_COOLDOWN_MS))
     {
-      bool canAlive = (now - lastPacketTime < FRONT_MCU_CAN_TIMEOUT_MS);
-      if (spd == 0 && canAlive)
-      { // Safety check: speed must be confirmed zero
+      bool canAlive = (now - lastPacketTime < FRONT_MCU_TIMEOUT_MS);
+      bool isBrakeHeld = (digitalRead(PIN_INPUT_BRAKE) == LOW) || brakeHeldOnPress;
+      if ((spd == 0 && canAlive) || (!canAlive && isBrakeHeld))
+      { // Safety check: speed must be zero or stationary with brake held
         lastButtonPressTime = now;
         lastEngineStopTime = now;
         standstillStartTime = 0;
         isEcoRestart = false;
         ecoInjCutActive = false;
-        bool brakeHeld = (digitalRead(PIN_INPUT_BRAKE) == LOW);
-        if (brakeHeld)
+        if (isBrakeHeld)
         {
           setRelays(true, false, false); // Keep ACC ON, kill IGN and START
           currentState = STATE_ACC;      // Go to ACC position
@@ -912,10 +919,21 @@ void processPushStart(unsigned long now)
       lastEngineStopTime = now;
       ecoInjCutActive = false;
       isEcoRestart = false;
-      setRelays(false, false, false); // Turn off all relays
-      currentState = STATE_STANDBY;
+      sendCanHealthFrame(now);
+      bool isBrakeHeld = (digitalRead(PIN_INPUT_BRAKE) == LOW) || brakeHeldOnPress;
+      if (isBrakeHeld)
+      {
+        setRelays(true, false, false); // Keep ACC ON, kill IGN and START
+        currentState = STATE_ACC;      // Go to ACC position
+        stoppedToAcc = true;           // Mark that we just stopped the engine to ACC
+      }
+      else
+      {
+        setRelays(false, false, false); // Turn off all relays
+        currentState = STATE_STANDBY;   // Go to Standby (OFF)
+        stoppedToAcc = false;
+      }
       standbyStartTime = now;
-      stoppedToAcc = false;
       break;
     }
 
@@ -927,11 +945,13 @@ void processPushStart(unsigned long now)
     // - Battery drops below restart threshold (11.6V)
     // - Engine coolant temp creeping high (> 98°C)
     // - Front MCU communication loss
+    // - Maximum stop duration exceeded (90s)
     bool batteryLow = (voltage_filtered < AUTO_STOP_RESTART_VOLTAGE);
     bool tempCreep = (temp_out > AUTO_STOP_MAX_TEMP_C);
     bool canLoss = (now - lastPacketTime > FRONT_MCU_TIMEOUT_MS);
+    bool maxDurationReached = (autoStopStartTime != 0 && (now - autoStopStartTime >= AUTO_STOP_MAX_DURATION_MS));
 
-    if (brakeReleased || batteryLow || tempCreep || canLoss)
+    if (brakeReleased || batteryLow || tempCreep || canLoss || maxDurationReached)
     {
       // Restore injectors immediately over CAN
       ecoInjCutActive = false;
@@ -954,5 +974,10 @@ void processPushStart(unsigned long now)
     }
     break;
   }
+  }
+
+  if (btnShortPressed)
+  {
+    brakeHeldOnPress = false;
   }
 }

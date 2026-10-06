@@ -418,10 +418,10 @@ void warnings(unsigned long now)
   }
 
   // -------- Bidirectional Fuel System Diagnostic (Rich FPR Leak vs Lean Fuel Starvation) --------//
-  // Normal M111 warm idle net pulse is 1800 - 2400us.
+  // Normal M111 warm idle net pulse is 3000 - 5000us (3ms - 5ms).
   // 1. Rich / Low Pulse (< 1350us): ECU negative trim pinned; raw fuel entering (torn FPR diaphragm,
   //    dripping/stuck-open injector, blocked fuel return line).
-  // 2. Lean / High Pulse (> 3000us): ECU positive trim pinned; fuel starvation (weak/dying fuel pump,
+  // 2. Lean / High Pulse (> 6000us / 6ms): ECU positive trim pinned; fuel starvation (weak/dying fuel pump,
   //    clogged fuel filter, FPR stuck open with low rail pressure, partially clogged/varnished injectors).
   static unsigned long fuel_diag_rich_start_ms = 0;
   static unsigned long fuel_diag_lean_start_ms = 0;
@@ -456,7 +456,7 @@ void warnings(unsigned long now)
       if (fuel_diag_fault == 1) fuel_diag_fault = 0;
     }
 
-    // Lean Check: Abnormally high pulse width (> 3000us)
+    // Lean Check: Abnormally high pulse width (> 6000us / 6ms)
     if (live_net_pulse_us > FUEL_STARV_MIN_PULSE_US)
     {
       if (fuel_diag_lean_start_ms == 0)
@@ -532,6 +532,28 @@ void warnings(unsigned long now)
   {
     tv.fillRect(WARNING_X + 35, WARNING_Y + 60, 90, 8, 0x00);
     ecoStopDrawn = false;
+  }
+
+  // -------- ECO Low-Vacuum Pulsing Warning Beep --------//
+  static unsigned long eco_beep_timer = 0;
+  static bool eco_beep_state = false;
+  if (eco_warning_active)
+  {
+    unsigned long interval = eco_beep_state ? ECO_BEEP_ON_MS : ECO_BEEP_OFF_MS;
+    if (now - eco_beep_timer >= interval)
+    {
+      eco_beep_state = !eco_beep_state;
+      eco_beep_timer = now;
+    }
+    if (eco_beep_state)
+    {
+      buzzer_state = 1;
+    }
+  }
+  else
+  {
+    eco_beep_state = true; // Ready to sound immediately next time ECO appears
+    eco_beep_timer = now;
   }
 
   //---------- ring boot chime  ---------
