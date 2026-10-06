@@ -414,7 +414,7 @@ void loop()
   {
     eco_warning_latched = false;
   }
-  bool eco_warning_active = eco_warning_latched;
+  eco_warning_active = eco_warning_latched;
   if (eco_warning_active != eco_warning_drawn)
   {
     if (eco_warning_active)
@@ -646,7 +646,12 @@ void loop()
     int tick_y = 0;
     fill2 = constrain(fill2, 0, TEMP_HEIGHT);
     t = TEMP_HEIGHT + TEMP_Y - fill2;
-    if (last_t != t || lastTime == 0)
+    static int last_temp_disp = -1;
+    if (last_clear < 6)
+    {
+      last_temp_disp = -1;
+    }
+    if (last_t != t || last_temp_disp != temp_out || lastTime == 0)
     {
       // Erase previous needle only
       tv.fillRect(TEMP_X - 5, last_t - 2, TEMP_VALUE_TICK_WIDTH,
@@ -661,6 +666,15 @@ void loop()
       // draw temp_value tick
       tv.fillRect(TEMP_X - 5, t - 2, TEMP_VALUE_TICK_WIDTH,
                   TEMP_VALUE_TICK_HEIGHT, 0xE0);
+
+      // Display digital temperature readout on top of temp gauge
+      tv.setCursor(TEMP_X - 8, TEMP_Y - 10);
+      uint8_t temp_color = (temp_out >= OVERHEAT_TEMP_C) ? 0xE0 : 0xFF;
+      tv.setTextColor(temp_color, 0x00);
+      char bufTemp[4];
+      snprintf(bufTemp, sizeof(bufTemp), "%3d", temp_out);
+      tv.print(bufTemp);
+      last_temp_disp = temp_out;
     }
 
     // --- Fuel Consumption Calculations ---

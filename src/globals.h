@@ -90,6 +90,7 @@ extern RTC_DATA_ATTR float baro_psi;
 extern bool map_sensor_fault;
 extern uint8_t ac_switch_state;
 extern unsigned long lastVacPacketTime;
+extern bool eco_warning_active;
 extern uint8_t oil_level_t;
 extern int oil_level;
 extern int last_clear;

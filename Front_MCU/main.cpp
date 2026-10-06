@@ -49,10 +49,10 @@ unsigned long lastMapReadTime = 0;
 #define HEARTBEAT_TIMEOUT_MS 1000
 #define REGULATOR_FAIL_THRESHOLD 3
 
-// --- Fan Control (Calibrated for 2.3kΩ pull-down: 92°C = 851 ADC, 95°C = 866 ADC, 96°C = 871 ADC, 102°C = 901 ADC) ---
-#define FAN_TEMP_MIN_ADC 866 // Turn on at 95°C (gentle ~18% speed)
-#define FAN_TEMP_HYST_ADC 15 // Turn off below 851 (92°C, 3°C hysteresis to prevent short-cycling)
-#define FAN_TEMP_MAX_ADC 901 // Full 100% fan speed at 102°C (thermostat fully open)
+// --- Fan Control (Calibrated for 2.3kΩ pull-down: 90°C = 841 ADC, 93°C = 856 ADC, 96°C = 871 ADC, 100°C = 891 ADC) ---
+#define FAN_TEMP_MIN_ADC 856 // Turn on at 93°C (gentle ~18% speed)
+#define FAN_TEMP_HYST_ADC 15 // Turn off below 841 (90°C, 3°C hysteresis to prevent short-cycling)
+#define FAN_TEMP_MAX_ADC 891 // Full 100% fan speed at 100°C
 #define FAN_AC_MIN_ADC 50
 #define FAN_AC_MAX_ADC 500
 #define FAN_DUTY_MIN 45 // ~18% PWM to reliably start Toyota fan module without stall/hum
