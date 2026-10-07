@@ -60,7 +60,7 @@ The ESP32 manages a smart, keyless push-to-start system designed to replicate an
     - **Android 5.0.1 / Legacy Android:** Verified via HID background auto-reconnection and static MAC matching (`BLE_AUTHORIZED_MACS`).
   - **Zero-Interference Auto Radio Shutdown:** The BLE stack and radio are **immediately powered off** once authorization is granted, preventing RF interference with the closed-loop PID alternator regulator or composite video DMA rendering.
   - **HUD Status & Audio Feedback:** Displays `"NO KEY DETECTED"` warning and emits warning beeps when starting is attempted without an authorized phone.
-  - **Emergency Bypass:** 6 pulses on the central unlock line temporarily bypasses phone authorization for the current session (confirmed via 800ms chime).
+  - **Emergency Bypass:** undisclosed
 
 ---
 
@@ -102,5 +102,3 @@ The ESP32 codebase is fully modularized for clean separation of concerns:
 ## 📜 License
 
 This project is licensed under the MIT License - see the [LICENSE](file:///Users/mac/Documents/PlatformIO/Projects/Dashboard/LICENSE) file for details.
-
-
