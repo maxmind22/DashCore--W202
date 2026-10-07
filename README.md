@@ -102,5 +102,3 @@ The ESP32 codebase is fully modularized for clean separation of concerns:
 ## 📜 License
 
 This project is licensed under the MIT License - see the [LICENSE](file:///Users/mac/Documents/PlatformIO/Projects/Dashboard/LICENSE) file for details.
-
-
