@@ -21,9 +21,9 @@ float getFuelPercent(float rawValue) {
 }
 
 void resetFuelTripData(unsigned long now) {
-  total_fuel_liters = 0.0f;
-  total_distance_km = 0.0f;
-  total_fuel_saved_liters = 0.0f;
+  total_fuel_liters = 0.0;
+  total_distance_km = 0.0;
+  total_fuel_saved_liters = 0.0;
   accumulated_inj_time_us = 0;
   accumulated_inj_pulses = 0;
   spd_delta_pulses = 0;
@@ -31,16 +31,49 @@ void resetFuelTripData(unsigned long now) {
   inst_val = 0.0f;
 
 
-  Preferences prefs;
-  prefs.begin("trip_data", false);
-  prefs.putFloat("fuel", 0.0f);
-  prefs.putFloat("dist", 0.0f);
-  prefs.putFloat("saved", 0.0f);
-  prefs.end();
+  saveTripDataToNVS();
   tv.setCursor(WARNING_X + 40, WARNING_Y + 50);
   tv.setTextColor(0xFF);
   tv.print("RESET DONE!");
   resetPrintTime = (now != 0) ? now : millis();
+}
+
+// Trip totals are stored as double under new keys ("*_d"). The legacy float keys
+// ("fuel", "dist", "saved") are only read once to migrate existing data.
+static double sanitizeTripValue(double v) {
+  return (isnan(v) || isinf(v) || v < 0.0) ? 0.0 : v;
+}
+
+void loadTripDataFromNVS() {
+  Preferences prefs;
+  prefs.begin("trip_data", true); // Open in read-only mode
+  if (prefs.isKey("fuel_d")) {
+    total_fuel_liters = prefs.getDouble("fuel_d", 0.0);
+    total_distance_km = prefs.getDouble("dist_d", 0.0);
+    total_fuel_saved_liters = prefs.getDouble("saved_d", 0.0);
+  } else {
+    total_fuel_liters = prefs.getFloat("fuel", 0.0f);
+    total_distance_km = prefs.getFloat("dist", 0.0f);
+    total_fuel_saved_liters = prefs.getFloat("saved", 0.0f);
+  }
+  compounded_r_int = prefs.getFloat("r_int", 0.0f);
+  prefs.end();
+
+  total_fuel_liters = sanitizeTripValue(total_fuel_liters);
+  total_distance_km = sanitizeTripValue(total_distance_km);
+  total_fuel_saved_liters = sanitizeTripValue(total_fuel_saved_liters);
+  if (isnan(compounded_r_int) || compounded_r_int < 0.0f)
+    compounded_r_int = 0.0f;
+}
+
+void saveTripDataToNVS() {
+  Preferences prefs;
+  prefs.begin("trip_data", false);
+  prefs.putDouble("fuel_d", total_fuel_liters);
+  prefs.putDouble("dist_d", total_distance_km);
+  prefs.putDouble("saved_d", total_fuel_saved_liters);
+  prefs.putFloat("r_int", compounded_r_int);
+  prefs.end();
 }
 
 float getInjectorDeadTime(float voltage) {

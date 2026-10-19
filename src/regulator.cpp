@@ -224,10 +224,11 @@ void regulatorTask(void *pvParameters) {
 
     bool vac_connected = (millis() - in_last_vac <= FRONT_MCU_TIMEOUT_MS) && !map_sensor_fault;
     bool voltage_safe_for_cutoff = (new_v >= REGULATOR_V_CUTOFF_FLOOR);
+    bool engine_warm = (in_temp >= REGULATOR_LOAD_MIN_TEMP_C);
 
-    if (MAP_SENSOR_ENABLED && engine_charging_allowed && vac_connected && !delay_active) {
+    if (MAP_SENSOR_ENABLED && engine_charging_allowed && vac_connected && engine_warm && !delay_active) {
       if (!accel_cutoff_active) {
-        // Trigger cutoff whenever manifold vacuum drops below 3.0 psi and battery voltage is healthy
+        // Trigger cutoff whenever manifold vacuum drops below 2.0 psi and battery voltage is healthy
         if (in_vac < REGULATOR_LOAD_CUTOFF_VAC_PSI && voltage_safe_for_cutoff) {
           accel_cutoff_active = true;
         }
@@ -251,39 +252,50 @@ void regulatorTask(void *pvParameters) {
     float commanded_pwm = (target_pwm_v < target_pwm_i) ? target_pwm_v : target_pwm_i;
     float clamped_pwm = constrain(commanded_pwm, 0.0f, 1023.0f);
 
-    // Bumpless Transfer & Anti-Windup Tracking:
-    if (target_pwm_v <= target_pwm_i) {
-      // Voltage loop is in control (CV Mode)
-      bool saturated = (clamped_pwm >= 1023.0f && err_v > 0.0f) ||
-                       (clamped_pwm <= 0.0f && err_v < 0.0f);
-      if (isfinite(err_v) && isfinite(dt) && !saturated) {
-        integral_v += (Ki_v * err_v * dt);
-      }
-      integral_v = constrain(integral_v, 0.0f, 1023.0f);
-      // Track current integrator to active output to prevent windup while in CV mode
-      integral_i = clamped_pwm;
-    } else {
-      // Current loop is in control (CC Mode)
-      bool saturated = (clamped_pwm >= 1023.0f && err_i > 0.0f) ||
-                       (clamped_pwm <= 0.0f && err_i < 0.0f);
-      if (isfinite(err_i) && isfinite(dt) && !saturated) {
-        integral_i += (Ki_i * err_i * dt);
-      }
-      integral_i = constrain(integral_i, 0.0f, 1023.0f);
-      // Track voltage integrator to active output to allow current loop full headroom up to 20A
-      integral_v = clamped_pwm;
-    }
-
-    // --- 8. Field Soft-Start Slew Rate Limiter ---
+    // --- 8. Field Soft-Start Slew Rate Limiter & Integrator Anti-Windup ---
     float max_step_up = REGULATOR_RAMP_UP_PER_SEC * dt;
     float max_step_down = REGULATOR_RAMP_DOWN_PER_SEC * dt;
 
-    if (!engine_charging_allowed || delay_active || sensor_error || relay_latched || accel_cutoff_active) {
+    bool hard_reset = (!engine_charging_allowed || delay_active || sensor_error || relay_latched);
+    if (hard_reset) {
       active_pwm = 0.0f;
       integral_v = 0.0f;
       integral_i = 0.0f;
+    } else if (accel_cutoff_active) {
+      // Cut field excitation immediately for zero alternator drag, but freeze integrators
+      // at their pre-cutoff operating point so charging recovers without a 10s ramp delay
+      active_pwm = 0.0f;
     } else {
-      if (clamped_pwm > active_pwm + max_step_up) {
+      bool slew_limiting_up = (clamped_pwm > active_pwm + max_step_up);
+
+      // Bumpless Transfer & Anti-Windup Tracking (paused during cutoff and upward slew limiting):
+      if (target_pwm_v <= target_pwm_i) {
+        // Voltage loop is in control (CV Mode)
+        bool saturated = ((clamped_pwm >= 1023.0f || slew_limiting_up) && err_v > 0.0f) ||
+                         (clamped_pwm <= 0.0f && err_v < 0.0f);
+        if (isfinite(err_v) && isfinite(dt) && !saturated) {
+          integral_v += (Ki_v * err_v * dt);
+        }
+        integral_v = constrain(integral_v, 0.0f, 1023.0f);
+        // Track current integrator to active output to prevent windup while in CV mode
+        if (!slew_limiting_up || clamped_pwm < integral_i) {
+          integral_i = clamped_pwm;
+        }
+      } else {
+        // Current loop is in control (CC Mode)
+        bool saturated = ((clamped_pwm >= 1023.0f || slew_limiting_up) && err_i > 0.0f) ||
+                         (clamped_pwm <= 0.0f && err_i < 0.0f);
+        if (isfinite(err_i) && isfinite(dt) && !saturated) {
+          integral_i += (Ki_i * err_i * dt);
+        }
+        integral_i = constrain(integral_i, 0.0f, 1023.0f);
+        // Track voltage integrator to active output to allow current loop full headroom up to 20A
+        if (!slew_limiting_up || clamped_pwm < integral_v) {
+          integral_v = clamped_pwm;
+        }
+      }
+
+      if (slew_limiting_up) {
         active_pwm += max_step_up;
       } else if (clamped_pwm < active_pwm - max_step_down) {
         active_pwm -= max_step_down;
@@ -332,12 +344,14 @@ void regulatorTask(void *pvParameters) {
       next_charge_state = 0; // Normal
     }
 
-    // --- 10. Sample Auxiliary Fuel ADC (every 2s) ---
+    // --- 10. Sample Auxiliary Fuel ADC (every 2s, immediately on first pass) ---
+    static bool fuel_first_read_pending = true;
     int new_fuel_val = -1;
-    if (current_micros - last_fuel_time >= FUEL_ADC_INTERVAL_US) {
+    if (fuel_first_read_pending || current_micros - last_fuel_time >= FUEL_ADC_INTERVAL_US) {
       int16_t read_f = readADC_Timeout(2, 25);
       if (read_f >= 0) {
         new_fuel_val = read_f;
+        fuel_first_read_pending = false;
       }
       last_fuel_time = current_micros;
     }

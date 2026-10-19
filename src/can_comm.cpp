@@ -69,6 +69,10 @@ static uint8_t last_seq_02 = 0;
 static bool seq_02_synced = false;
 static bool inj_04_synced = false;
 static unsigned long last_04_rx_time = 0;
+// Time the injector snapshot last advanced. The Front MCU re-sends the previous snapshot
+// while an injector is mid-pulse, so at high duty several consecutive 0x04 frames can carry
+// delta = 0 and the next delta then spans several 50 ms intervals.
+static unsigned long last_inj_change_time = 0;
 
 void drainCanRxBuffer(unsigned long now) {
   for (int i = 0; i < 6; i++) {
@@ -149,19 +153,25 @@ void drainCanRxBuffer(unsigned long now) {
         last_rx_inj_pulses = rx_inj_pulses;
         last_rx_spd_pulses = rx_spd_pulses;
         last_04_rx_time = now;
+        last_inj_change_time = now;
         inj_04_synced = true;
       } else {
         uint32_t delta_time_us = (uint32_t)(rx_inj_time - last_rx_inj_time_us);
         uint16_t delta_pulses = (uint16_t)(rx_inj_pulses - last_rx_inj_pulses);
         uint16_t delta_spd = (uint16_t)(rx_spd_pulses - last_rx_spd_pulses);
         uint32_t elapsed_ms = now - last_04_rx_time;
+        // Injector delta may span several frames (mid-pulse deferral) -> measure from last change
+        uint32_t inj_elapsed_ms = now - last_inj_change_time;
         last_04_rx_time = now;
         last_rx_inj_time_us = rx_inj_time;
         last_rx_inj_pulses = rx_inj_pulses;
         last_rx_spd_pulses = rx_spd_pulses;
+        if (delta_time_us != 0 || delta_pulses != 0) {
+          last_inj_change_time = now;
+        }
 
         // Plausible delta thresholds scaled to elapsed time with 200ms margin
-        uint32_t max_plausible_time = (elapsed_ms + 200) * 1000UL;
+        uint32_t max_plausible_time = (inj_elapsed_ms + 200) * 1000UL;
         if (max_plausible_time > 5000000UL) max_plausible_time = 5000000UL;
 
         if (delta_time_us <= max_plausible_time) {
@@ -182,7 +192,6 @@ void drainCanRxBuffer(unsigned long now) {
             }
           }
 
-          float raw_duty = 0.0f;
           uint16_t current_rpm = (rpm > 0) ? rpm : new_rpm;
           if (delta_pulses > 0 && current_rpm > 0) {
             float avg_net_pulse_us = net_pulse_us / (float)delta_pulses;
@@ -191,11 +200,17 @@ void drainCanRxBuffer(unsigned long now) {
             }
             // Engine cycle period for 1 injector (4-stroke: 1 injection per 2 revs = 120,000,000 / RPM us)
             float cycle_period_us = 120000000.0f / (float)current_rpm;
-            raw_duty = (avg_net_pulse_us / cycle_period_us) * 100.0f;
+            float raw_duty = (avg_net_pulse_us / cycle_period_us) * 100.0f;
+            raw_duty = constrain(raw_duty, 0.0f, 100.0f);
+            live_inj_duty_cycle =
+                0.25f * raw_duty + 0.75f * live_inj_duty_cycle;
+          } else if (current_rpm == 0 || injector_state == 1 ||
+                     (now - last_inj_change_time) > 500) {
+            // Engine stopped, fuel cut active, or no pulses for > 500 ms: injectors genuinely closed
+            live_inj_duty_cycle *= 0.75f;
           }
-          raw_duty = constrain(raw_duty, 0.0f, 100.0f);
-          live_inj_duty_cycle =
-              0.25f * raw_duty + 0.75f * live_inj_duty_cycle;
+          // else: no completed pulse inside this 50 ms frame (normal below ~1200 RPM, or the
+          // Front MCU deferred a mid-pulse snapshot) -> hold the last value instead of feeding 0%.
         }
 
         uint32_t max_plausible_spd_delta = (uint32_t)((elapsed_ms + 200) * 1.5f);

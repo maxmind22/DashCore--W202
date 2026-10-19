@@ -57,6 +57,8 @@ extern int badSamples2;
 extern unsigned long last_fuel_correction;
 extern int temp_out;
 extern int percent;
+extern float fuel_percent_f;   // Unrounded tank level (0..100 %) used for range calculation
+extern bool fuel_level_valid;  // True once the first valid fuel sender sample was received
 
 extern RTC_DATA_ATTR uint32_t rtc_trip_magic;
 extern uint32_t accumulated_inj_time_us;
@@ -65,10 +67,10 @@ extern uint32_t spd_delta_pulses;
 extern uint32_t can_packets_lost_02;
 extern float live_inj_duty_cycle;
 extern float live_net_pulse_us;
-extern RTC_DATA_ATTR float total_fuel_liters;
-extern RTC_DATA_ATTR float total_distance_km;
+extern RTC_DATA_ATTR double total_fuel_liters;
+extern RTC_DATA_ATTR double total_distance_km;
 extern RTC_DATA_ATTR float compounded_r_int;
-extern RTC_DATA_ATTR float total_fuel_saved_liters;
+extern RTC_DATA_ATTR double total_fuel_saved_liters;
 extern float last_active_inj_pulse_us;
 extern float inst_val;
 extern float avg_l_100km;

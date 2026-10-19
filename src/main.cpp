@@ -85,23 +85,7 @@ void setup()
   if (rtc_trip_magic != RTC_TRIP_MAGIC_KEY || isnan(total_fuel_liters) ||
       isnan(total_distance_km) || isnan(total_fuel_saved_liters))
   {
-    Preferences prefs;
-    prefs.begin("trip_data", true); // Open in read-only mode
-    total_fuel_liters = prefs.getFloat("fuel", 0.0f);
-    total_distance_km = prefs.getFloat("dist", 0.0f);
-    compounded_r_int = prefs.getFloat("r_int", 0.0f);
-    total_fuel_saved_liters = prefs.getFloat("saved", 0.0f);
-    prefs.end();
-
-    if (isnan(total_fuel_liters))
-      total_fuel_liters = 0.0f;
-    if (isnan(total_distance_km))
-      total_distance_km = 0.0f;
-    if (isnan(compounded_r_int) || compounded_r_int < 0.0f)
-      compounded_r_int = 0.0f;
-    if (isnan(total_fuel_saved_liters) || total_fuel_saved_liters < 0.0f)
-      total_fuel_saved_liters = 0.0f;
-
+    loadTripDataFromNVS(); // Reads double keys (migrates legacy float keys) and sanitizes values
     rtc_trip_magic = RTC_TRIP_MAGIC_KEY;
   }
 
@@ -199,20 +183,19 @@ void loop()
   portEXIT_CRITICAL(&dataMux);
 
   fuel_in_temporary = local_ads_fuel; // Pre-fetched value from regulatorTask
-  static bool fuel_initialized = false;
   if (fuel_in_temporary < 22000 && fuel_in_temporary > 1200)
   {
     raw = fuel_in_temporary;
-    if (!fuel_initialized)
+    if (!fuel_level_valid)
     {
       smoothVal = (float)raw;
       filtered = raw;
       lastValue = raw;
-      fuel_initialized = true;
+      fuel_level_valid = true;
     }
   }
 
-  if (fuel_initialized)
+  if (fuel_level_valid)
   {
     int delta = abs(raw - lastValue);
     if (delta <= 2000)
@@ -239,8 +222,8 @@ void loop()
     smoothVal =
         0.001f * filtered +
         (1.0f - 0.001f) * smoothVal; // Exponential moving average for smoothing
-    percent = (int)getFuelPercent(smoothVal);
-    percent = constrain(percent, 0, 100);
+    fuel_percent_f = constrain(getFuelPercent(smoothVal), 0.0f, 100.0f);
+    percent = (int)lroundf(fuel_percent_f);
   }
 
   //-------------------- Coolant level
@@ -678,9 +661,14 @@ void loop()
     }
 
     // --- Fuel Consumption Calculations ---
-    float elapsed_sec = (now - lastTime) / 1000.0f;
+    // First pass after boot: lastTime == 0 would make elapsed = whole uptime
+    float elapsed_sec = (lastTime == 0) ? (FUEL_UPDATE_INTERVAL_MS / 1000.0f)
+                                        : ((now - lastTime) / 1000.0f);
     if (elapsed_sec <= 0.0f)
       elapsed_sec = 1.0f;
+
+    // Measured warm-idle consumption (L/h), learned below while idling; used for Auto Start-Stop savings
+    static float measured_idle_l_per_hr = BASELINE_IDLE_FUEL_L_PER_HR;
 
     // --- Dead-time compensation ---
     // Injector dead-time is the solenoid opening delay where no fuel flows.
@@ -718,9 +706,9 @@ void loop()
     }
     else if (currentState == STATE_AUTO_STOP)
     {
-      // Calculate fuel saved during Auto Start-Stop based on baseline idle rate
+      // Calculate fuel saved during Auto Start-Stop based on the measured warm-idle rate
       float fuel_saved_interval =
-          (BASELINE_IDLE_FUEL_L_PER_HR / 3600.0f) * elapsed_sec;
+          (measured_idle_l_per_hr / 3600.0f) * elapsed_sec;
       total_fuel_saved_liters += fuel_saved_interval;
     }
 
@@ -748,12 +736,21 @@ void loop()
     {
       // stationary consumption in L/h
       inst_val = (fuel_consumed_liters / elapsed_sec) * 3600.0f;
+
+      // Learn warm-idle consumption under the same conditions Auto Start-Stop engages in
+      if (currentState == STATE_RUNNING && injector_state == 0 &&
+          th_switch_state == 1 && temp_out >= AUTO_STOP_MIN_TEMP_C &&
+          rpm >= VAC_LEAK_MIN_RPM && rpm <= VAC_LEAK_MAX_RPM &&
+          inst_val >= 0.3f && inst_val <= 3.0f)
+      {
+        measured_idle_l_per_hr = 0.02f * inst_val + 0.98f * measured_idle_l_per_hr; // ~50 s time constant
+      }
     }
 
     // Calculate average consumption in L/100km
-    if (total_distance_km > 0.001f)
+    if (total_distance_km > 0.001)
     {
-      avg_l_100km = (total_fuel_liters / total_distance_km) * 100.0f;
+      avg_l_100km = (float)((total_fuel_liters / total_distance_km) * 100.0);
     }
     else
     {
@@ -819,10 +816,12 @@ void loop()
     tv.print(bufSaved);
 
     char bufRem[20];
-    if (avg_l_100km > 0.001f)
+    if (fuel_level_valid && avg_l_100km > 0.1f &&
+        total_distance_km >= RANGE_MIN_TRIP_KM)
     {
-      float rem_fuel_l = (percent / 100.0f) * FUEL_TANK_CAPACITY_LITERS;
+      float rem_fuel_l = (fuel_percent_f / 100.0f) * FUEL_TANK_CAPACITY_LITERS;
       float rem_km = (rem_fuel_l / avg_l_100km) * 100.0f;
+      rem_km = constrain(rem_km, 0.0f, 999.0f);
       snprintf(bufRem, sizeof(bufRem), "REM:%4.0fkm", rem_km);
     }
     else

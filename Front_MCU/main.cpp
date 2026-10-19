@@ -13,6 +13,8 @@
 // W202 C200 instrument cluster speed pulse (205/55R16, 48 ABS teeth, falling edge)
 #define PULSES_PER_KM 24714UL
 #define SPD_WINDOW_MS 100UL
+#define SPD_MIN_EDGE_US 300UL        // Edge debounce: 220 km/h = ~660 us between pulses
+#define SPD_STOP_TIMEOUT_US 1000000UL // No pulse for 1 s => 0 km/h (1 pulse/s = 0.15 km/h)
 #define RPM_STALE_TIMEOUT_US 1000000UL
 
 const int tempPin = A0;
@@ -77,7 +79,7 @@ uint8_t regulator_fail_count = 0;
 // Variables shared with ISR MUST be volatile
 volatile uint32_t lastTime = 0;
 volatile uint32_t period = 0;
-volatile uint16_t spd_pulse_count = 0;
+volatile uint32_t spd_last_edge_us = 0; // micros() timestamp of the latest speed pulse edge
 volatile uint32_t total_spd_pulses = 0;
 volatile uint32_t total_inj_time_us = 0;
 
@@ -118,7 +120,10 @@ void rpmISR()
 
 void spdISR()
 {
-  spd_pulse_count++;
+  uint32_t t = micros();
+  if (t - spd_last_edge_us < SPD_MIN_EDGE_US)
+    return; // Reject noise edges (faster than any physically possible pulse rate)
+  spd_last_edge_us = t;
   total_spd_pulses++;
 }
 
@@ -273,8 +278,10 @@ void loop()
       }
     }
 
-    // Calculate barometric PSI (scaled relative to nominal default 780 ADC = 14.7 PSI)
-    float baro_psi_f = 14.7f * ((float)map_atm_adc / (float)MAP_CALIB_ATM_DEFAULT);
+    // Calculate barometric PSI using the same sensor slope as vacuum (MAP_ADC_TO_PSI),
+    // referenced to the nominal 780 ADC = 14.7 PSI calibration point. (The sensor has an
+    // output offset, so scaling proportionally through 0 ADC would mis-scale baro changes.)
+    float baro_psi_f = 14.7f + ((float)map_atm_adc - (float)MAP_CALIB_ATM_DEFAULT) * MAP_ADC_TO_PSI;
     if (baro_psi_f > 16.5f) baro_psi_f = 16.5f;
     if (baro_psi_f < 8.0f)  baro_psi_f = 8.0f;
     baro_psi_x10 = (uint8_t)(baro_psi_f * 10.0f + 0.5f);
@@ -527,21 +534,64 @@ void loop()
   }
 
   //==================== Calculate Vehicle Speed (Every 100ms) ====================//
+  // Edge-timed measurement: speed = pulses since last update / exact time between the
+  // reference edge and the newest edge. Resolution is limited only by micros() (4 us),
+  // instead of 1 pulse per 100 ms window (= 1.46 km/h steps with simple counting).
   if (currentMillis - lastSpdCalculationTime >= SPD_WINDOW_MS)
   {
+    static uint32_t spd_ref_pulses = 0;
+    static uint32_t spd_ref_edge_us = 0;
+    static bool spd_ref_valid = false;
+
     noInterrupts();
-    uint16_t count = spd_pulse_count;
-    spd_pulse_count = 0;
+    uint32_t pulses_now = total_spd_pulses;
+    uint32_t edge_us = spd_last_edge_us;
+    uint32_t spd_now_us = micros();
     interrupts();
 
-    if (count > 0)
+    uint32_t new_pulses = pulses_now - spd_ref_pulses;
+    if (!spd_ref_valid)
     {
-      // Rounded km/h calculation: (count * 3600000 + half_divisor) / divisor
-      spd = ((uint32_t)count * 3600000UL + 1235700UL) / (PULSES_PER_KM * SPD_WINDOW_MS);
+      // Wait for a first edge to use as timing reference
+      spd = 0;
+      if (new_pulses > 0)
+      {
+        spd_ref_pulses = pulses_now;
+        spd_ref_edge_us = edge_us;
+        spd_ref_valid = true;
+      }
+    }
+    else if (new_pulses > 0)
+    {
+      uint32_t dt_us = edge_us - spd_ref_edge_us;
+      if (dt_us > 0)
+      {
+        // km/h = (pulses / PULSES_PER_KM) km / (dt_us / 3.6e9) h
+        float kmh = ((float)new_pulses * 3.6e9f) / ((float)PULSES_PER_KM * (float)dt_us);
+        if (kmh <= (float)MAX_SPEED_KMH * 1.5f) // Ignore physically impossible readings (noise)
+        {
+          spd = (uint32_t)(kmh + 0.5f);
+        }
+      }
+      spd_ref_pulses = pulses_now;
+      spd_ref_edge_us = edge_us;
     }
     else
     {
-      spd = 0;
+      // No new edge in this window
+      uint32_t since_edge_us = spd_now_us - spd_ref_edge_us;
+      if (since_edge_us > SPD_STOP_TIMEOUT_US)
+      {
+        spd = 0;
+        spd_ref_valid = false;
+      }
+      else
+      {
+        // Real speed is at most 1 pulse per since_edge_us: lets the reading fall smoothly to 0 when stopping
+        float kmh_max = 3.6e9f / ((float)PULSES_PER_KM * (float)since_edge_us);
+        if ((float)spd > kmh_max)
+          spd = (uint32_t)(kmh_max + 0.5f);
+      }
     }
     spd_s = (spd > MAX_SPEED_KMH) ? MAX_SPEED_KMH : (uint16_t)spd;
 

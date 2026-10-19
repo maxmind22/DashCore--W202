@@ -235,13 +235,7 @@ void enterPowerDownSleep()
   stopRegulatorTask();
 
   // 2. Save trip stats to NVS Flash memory (safe now that Core 0 task is stopped)
-  Preferences prefs;
-  prefs.begin("trip_data", false);
-  prefs.putFloat("fuel", total_fuel_liters);
-  prefs.putFloat("dist", total_distance_km);
-  prefs.putFloat("r_int", compounded_r_int);
-  prefs.putFloat("saved", total_fuel_saved_liters);
-  prefs.end();
+  saveTripDataToNVS();
 
   // 3. Turn off field coil PWM and detach LEDC
   ledcWrite(0, 0);

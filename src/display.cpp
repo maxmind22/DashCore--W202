@@ -12,7 +12,7 @@ void warnings(unsigned long now)
   buzzer_state = 0;
   static int priority = 0;
   //------------------------------------------
-  if (percent <= LOW_FUEL_LEVEL && lowBlinkState && fuel_run)
+  if (fuel_level_valid && percent <= LOW_FUEL_LEVEL && lowBlinkState && fuel_run)
   {
     // -------- LOW FUEL warning --------//
 

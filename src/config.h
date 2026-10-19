@@ -60,10 +60,10 @@ inline float getBaroScale() {
 }
 
 // --- Load-Aware Alternator De-Excitation (Vacuum Threshold) ---
-// Cutoff engages whenever manifold vacuum drops below 3.0 psi (0A alternator drag) and
-// disengages when vacuum recovers above hysteresis threshold (>= 3.5 psi).
-#define REGULATOR_LOAD_CUTOFF_VAC_PSI   3.0f // Manifold vacuum < 3.0 psi: cut alternator field (0A drag)
-#define REGULATOR_LOAD_REENGAGE_VAC_PSI 3.5f // Manifold vacuum >= 3.5 psi: re-engage alternator (0.5 psi hysteresis)
+// Cutoff engages whenever manifold vacuum drops below 2.0 psi (0A alternator drag) and
+// disengages when vacuum recovers above hysteresis threshold (>= 2.5 psi).
+#define REGULATOR_LOAD_CUTOFF_VAC_PSI   2.0f // Manifold vacuum < 2.0 psi: cut alternator field (0A drag)
+#define REGULATOR_LOAD_REENGAGE_VAC_PSI 2.5f // Manifold vacuum >= 2.5 psi: re-engage alternator (0.5 psi hysteresis)
 #define REGULATOR_V_CUTOFF_FLOOR 12.60f      // Safety floor: abort cutoff if battery drops below 12.60V
 #define REGULATOR_LOAD_MIN_TEMP_C 60         // Minimum coolant temp (°C) before allowing load-based alternator de-excitation
 
@@ -138,8 +138,8 @@ const unsigned long ENGINE_STALL_DEBOUNCE_MS = 1500; // Require 1.5s persistent 
 #define ECO_INDICATOR_Y 18
 #define VACUUM_DISPLAY_X 182
 #define VACUUM_DISPLAY_Y 38
-#define LOAD_RATIO_ECO_WARNING    0.93f       // 93% engine load (~1.0 psi vac): instant ECO indicator
-#define LOAD_RATIO_ECO_CLEAR      0.86f       // 86% engine load (~2.0 psi vac): clear ECO indicator (hysteresis)
+#define LOAD_RATIO_ECO_WARNING    0.945f      // 94.5% engine load (~0.8 psi vac): instant ECO indicator
+#define LOAD_RATIO_ECO_CLEAR      0.932f      // 93.2% engine load (~1.0 psi vac): clear ECO indicator (hysteresis)
 #define ECO_MIN_TEMP_C 60                     // Minimum coolant temp (°C) before checking economy (cold start fast idle drops vacuum)
 #define ECO_BEEP_ON_MS            200         // Pulsing beep ON duration while ECO is displayed (ms)
 #define ECO_BEEP_OFF_MS           200         // Pulsing beep OFF duration while ECO is displayed (ms)
@@ -200,6 +200,7 @@ const int LOW_FUEL_LEVEL = 10;
 const float INJECTOR_FLOW_RATE_CC_MIN = 228.0f; // Rated 228 cc/min @ 3.8 bar OEM regulator pressure
 const int NUM_INJECTORS = 4;
 const float FUEL_TANK_CAPACITY_LITERS = 62.0f;
+const float RANGE_MIN_TRIP_KM = 5.0f; // Min trip distance before REM (range) is shown; avoids absurd values right after a reset
 const uint32_t MAX_INJ_PULSE_PER_INTERVAL_US = 1000000; // 1,000,000us (1s): handles multiple deferred CAN sends if Front MCU skips sending for up to 1 second
 #define RTC_TRIP_MAGIC_KEY 0xCAFE4567
 

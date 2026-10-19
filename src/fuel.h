@@ -5,3 +5,5 @@
 float getFuelPercent(float rawValue);
 float getInjectorDeadTime(float voltage);
 void resetFuelTripData(unsigned long now = 0);
+void loadTripDataFromNVS();
+void saveTripDataToNVS();
