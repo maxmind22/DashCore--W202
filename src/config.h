@@ -3,18 +3,17 @@
 #include <Adafruit_ADS1X15.h>
 #include <ESP_8_BIT_GFX.h>
 #include <Preferences.h>
-#include <SPI.h>
 #include <WiFi.h>
 #include <Wire.h>
 #include <digitalWriteFast.h>
 #include <driver/dac.h>
 #include <driver/gpio.h>
 #include <driver/rtc_io.h>
+#include <driver/twai.h>
 #include <esp_bt.h>
 #include <esp_sleep.h>
 #include <esp_task_wdt.h>
 #include <math.h>
-#include <mcp2515.h>
 #include <soc/i2s_struct.h>
 
 // --- PUSH START PIN DEFINITIONS ---
@@ -33,6 +32,17 @@
 #define field_relay_pin 14
 #define PIN_I2C_SDA 21
 #define PIN_I2C_SCL 22
+
+// --- CAN BUS (ESP32 internal TWAI controller + SN65HVD230 3.3V transceiver) ---
+// Reuses the former MCP2515 SPI wires: old MOSI (23) -> CTX, old MISO (19) <- CRX.
+// Avoid GPIO5 for CTX: it is a strapping pin that toggles during boot and would glitch the bus.
+#define PIN_CAN_TX 23           // ESP32 TX -> SN65HVD230 "CTX" / D (pin 1)
+#define PIN_CAN_RX 19           // ESP32 RX <- SN65HVD230 "CRX" / R (pin 4)
+#define CAN_RX_QUEUE_LEN 32     // Driver RX queue (frames); MCP2515 only had 2 HW buffers
+#define CAN_TX_QUEUE_LEN 4      // Driver TX queue (frames)
+#define CAN_RX_DRAIN_MAX 16     // Max frames processed per drainCanRxBuffer() call
+#define CAN_STALE_REINIT_MS 2000 // No RX for this long -> periodically re-init TWAI driver
+#define CAN_REINIT_INTERVAL_MS 1000
 
 // --- Alternator Regulator Constants ---
 #define REGULATOR_V_TARGET 13.60f           // LiFePO4 safe full absorption voltage (3.40V/cell)

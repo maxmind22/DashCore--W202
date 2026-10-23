@@ -216,15 +216,9 @@ void stopTVDisplay()
   dac_i2s_disable();
 }
 
-void sleepCANController() { mcp2515.setSleepMode(); }
+void sleepCANController() { canEnd(); } // Uninstall TWAI driver, park CTX recessive
 
-void wakeupCANController()
-{
-  SPI.begin();
-  mcp2515.reset();
-  mcp2515.setBitrate(CAN_500KBPS, MCP_8MHZ);
-  mcp2515.setNormalOneShotMode();
-}
+void wakeupCANController() { canBegin(); }
 
 void enterPowerDownSleep()
 {
@@ -250,22 +244,19 @@ void enterPowerDownSleep()
   phoneAuthorized = false;
   phoneAuthBypassed = false;
 
-  // 5. Put MCP2515 CAN controller to sleep (SPI device)
+  // 5. Stop the ESP32 TWAI CAN controller (CTX parked recessive while transceiver is still powered)
   sleepCANController();
 
   // 6. Close communication buses
   Wire.end();
-  SPI.end(); // Stop SPI bus to release SCK, MOSI, MISO
   esp_task_wdt_reset();
 
   // 6.1 Put communication pins into high-impedance (floating) mode
   // This prevents leakage through level-shifter pull-ups
   pinMode(21, INPUT); // SDA
   pinMode(22, INPUT); // SCL
-  pinMode(5, INPUT);  // CS (CAN)
-  pinMode(18, INPUT); // SCK
-  pinMode(19, INPUT); // MISO
-  pinMode(23, INPUT); // MOSI
+  pinMode(PIN_CAN_RX, INPUT); // CAN RX (SN65HVD230 R output)
+  // PIN_CAN_TX stays INPUT_PULLUP until the 3.3V rail is cut (step 8)
 
   // 7. Turn off and de-energize all relays and peripherals
   setRelays(false, false, false);
@@ -302,6 +293,7 @@ void enterPowerDownSleep()
   // 8. Turn off the 3.3V digital gate (must happen after locking relay is pulsed)
   digitalWrite(PIN_3V3_DIGITAL_GATE, LOW); // Cut 3.3V pull-ups/shifter
   gpio_hold_en((gpio_num_t)PIN_3V3_DIGITAL_GATE);
+  pinMode(PIN_CAN_TX, INPUT); // Transceiver unpowered now: drop pull-up to avoid back-feeding it
 
   // 10. Disarm WDT before deep sleep
   esp_task_wdt_delete(NULL);

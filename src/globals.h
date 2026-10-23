@@ -4,11 +4,8 @@
 
 extern ESP_8_BIT_GFX tv;
 extern Adafruit_ADS1115 adc;
-extern MCP2515 mcp2515;
 extern portMUX_TYPE dataMux;
 
-extern struct can_frame canMsg;
-extern struct can_frame canMsgTx;
 
 extern RTC_DATA_ATTR SystemState currentState;
 extern RTC_DATA_ATTR bool vehicleLockDisabled;

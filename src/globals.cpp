@@ -6,11 +6,8 @@ ESP_8_BIT_GFX tv(false, 8); // PAL (50Hz, 256x240, +16 scanlines)
 ESP_8_BIT_GFX tv(true, 8);  // NTSC (60Hz, 256x224)
 #endif
 Adafruit_ADS1115 adc;
-MCP2515 mcp2515(5, 8000000);
 portMUX_TYPE dataMux = portMUX_INITIALIZER_UNLOCKED;
 
-struct can_frame canMsg;
-struct can_frame canMsgTx;
 
 RTC_DATA_ATTR SystemState currentState = STATE_SLEEP;
 RTC_DATA_ATTR bool vehicleLockDisabled = false;

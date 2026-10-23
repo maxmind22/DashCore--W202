@@ -55,6 +55,7 @@ void setup()
 
   pinMode(PIN_3V3_DIGITAL_GATE, OUTPUT);
   digitalWrite(PIN_3V3_DIGITAL_GATE, HIGH); // Power 3.3V pull-ups/level shifter
+  pinMode(PIN_CAN_TX, INPUT_PULLUP);        // Hold SN65HVD230 D recessive until TWAI takes the pin
 
   delay(30); // Allow voltage rails to stabilize
   Serial.begin(250000);
@@ -94,10 +95,10 @@ void setup()
   pinMode(field_relay_pin, OUTPUT);
   digitalWriteFast(field_relay_pin, LOW); // Start with field relay off
 
-  SPI.begin();
-  mcp2515.reset();
-  mcp2515.setBitrate(CAN_500KBPS, MCP_8MHZ); // Match transmitter
-  mcp2515.setNormalOneShotMode();
+  if (!canBegin()) // ESP32 TWAI @ 500 kbps via SN65HVD230 (matches Front MCU)
+  {
+    Serial.println("[CAN] TWAI driver start failed - will retry in loop");
+  }
   esp_task_wdt_deinit();      // De-init default core WDT config
   esp_task_wdt_init(1, true); // 1s timeout with panic=true
   esp_task_wdt_add(nullptr);  // Add current loop task

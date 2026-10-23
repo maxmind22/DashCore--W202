@@ -1,30 +1,111 @@
 #include "can_comm.h"
 #include "fuel.h"
 
-void checkCanErrors(unsigned long now) {
-  uint8_t errFlags = mcp2515.getErrorFlags();
-  if (errFlags != 0) {
-    // Clear overflow flags in EFLG without wiping CANINTF unread interrupt flags
-    if (errFlags & (MCP2515::EFLG_RX0OVR | MCP2515::EFLG_RX1OVR)) {
-      mcp2515.clearRXnOVRFlags();
-    }
+// ============================================================================
+// ESP32 TWAI (built-in CAN 2.0B controller) + SN65HVD230 transceiver
+// ----------------------------------------------------------------------------
+// Bit timing: 500 kbps to match the Front MCU (MCP2515 @ 8 MHz, CAN_500KBPS).
+// Mode: NORMAL (ACKs frames). Health frames use single-shot TX, mirroring the
+// previous MCP2515 "NormalOneShot" mode, so a missing Front MCU never causes
+// endless retransmissions on the bus.
+// ============================================================================
 
-    // Reset the chip if in Bus-Off or stuck in Error Passive (TXEP)
-    if (errFlags & (MCP2515::EFLG_TXBO | MCP2515::EFLG_TXEP)) {
-      mcp2515.reset();
-      mcp2515.setBitrate(CAN_500KBPS, MCP_8MHZ);
-      mcp2515.setNormalOneShotMode();
+static twai_message_t canMsg;
+static twai_message_t canMsgTx;
+static bool canInstalled = false;
+
+bool canBegin()
+{
+  if (canInstalled)
+    return true;
+
+  twai_general_config_t g_config =
+      TWAI_GENERAL_CONFIG_DEFAULT((gpio_num_t)PIN_CAN_TX, (gpio_num_t)PIN_CAN_RX, TWAI_MODE_NORMAL);
+  g_config.rx_queue_len = CAN_RX_QUEUE_LEN;
+  g_config.tx_queue_len = CAN_TX_QUEUE_LEN;
+  g_config.alerts_enabled = TWAI_ALERT_NONE; // State is polled in checkCanErrors()
+
+  twai_timing_config_t t_config = TWAI_TIMING_CONFIG_500KBITS();
+
+  // Hardware acceptance filter: accept standard IDs 0x000..0x007 only (Front MCU uses 0x02/0x04).
+  // Single-filter layout for std frames: ID in bits [31:21]; mask bit = 1 -> "don't care".
+  // ID bits [10:3] must be 0, bits [2:0] + RTR + data bytes are don't-care.
+  twai_filter_config_t f_config;
+  f_config.acceptance_code = 0x00000000;
+  f_config.acceptance_mask = 0x00FFFFFF;
+  f_config.single_filter = true;
+
+  if (twai_driver_install(&g_config, &t_config, &f_config) != ESP_OK)
+    return false;
+  // Keep weak internal pull-up on CRX so an unplugged transceiver never floats or picks up EMI
+  gpio_set_pull_mode((gpio_num_t)PIN_CAN_RX, GPIO_PULLUP_ONLY);
+  if (twai_start() != ESP_OK)
+  {
+    twai_driver_uninstall();
+    pinMode(PIN_CAN_TX, INPUT_PULLUP);
+    return false;
+  }
+  canInstalled = true;
+  return true;
+}
+
+void canEnd()
+{
+  // Park CTX recessive (HIGH) and disconnect it from the TWAI peripheral output matrix
+  // BEFORE stopping/uninstalling the driver so disabling the peripheral never glitches CTX low.
+  pinMode(PIN_CAN_TX, INPUT_PULLUP);
+  pinMode(PIN_CAN_RX, INPUT_PULLUP);
+
+  if (canInstalled)
+  {
+    twai_stop(); // Transitions RUNNING -> STOPPED (no-op if already STOPPED or BUS_OFF)
+    if (twai_driver_uninstall() == ESP_OK)
+    {
+      canInstalled = false;
     }
+  }
+}
+
+bool canIsRunning()
+{
+  if (!canInstalled)
+    return false;
+  twai_status_info_t st;
+  return (twai_get_status_info(&st) == ESP_OK) && (st.state == TWAI_STATE_RUNNING);
+}
+
+void checkCanErrors(unsigned long now) {
+  static unsigned long lastResetAttempt = 0;
+
+  if (!canInstalled) {
+    // Driver install failed earlier (or was torn down) -> retry periodically
+    if (now - lastResetAttempt >= CAN_REINIT_INTERVAL_MS) {
+      canBegin();
+      lastResetAttempt = now;
+    }
+    return;
+  }
+
+  bool needsReinit = false;
+  twai_status_info_t st;
+  if (twai_get_status_info(&st) == ESP_OK) {
+    if (st.state != TWAI_STATE_RUNNING) {
+      // BUS_OFF or STOPPED: perform a full peripheral teardown + reinstall rather than
+      // twai_initiate_recovery(), avoiding TWAI_STATE_RECOVERING lockups and ESP-IDF v4.4
+      // tx_msg_count assertion bugs during bus-off recovery.
+      needsReinit = true;
+    }
+  } else {
+    needsReinit = true;
   }
 
   // Auto-recovery for stale/disconnected communication:
-  // If no packets received for > 2000ms, periodically reset and re-initialize MCP2515 every 1000ms
-  // to clear any silicon lockup or stuck buffer states without requiring an ESP32 power cycle.
-  static unsigned long lastResetAttempt = 0;
-  if ((now - lastPacketTime > 2000) && (now - lastResetAttempt >= 1000)) {
-    mcp2515.reset();
-    mcp2515.setBitrate(CAN_500KBPS, MCP_8MHZ);
-    mcp2515.setNormalOneShotMode();
+  // If no packets received for > 2000ms (or controller entered BUS_OFF/STOPPED),
+  // periodically tear down and re-install the TWAI driver every 1000ms.
+  if ((needsReinit || (now - lastPacketTime > CAN_STALE_REINIT_MS)) &&
+      (now - lastResetAttempt >= CAN_REINIT_INTERVAL_MS)) {
+    canEnd();
+    canBegin();
     lastResetAttempt = now;
   }
 }
@@ -41,17 +122,21 @@ void sendCanHealthFrame(unsigned long now) {
       (hb_age_ms < (int32_t)REGULATOR_HEARTBEAT_TIMEOUT_MS);
   health_state = regulator_ok ? 100 : 0;
 
-  canMsgTx.can_id = 0x03;
-  canMsgTx.can_dlc = 8;
+  if (!canInstalled)
+    return;
+
+  twai_status_info_t st;
+  if (twai_get_status_info(&st) != ESP_OK || st.state != TWAI_STATE_RUNNING || st.msgs_to_tx > 0)
+    return;
+
+  memset(&canMsgTx, 0, sizeof(canMsgTx));
+  canMsgTx.identifier = 0x03;
+  canMsgTx.flags = TWAI_MSG_FLAG_SS; // Standard 11-bit ID, single-shot (no auto-retransmit)
+  canMsgTx.data_length_code = 8;
   canMsgTx.data[0] = health_state;
   canMsgTx.data[1] = ecoInjCutActive ? 1 : 0;
-  canMsgTx.data[2] = 0;
-  canMsgTx.data[3] = 0;
-  canMsgTx.data[4] = 0;
-  canMsgTx.data[5] = 0;
-  canMsgTx.data[6] = 0;
-  canMsgTx.data[7] = 0;
-  mcp2515.sendMessage(&canMsgTx);
+  // data[2..7] = 0 (memset)
+  twai_transmit(&canMsgTx, 0); // Non-blocking: hardware TX buffer is known free
 }
 
 
@@ -75,9 +160,12 @@ static unsigned long last_04_rx_time = 0;
 static unsigned long last_inj_change_time = 0;
 
 void drainCanRxBuffer(unsigned long now) {
-  for (int i = 0; i < 6; i++) {
-    if (mcp2515.readMessage(&canMsg) != MCP2515::ERROR_OK) break;
-    if (canMsg.can_id == 0x02) {
+  if (!canInstalled) return;
+  for (int i = 0; i < CAN_RX_DRAIN_MAX; i++) {
+    if (twai_receive(&canMsg, 0) != ESP_OK) break; // Non-blocking: queue empty
+    // Front MCU only sends standard 11-bit data frames with DLC 8
+    if ((canMsg.flags & (TWAI_MSG_FLAG_EXTD | TWAI_MSG_FLAG_RTR)) || canMsg.data_length_code < 8) continue;
+    if (canMsg.identifier == 0x02) {
       raw2 = (uint16_t)(canMsg.data[0] | (canMsg.data[1] << 8));
       spd_t = (uint16_t)canMsg.data[2];
       new_rpm = (uint16_t)(canMsg.data[3] | (canMsg.data[4] << 8));
@@ -139,7 +227,7 @@ void drainCanRxBuffer(unsigned long now) {
 
       injector_state = new_inj_state;
       lastPacketTime = now;
-    } else if (canMsg.can_id == 0x04) {
+    } else if (canMsg.identifier == 0x04) {
       uint32_t rx_inj_time =
           (uint32_t)canMsg.data[0] | ((uint32_t)canMsg.data[1] << 8) |
           ((uint32_t)canMsg.data[2] << 16) | ((uint32_t)canMsg.data[3] << 24);

@@ -67,13 +67,13 @@ The ESP32 manages a smart, keyless push-to-start system designed to replicate an
 ## 🔌 Hardware / Tech Stack
 
 - **Processor Core:** ESP32 (Cabin Display, Regulator & Push Start) & Arduino Nano (Engine Bay Sensor Controller)
-- **Communication:** MCP2515 CAN Bus Controller (500Kbps over SPI with double-buffered RX drain)
+- **Communication:** CAN Bus @ 500Kbps — ESP32 built-in TWAI controller + SN65HVD230 3.3V transceiver (cabin), MCP2515 + TJA1050 over SPI (Front MCU)
 - **ADC:** Adafruit ADS1115 (16-bit Sigma-Delta ADC for ultra-stable voltage & current reading in noisy engine environments)
 - **Current Sensor:** FS500E2T Hall-effect current sensor
 - **Display Output:** Native ESP32 composite video out (RCA composite cable connected directly to GPIO25/DAC1)
 - **Libraries Used:**
   - `ESP_8_BIT Color Composite Video Library` (NTSC/PAL graphics output)
-  - `autowp/autowp-mcp2515` (CAN communication)
+  - `autowp/autowp-mcp2515` (CAN communication, Front MCU only; ESP32 uses the native `driver/twai.h`)
   - `arminjo/digitalWriteFast` (High-speed GPIO operations)
   - `Adafruit ADS1X15` (I2C high-resolution analog reading)
 
@@ -84,12 +84,12 @@ The ESP32 manages a smart, keyless push-to-start system designed to replicate an
 The ESP32 codebase is fully modularized for clean separation of concerns:
 
 - `/src/config.h` - System pin mapping, constants, macros, threshold definitions, and state enums.
-- `/src/globals.h` / `/src/globals.cpp` - Shared state variables, RTC persistent data, and peripheral objects (`tv`, `adc`, `mcp2515`, `dataMux`).
+- `/src/globals.h` / `/src/globals.cpp` - Shared state variables, RTC persistent data, and peripheral objects (`tv`, `adc`, `dataMux`).
 - `/src/display.h` / `/src/display.cpp` - Composite video HUD graphics routines (`drawStaticGauge()`, `warnings()`).
 - `/src/regulator.h` / `/src/regulator.cpp` - Closed-loop PID alternator field regulator task (Core 0) & I2C bus recovery logic.
 - `/src/pushstart.h` / `/src/pushstart.cpp` - Keyless push-to-start state machine, non-blocking lock/buzzer timers, unlock handler, and deep sleep management.
 - `/src/security.h` / `/src/security.cpp` - BLE phone-as-keyfob scanner, iPhone IRK cryptographic resolution, Android MAC matching, and auto-shutdown.
-- `/src/can_comm.h` / `/src/can_comm.cpp` - CAN frame buffer drain (`drainCanRxBuffer`), error flag diagnostic clearing, and heartbeat transmitter.
+- `/src/can_comm.h` / `/src/can_comm.cpp` - ESP32 TWAI driver lifecycle (`canBegin`/`canEnd`), CAN RX queue drain (`drainCanRxBuffer`), bus-off recovery, and heartbeat transmitter.
 - `/src/fuel.h` / `/src/fuel.cpp` - Non-linear fuel tank volume interpolation (`getFuelPercent()`) & trip data reset routines.
 - `/src/main.cpp` - Clean ESP32 orchestrator containing `setup()` and `loop()`.
 - `/tools/get_irk/main.cpp` - One-time setup tool to extract iPhone IRKs and scan Android Bluetooth MAC addresses (`pio run -e get_irk`).

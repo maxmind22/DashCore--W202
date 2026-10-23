@@ -53,8 +53,7 @@ flowchart TD
         CoolantSen["Coolant Level Switch"] -->|"GPIO34 (coolant_level_pin)<br/>Pull-Down Resistor"| ESP32Core
 
         %% CAN Communication Interface
-        ESP32Core <==>|"SPI (CS: 5, SCK: 18, MISO: 19, MOSI: 23)"| MCP2515_Cabin["MCP2515 SPI CAN Controller"]
-        MCP2515_Cabin <==>|"TxD / RxD"| TJA1050_Cabin["TJA1050 CAN Transceiver (with 120Ω Term Resistor)"]
+        ESP32Core <==>|"TWAI (TX: GPIO23, RX: GPIO19)"| SN65HVD230_Cabin["SN65HVD230 3.3V CAN Transceiver (with 120Ω Term Resistor)"]
 
         %% Audio & Video Peripherals
         ESP32Core -->|"GPIO25 (DAC1)"| RCAJack["Composite Video RCA (PAL/NTSC - 75Ω Impedance)"]
@@ -63,7 +62,7 @@ flowchart TD
     end
 
     subgraph CANBus["500 kbps Differential CAN Bus"]
-        TJA1050_Cabin <==>|"CAN_H / CAN_L Twisted Pair"| TJA1050_Front["TJA1050 CAN Transceiver (Front MCU)"]
+        SN65HVD230_Cabin <==>|"CAN_H / CAN_L Twisted Pair"| TJA1050_Front["TJA1050 CAN Transceiver (Front MCU)"]
     end
 
     subgraph FrontMCU["Engine Bay Controller (ATmega328P / Arduino Nano)"]
@@ -125,10 +124,12 @@ flowchart TD
 | **GPIO25 (DAC1)**| **Composite Video** | **RCA Female Jack** | Native hardware DAC output using `ESP_8_BIT_GFX` library. Impedance-matched 75Ω line output to PAL/NTSC dash display. |
 | **GPIO21** | `I2C_SDA` | **ADS1115 16-bit ADC (Pin 4 SDA)** | I2C Data Line. Pulled up to 3.3V via 4.7kΩ resistors. Includes I2C bus recovery routine in software (`recoverI2CBus`). |
 | **GPIO22** | `I2C_SCL` | **ADS1115 16-bit ADC (Pin 3 SCL)** | I2C Clock Line (100 kHz). Pulled up to 3.3V via 4.7kΩ resistors. |
-| **GPIO5** | `CAN_CS` | **MCP2515 CAN Controller (Pin 16 CS)** | SPI Chip Select for CAN Bus communication. |
-| **GPIO18** | `CAN_SCK` | **MCP2515 CAN Controller (Pin 14 SCK)** | SPI Serial Clock line. |
-| **GPIO19** | `CAN_MISO` | **MCP2515 CAN Controller (Pin 15 MISO)**| SPI Master In Slave Out line. |
-| **GPIO23** | `CAN_MOSI` | **MCP2515 CAN Controller (Pin 12 MOSI)**| SPI Master Out Slave In line. |
+| **GPIO23** | `PIN_CAN_TX` | **SN65HVD230 CAN Transceiver (Pin 1 D / "CTX")** | ESP32 internal TWAI controller TX. Held recessive via `INPUT_PULLUP` before driver start and after driver stop. |
+| **GPIO19** | `PIN_CAN_RX` | **SN65HVD230 CAN Transceiver (Pin 4 R / "CRX")** | ESP32 internal TWAI controller RX (500 kbps). |
+| **GPIO5 / GPIO18** | — | *Unused (freed)* | Formerly MCP2515 SPI CS / SCK. |
+
+> **SN65HVD230 power:** 3.3V from the switched `PIN_3V3_DIGITAL_GATE` rail (cut during deep sleep). Pin 8 (Rs) to GND for high-speed mode. No level shifter needed — the transceiver is 3.3V logic.
+> **Termination:** The bus needs exactly two 120Ω resistors, one at each end. Most SN65HVD230 modules ship with a 120Ω resistor already fitted (R2); keep it if the cabin node is a bus end, otherwise remove it.
 
 ---
 
