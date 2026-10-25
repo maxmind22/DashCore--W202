@@ -169,7 +169,7 @@ bool isEngineRunning(unsigned long now)
   if (currentState == STATE_RUNNING)
     return true;
 
-  if (now - lastPacketTime < FRONT_MCU_CAN_TIMEOUT_MS)
+  if (isCanPacketFresh(now, lastPacketTime, FRONT_MCU_CAN_TIMEOUT_MS))
   {
     if (rpm >= ENGINE_STARTED_RPM || new_rpm >= ENGINE_STARTED_RPM)
       return true;
@@ -216,17 +216,22 @@ void stopTVDisplay()
   dac_i2s_disable();
 }
 
-void sleepCANController() { canEnd(); } // Uninstall TWAI driver, park CTX recessive
+void sleepCANController()
+{
+  stopCanRxTask();
+  canEnd();
+} // Stop Core 0 CAN RX task, uninstall TWAI driver, park CTX recessive
 
-void wakeupCANController() { canBegin(); }
+void wakeupCANController() { startCanRxTask(); }
 
 void enterPowerDownSleep()
 {
   // --- ORDERED SHUTDOWN: Stop everything safely before deep sleep ---
 
-  // 1. Safely stop the regulator FreeRTOS task FIRST (running on Core 0, does I2C)
-  // This prevents the SPI flash cache panic when writing to Preferences below!
+  // 1. Safely stop Core 0 FreeRTOS tasks FIRST (regulator I2C task + CAN RX task)
+  // This prevents SPI flash cache panics and concurrent state updates when writing to Preferences below!
   stopRegulatorTask();
+  stopCanRxTask();
 
   // 2. Save trip stats to NVS Flash memory (safe now that Core 0 task is stopped)
   saveTripDataToNVS();
@@ -244,19 +249,30 @@ void enterPowerDownSleep()
   phoneAuthorized = false;
   phoneAuthBypassed = false;
 
-  // 5. Stop the ESP32 TWAI CAN controller (CTX parked recessive while transceiver is still powered)
+  // 5. Stop the ESP32 TWAI CAN controller and put SN65HVD230 into Standby BEFORE relay/rail shutdown
   sleepCANController();
+
+  // Pre-load HIGH before enabling OUTPUT so RS transitions High-Z -> 3.3V with zero LOW glitch
+  // (~370µA IC standby + ~330µA via module's 10k pull-down = ~700µA total)
+  gpio_set_level((gpio_num_t)PIN_CAN_RS, 1);
+  pinMode(PIN_CAN_RS, OUTPUT);
+  gpio_hold_en((gpio_num_t)PIN_CAN_RS);
+
+  // Transceiver stays on permanent 3.3V: hold CTX (D) solidly recessive (3.3V -> 0µA leakage,
+  // immune to harness EMI in sleep, and stays recessive throughout wakeup bootloader)
+  gpio_set_level((gpio_num_t)PIN_CAN_TX, 1);
+  pinMode(PIN_CAN_TX, OUTPUT);
+  gpio_hold_en((gpio_num_t)PIN_CAN_TX);
 
   // 6. Close communication buses
   Wire.end();
   esp_task_wdt_reset();
 
   // 6.1 Put communication pins into high-impedance (floating) mode
-  // This prevents leakage through level-shifter pull-ups
+  // This prevents leakage through I2C pull-ups to the unpowered switched 3.3V rail
   pinMode(21, INPUT); // SDA
   pinMode(22, INPUT); // SCL
-  pinMode(PIN_CAN_RX, INPUT); // CAN RX (SN65HVD230 R output)
-  // PIN_CAN_TX stays INPUT_PULLUP until the 3.3V rail is cut (step 8)
+  pinMode(PIN_CAN_RX, INPUT); // CAN RX (SN65HVD230 R push-pull output idles at 3.3V in standby)
 
   // 7. Turn off and de-energize all relays and peripherals
   setRelays(false, false, false);
@@ -288,12 +304,13 @@ void enterPowerDownSleep()
   }
   esp_task_wdt_reset();
   gpio_hold_en((gpio_num_t)PIN_RELAY_LOCK);
-  gpio_deep_sleep_hold_en();
 
-  // 8. Turn off the 3.3V digital gate (must happen after locking relay is pulsed)
-  digitalWrite(PIN_3V3_DIGITAL_GATE, LOW); // Cut 3.3V pull-ups/shifter
+  // 8. Turn off the switched 3.3V rail (must happen after locking relay is pulsed)
+  digitalWrite(PIN_3V3_DIGITAL_GATE, LOW); // Cut power to ADS1115 & IR2110 VDD rail
   gpio_hold_en((gpio_num_t)PIN_3V3_DIGITAL_GATE);
-  pinMode(PIN_CAN_TX, INPUT); // Transceiver unpowered now: drop pull-up to avoid back-feeding it
+
+  // Enable global deep-sleep pad hold for all held non-RTC digital GPIOs
+  gpio_deep_sleep_hold_en();
 
   // 10. Disarm WDT before deep sleep
   esp_task_wdt_delete(NULL);
@@ -349,7 +366,7 @@ void processPushStart(unsigned long now)
   // (e.g. after MCU reset while driving, or manual push/roll start)
   if (currentState != STATE_RUNNING && currentState != STATE_CRANKING && currentState != STATE_AUTO_STOP && !emergencyStopLatched)
   {
-    if (now - lastPacketTime < FRONT_MCU_CAN_TIMEOUT_MS &&
+    if (isCanPacketFresh(now, lastPacketTime, FRONT_MCU_CAN_TIMEOUT_MS) &&
         (rpm >= ENGINE_STARTED_RPM || new_rpm >= ENGINE_STARTED_RPM))
     {
       // Only auto-sync if not in the middle of an intentional shutdown
@@ -450,7 +467,7 @@ void processPushStart(unsigned long now)
   // or the vehicle is confirmed stationary with the engine stopped over a live CAN link.
   if (emergencyStopLatched)
   {
-    bool canAlive = (now - lastPacketTime < FRONT_MCU_CAN_TIMEOUT_MS);
+    bool canAlive = isCanPacketFresh(now, lastPacketTime, FRONT_MCU_CAN_TIMEOUT_MS);
     if (btnEdgeDown || (canAlive && spd == 0 && rpm < ENGINE_STARTED_RPM))
     {
       emergencyStopLatched = false;
@@ -719,7 +736,7 @@ void processPushStart(unsigned long now)
 
       // Safety check: If engine is already running (starter is OFF, so no starter electrical noise),
       // transition immediately to STATE_RUNNING without ever engaging the starter!
-      if (now - lastPacketTime < FRONT_MCU_CAN_TIMEOUT_MS && currentRpm >= ENGINE_STARTED_RPM)
+      if (isCanPacketFresh(now, lastPacketTime, FRONT_MCU_CAN_TIMEOUT_MS) && currentRpm >= ENGINE_STARTED_RPM)
       {
         currentState = STATE_RUNNING;
         lastEngineStartTime = now;
@@ -736,7 +753,7 @@ void processPushStart(unsigned long now)
       {
         // Starter protection: If engine is still rotating/spinning down (> 50 RPM),
         // hold in prime stage until stationary before engaging starter pinion
-        if (now - lastPacketTime < FRONT_MCU_CAN_TIMEOUT_MS && currentRpm > ENGINE_SPINDOWN_RPM_THRESHOLD)
+        if (isCanPacketFresh(now, lastPacketTime, FRONT_MCU_CAN_TIMEOUT_MS) && currentRpm > ENGINE_SPINDOWN_RPM_THRESHOLD)
         {
           if (now - crankStageTime < MAX_CRANK_TIME_MS)
           {
@@ -757,7 +774,7 @@ void processPushStart(unsigned long now)
       //   to mitigate the noisy RPM signal during starter engagement that causes premature cutoff/starting failure.
       // - Else if Front MCU is offline, use 1.2s cranking time to transition into STATE_RUNNING
       bool startDetected = false;
-      if (now - lastPacketTime < FRONT_MCU_CAN_TIMEOUT_MS)
+      if (isCanPacketFresh(now, lastPacketTime, FRONT_MCU_CAN_TIMEOUT_MS))
       {
         startDetected = (now - crankStageTime >= MIN_CRANK_TIME_MS) && (currentRpm > ENGINE_STARTED_RPM);
       }
@@ -818,7 +835,7 @@ void processPushStart(unsigned long now)
                                (temp_out >= AUTO_STOP_MIN_TEMP_C) &&
                                (temp_out <= AUTO_STOP_MAX_TEMP_C) &&
                                (voltage_filtered >= AUTO_STOP_MIN_VOLTAGE) &&
-                               (now - lastPacketTime < FRONT_MCU_TIMEOUT_MS);
+                               isCanPacketFresh(now, lastPacketTime, FRONT_MCU_TIMEOUT_MS);
 
       if (autoStopPermitted && standstillStartTime != 0 &&
           (now - standstillStartTime >= AUTO_STOP_STANDSTILL_DELAY_MS))
@@ -836,7 +853,7 @@ void processPushStart(unsigned long now)
     // Only treat rpm==0 as stall if CAN packets are currently actively being received from Front MCU
     // and 0 RPM persists for at least ENGINE_STALL_DEBOUNCE_MS (prevents ignition cut on transient glitches/stumbles)
     static unsigned long zeroRpmStartTime = 0;
-    if (currentRpm == 0 && (now - lastPacketTime < FRONT_MCU_CAN_TIMEOUT_MS))
+    if (currentRpm == 0 && isCanPacketFresh(now, lastPacketTime, FRONT_MCU_CAN_TIMEOUT_MS))
     {
       if (zeroRpmStartTime == 0)
       {
@@ -864,7 +881,7 @@ void processPushStart(unsigned long now)
     // Without CAN, use the 3 s long-press emergency stop instead.
     if (btnShortPressed && (now - lastButtonPressTime >= BUTTON_COOLDOWN_MS))
     {
-      bool canAlive = (now - lastPacketTime < FRONT_MCU_TIMEOUT_MS);
+      bool canAlive = isCanPacketFresh(now, lastPacketTime, FRONT_MCU_TIMEOUT_MS);
       bool isBrakeHeld = (digitalRead(PIN_INPUT_BRAKE) == LOW) || brakeHeldOnPress;
       if ((spd == 0 && canAlive) || (!canAlive && isBrakeHeld))
       { // Safety check: speed must be zero or stationary with brake held
@@ -934,7 +951,7 @@ void processPushStart(unsigned long now)
     // - Maximum stop duration exceeded (90s)
     bool batteryLow = (voltage_filtered < AUTO_STOP_RESTART_VOLTAGE);
     bool tempCreep = (temp_out > AUTO_STOP_MAX_TEMP_C);
-    bool canLoss = (now - lastPacketTime > FRONT_MCU_TIMEOUT_MS);
+    bool canLoss = !isCanPacketFresh(now, lastPacketTime, FRONT_MCU_TIMEOUT_MS);
     bool maxDurationReached = (autoStopStartTime != 0 && (now - autoStopStartTime >= AUTO_STOP_MAX_DURATION_MS));
 
     if (brakeReleased || batteryLow || tempCreep || canLoss || maxDurationReached)
@@ -945,7 +962,7 @@ void processPushStart(unsigned long now)
 
       // Safety check: If engine is already running (e.g. caught upon injector restore or didn't stall),
       // transition directly to STATE_RUNNING without engaging starter!
-      if (now - lastPacketTime < FRONT_MCU_CAN_TIMEOUT_MS && currentRpm >= ENGINE_STARTED_RPM)
+      if (isCanPacketFresh(now, lastPacketTime, FRONT_MCU_CAN_TIMEOUT_MS) && currentRpm >= ENGINE_STARTED_RPM)
       {
         currentState = STATE_RUNNING;
         isEcoRestart = false;

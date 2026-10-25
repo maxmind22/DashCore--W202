@@ -20,7 +20,11 @@ void setup()
   gpio_hold_dis((gpio_num_t)buzzer_pin);
   gpio_hold_dis((gpio_num_t)PIN_3V3_DIGITAL_GATE);
   gpio_hold_dis((gpio_num_t)PIN_RELAY_LOCK);
+  gpio_hold_dis((gpio_num_t)PIN_CAN_TX);
   gpio_deep_sleep_hold_dis();
+
+  // Park CAN TX recessive immediately (while PIN_CAN_RS is still held HIGH in Standby on wake)
+  pinMode(PIN_CAN_TX, INPUT_PULLUP);
 
   // 0. Crash recovery: restore ACC/IGN immediately (before any delay) if the MCU was reset
   // unexpectedly (panic / task WDT / brownout) while the engine was running.
@@ -54,8 +58,12 @@ void setup()
   digitalWrite(PIN_5V_GATE, HIGH); // Enable Relay
 
   pinMode(PIN_3V3_DIGITAL_GATE, OUTPUT);
-  digitalWrite(PIN_3V3_DIGITAL_GATE, HIGH); // Power 3.3V pull-ups/level shifter
-  pinMode(PIN_CAN_TX, INPUT_PULLUP);        // Hold SN65HVD230 D recessive until TWAI takes the pin
+  digitalWrite(PIN_3V3_DIGITAL_GATE, HIGH); // Power ADS1115, I2C pull-ups, and IR2110 VDD (~1-3mA)
+
+  // Release RS sleep hold AFTER CTX is already pulled HIGH -> High-Z (INPUT) lets the module's
+  // on-board 10k resistor to GND set Slope Control Mode (~15V/µs, low EMI) with zero TX glitch
+  gpio_hold_dis((gpio_num_t)PIN_CAN_RS);
+  pinMode(PIN_CAN_RS, INPUT);
 
   delay(30); // Allow voltage rails to stabilize
   Serial.begin(250000);
@@ -95,15 +103,14 @@ void setup()
   pinMode(field_relay_pin, OUTPUT);
   digitalWriteFast(field_relay_pin, LOW); // Start with field relay off
 
-  if (!canBegin()) // ESP32 TWAI @ 500 kbps via SN65HVD230 (matches Front MCU)
-  {
-    Serial.println("[CAN] TWAI driver start failed - will retry in loop");
-  }
   esp_task_wdt_deinit();      // De-init default core WDT config
   esp_task_wdt_init(1, true); // 1s timeout with panic=true
   esp_task_wdt_add(nullptr);  // Add current loop task
   ledcSetup(0, 400, 10);      // channel, freq, resolution
   ledcAttachPin(FIELD_PIN, 0);
+
+  lastPacketTime = millis(); // Initialize before starting Core 0 CAN RX task to avoid startup timeout
+  startCanRxTask();          // Install TWAI & drain CAN RX on Core 0 (zero video V-Sync lag)
 
   // Configure FreeRTOS task for regulator loop instead of hardware timer
   if (adcReady)
@@ -118,7 +125,6 @@ void setup()
         &regulatorTaskHandle, // Task handle
         0);                   // Pin to Core 0 (Isolate from UI on Core 1)
   }
-  lastPacketTime = millis(); // Initialize to avoid immediate timeout warning
 }
 
 // ===================== main loop ======================//
@@ -150,7 +156,7 @@ void loop()
   }
 
   tv.waitForFrame();
-  drainCanRxBuffer(now);
+  now = millis(); // Refresh timestamp after V-Sync wait; CAN RX is drained continuously on Core 0
 
   if (now - lastBlinkTime >= blinkInterval)
   {
@@ -232,21 +238,13 @@ void loop()
 
   //================================ Read data from engine MCU
   //==============================================//
-
-  // CAN drain (catch anything that arrived during frame sync)
-  drainCanRxBuffer(now);
-  checkCanErrors(now);
-
-  portENTER_CRITICAL(&dataMux);
-  rpm = new_rpm;
-  portEXIT_CRITICAL(&dataMux);
-
+  // CAN frames (0x02 @ 50Hz, 0x04 @ 20Hz) are drained continuously on Core 0 by CanRxTask.
   // Front MCU sends km/h directly (pulse-counted from instrument cluster VSS)
   spd_l = constrain((int)spd_t, 0, 220);
   int spd_in = spd_l;
 
   // --------------- filter SPD ----------------
-  bool canTimedOut = (now - lastPacketTime > FRONT_MCU_CAN_TIMEOUT_MS);
+  bool canTimedOut = !isCanPacketFresh(now, lastPacketTime, FRONT_MCU_CAN_TIMEOUT_MS);
   if (lastTime == 0 || canTimedOut)
   {
     last_spd = spd_in;
@@ -357,7 +355,10 @@ void loop()
     last_bufVac[0] = '\0';
   }
 
-  bool vac_valid = (now - lastVacPacketTime <= FRONT_MCU_TIMEOUT_MS) && !map_sensor_fault && isBaroValid();
+  unsigned long local_last_vac = lastVacPacketTime;
+  bool vac_valid = (local_last_vac != 0) &&
+                   isCanPacketFresh(now, local_last_vac, FRONT_MCU_TIMEOUT_MS) &&
+                   !map_sensor_fault && isBaroValid();
 
   // Vacuum PSI readout: constantly visible, shows "VAC: --- " if disconnected or invalid
   char bufVac[16];
@@ -563,36 +564,10 @@ void loop()
     lastRpmUpdateTime = now;
   }
 
-  // Calibrated for 2.3kΩ pull-down: 40°C = 437 ADC, 60°C = 636 ADC, 91°C = 846 ADC, 96°C = 871 ADC, 120°C = 990 ADC
-  if (raw2 <= 437)
+  // `temp_out` is converted from `raw2` directly inside CanRxTask on Core 0 upon 0x02 arrival,
+  // and `rpm` is zeroed atomically on Core 0 when CAN times out.
+  if (!isCanPacketFresh(now, lastPacketTime, FRONT_MCU_CAN_TIMEOUT_MS))
   {
-    temp_out = 40;
-  }
-  else if (raw2 >= 990)
-  {
-    temp_out = 120;
-  }
-  else if (raw2 < 636)
-  {
-    temp_out = map((int)raw2, 437, 636, 40, 60);
-  }
-  else if (raw2 < 846)
-  {
-    temp_out = map((int)raw2, 636, 846, 60, 91);
-  }
-  else if (raw2 < 871)
-  {
-    temp_out = map((int)raw2, 846, 871, 91, 96);
-  }
-  else
-  {
-    temp_out = map((int)raw2, 871, 990, 96, 120);
-  }
-  temp_out = constrain(temp_out, 40, 120);
-
-  if (now - lastPacketTime > FRONT_MCU_CAN_TIMEOUT_MS)
-  {
-    rpm = 0;
     spd = 0;
   }
 
@@ -671,14 +646,24 @@ void loop()
     // Measured warm-idle consumption (L/h), learned below while idling; used for Auto Start-Stop savings
     static float measured_idle_l_per_hr = BASELINE_IDLE_FUEL_L_PER_HR;
 
+    // Atomically fetch and reset cumulative CAN 0x04 counters from Core 0 (lossless)
+    portENTER_CRITICAL(&dataMux);
+    uint32_t interval_inj_time_us = accumulated_inj_time_us;
+    uint32_t interval_inj_pulses = accumulated_inj_pulses;
+    uint32_t interval_spd_pulses = spd_delta_pulses;
+    accumulated_inj_time_us = 0;
+    accumulated_inj_pulses = 0;
+    spd_delta_pulses = 0;
+    portEXIT_CRITICAL(&dataMux);
+
     // --- Dead-time compensation ---
     // Injector dead-time is the solenoid opening delay where no fuel flows.
     // It varies with battery voltage: lower voltage = longer dead-time.
     float dead_time_us = getInjectorDeadTime(local_voltage_filtered);
 
     // Subtract dead-time from each physical pulse received (one injector)
-    float corrected_inj_us = (float)accumulated_inj_time_us -
-                             ((float)accumulated_inj_pulses * dead_time_us);
+    float corrected_inj_us = (float)interval_inj_time_us -
+                             ((float)interval_inj_pulses * dead_time_us);
     if (corrected_inj_us < 0.0f)
       corrected_inj_us = 0.0f;
 
@@ -686,9 +671,6 @@ void loop()
     float fuel_consumed_liters = (corrected_inj_us / 1000000.0f) *
                                  (INJECTOR_FLOW_RATE_CC_MIN / 60.0f / 1000.0f) *
                                  (float)NUM_INJECTORS;
-
-    accumulated_inj_time_us = 0; // Reset accumulator
-    accumulated_inj_pulses = 0;  // Reset pulse accumulator
 
     total_fuel_liters += fuel_consumed_liters;
 
@@ -714,9 +696,8 @@ void loop()
     }
 
     // Update trip distance from cumulative speed sensor pulses (lossless, exact)
-    float interval_dist_km = (float)spd_delta_pulses / PULSES_PER_KM_F;
+    float interval_dist_km = (float)interval_spd_pulses / PULSES_PER_KM_F;
     total_distance_km += interval_dist_km;
-    spd_delta_pulses = 0;
 
     float speed_val = (float)spd;
     // Standard automotive threshold: calculate L/100km only when moving >= 3 km/h

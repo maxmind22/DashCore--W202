@@ -129,7 +129,8 @@ void warnings(unsigned long now)
                 0x00); // clear old warning
     hot = false;
   }
-  if (now - lastPacketTime > FRONT_MCU_TIMEOUT_MS &&
+  bool frontMcuAlive = isCanPacketFresh(now, lastPacketTime, FRONT_MCU_TIMEOUT_MS);
+  if (!frontMcuAlive &&
       conn_on)
   { // -----connection check--------------
     tv.setCursor(WARNING_X, WARNING_Y + 34);
@@ -138,7 +139,7 @@ void warnings(unsigned long now)
     conn_on = false;
     spd = 0;
   }
-  else if (!(now - lastPacketTime > FRONT_MCU_TIMEOUT_MS) && conn_on == false)
+  else if (frontMcuAlive && conn_on == false)
   {
     tv.fillRect(WARNING_X, WARNING_Y + 34, 140, 8, 0x00);
     conn_on = true;
@@ -222,7 +223,10 @@ void warnings(unsigned long now)
   static bool vac_leak_active = false;
   static bool vac_leak_drawn = false;
 
-  bool vac_valid = (now - lastVacPacketTime <= FRONT_MCU_TIMEOUT_MS) && !map_sensor_fault && isBaroValid();
+  unsigned long lastVacTime = lastVacPacketTime;
+  bool vac_valid = (lastVacTime != 0) &&
+                   isCanPacketFresh(now, lastVacTime, FRONT_MCU_TIMEOUT_MS) &&
+                   !map_sensor_fault && isBaroValid();
   bool idle_conditions = (MAP_SENSOR_ENABLED &&
                           currentState == STATE_RUNNING &&
                           rpm >= VAC_LEAK_MIN_RPM && rpm <= VAC_LEAK_MAX_RPM &&

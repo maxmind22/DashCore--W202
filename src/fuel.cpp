@@ -24,9 +24,11 @@ void resetFuelTripData(unsigned long now) {
   total_fuel_liters = 0.0;
   total_distance_km = 0.0;
   total_fuel_saved_liters = 0.0;
+  portENTER_CRITICAL(&dataMux);
   accumulated_inj_time_us = 0;
   accumulated_inj_pulses = 0;
   spd_delta_pulses = 0;
+  portEXIT_CRITICAL(&dataMux);
   avg_l_100km = 0.0f;
   inst_val = 0.0f;
 

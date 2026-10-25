@@ -69,7 +69,9 @@ unsigned long lastMapReadTime = 0;
 #define OIL_CHECK_MIN_RPM 500      // Engine running qualification threshold
 
 // --- CAN ---
-#define CAN_SEND_INTERVAL_MS 50
+#define CAN_FAST_SEND_INTERVAL_MS 20  // 0x02: Fast status, RPM, Vacuum/Baro (50 Hz, matches 20ms MAP & regulator)
+#define CAN_TELEM_SEND_INTERVAL_MS 50 // 0x04: Cumulative injector & speed counters (20 Hz)
+#define CAN_TX_STAGGER_MS 5           // Minimum spacing between 0x02 & 0x04 so SPI/TXB0 never bursts
 #define CAN_SENSOR_READ_INTERVAL_MS 500
 
 uint8_t oil_level = 0;
@@ -103,7 +105,9 @@ float acState_avg = 0.0f; // Float for EMA AC
 
 // Timers
 unsigned long lastSpdCalculationTime = 0;
-unsigned long lastCanSendTime = 0;
+unsigned long lastCan02SendTime = 0;
+unsigned long lastCan04SendTime = 0;
+unsigned long lastCanAnyTxTime = 0;
 unsigned long lastSensorTime = 0;
 
 struct can_frame canMsgRx;
@@ -637,8 +641,8 @@ void loop()
     digitalWriteFast(regulator_pin, LOW); // De-energize field disconnect relay
   }
 
-  //================= Send to Display MCU: 0x02 & 0x04 (Every 50ms) ===============//
-  if (currentMillis - lastCanSendTime >= CAN_SEND_INTERVAL_MS)
+  //================= Send to Display MCU: 0x02 (Every 20ms) & 0x04 (Every 50ms, Staggered) ===============//
+  if (currentMillis - lastCan02SendTime >= CAN_FAST_SEND_INTERVAL_MS)
   {
     static uint8_t seq_02 = 0;
 
@@ -672,7 +676,14 @@ void loop()
     canMsgTx.data[7] = seq_02++;
     mcp2515.sendMessage(&canMsgTx);
 
-    // Atomic snapshot of cumulative counters.
+    lastCan02SendTime = currentMillis;
+    lastCanAnyTxTime = currentMillis;
+  }
+  else if ((currentMillis - lastCan04SendTime >= CAN_TELEM_SEND_INTERVAL_MS) &&
+           (currentMillis - lastCanAnyTxTime >= CAN_TX_STAGGER_MS))
+  {
+    // Atomic snapshot of cumulative counters (staggered >= 5ms from 0x02 so MCP2515 TXB0 is
+    // guaranteed idle and SPI transactions never run back-to-back in the same loop pass).
     // Only update injector snapshot when injector is not mid-fire (!inj_active)
     // to guarantee inj_time and inj_pulses reflect only complete pulses.
     // If mid-fire, re-send last snapshot (Display MCU computes delta=0 and
@@ -702,7 +713,8 @@ void loop()
     canMsgTx.data[7] = (spd_pulses_snap >> 8) & 0xFF;
     mcp2515.sendMessage(&canMsgTx);
 
-    lastCanSendTime = currentMillis;
+    lastCan04SendTime = currentMillis;
+    lastCanAnyTxTime = currentMillis;
   }
   // Serial.println(map_adc_avg);
   wdt_reset();

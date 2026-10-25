@@ -175,17 +175,19 @@ void regulatorTask(void *pvParameters) {
       digitalWriteFast(field_relay_pin, LOW);  // Closed (normal operation)
     }
 
-    // --- 3. Snapshot Shared Engine State ---
+    // --- 3. Snapshot Shared Engine State (Fed directly on Core 0 by CanRxTask) ---
     portENTER_CRITICAL(&dataMux);
     uint16_t in_rpm = rpm;
     SystemState in_state = currentState;
     unsigned long in_last_packet = lastPacketTime;
     float in_vac = vacuum_psi;
     unsigned long in_last_vac = lastVacPacketTime;
+    bool in_map_fault = map_sensor_fault;
     int in_temp = temp_out;
     portEXIT_CRITICAL(&dataMux);
 
-    bool frontMcuConnected = (millis() - in_last_packet < FRONT_MCU_CAN_TIMEOUT_MS);
+    unsigned long reg_now = millis();
+    bool frontMcuConnected = isCanPacketFresh(reg_now, in_last_packet, FRONT_MCU_CAN_TIMEOUT_MS);
 
     // --- 4. Loop Timing dt Calculation ---
     uint32_t current_micros = micros();
@@ -222,7 +224,9 @@ void regulatorTask(void *pvParameters) {
     // --- Load-Aware Acceleration De-Excitation (Full Field Cutoff) ---
     static bool accel_cutoff_active = false;
 
-    bool vac_connected = (millis() - in_last_vac <= FRONT_MCU_TIMEOUT_MS) && !map_sensor_fault;
+    bool vac_connected = (in_last_vac != 0) &&
+                         isCanPacketFresh(reg_now, in_last_vac, FRONT_MCU_TIMEOUT_MS) &&
+                         !in_map_fault;
     bool voltage_safe_for_cutoff = (new_v >= REGULATOR_V_CUTOFF_FLOOR);
     bool engine_warm = (in_temp >= REGULATOR_LOAD_MIN_TEMP_C);
 

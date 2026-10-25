@@ -16,7 +16,7 @@ Located in the engine bay, this controller handles raw engine sensor acquisition
 - **Thermal Management:** Reads engine coolant temperature and monitors A/C state to dynamically control the electric radiator cooling fan using variable PWM duty cycles.
 - **Custom DFCO (Deceleration Fuel Cut Off):** Cuts fuel during deceleration when RPM > 1500, throttle closed, and engine warm.
 - **Failsafe System:** Features a hardware watchdog timer (`avr/wdt.h`), regulator failsafe hysteresis (preventing relay chatter), and heartbeat frame monitoring from the display unit. If communication is lost, it cuts field voltage to the regulator for safety.
-- **CAN Broadcast:** Packages engine telemetry (speed, RPM, oil level, temperatures) and broadcasts it over a 500kbps CAN Bus every 50ms.
+- **CAN Broadcast:** Packages fast engine status (RPM, manifold vacuum/baro, speed, oil level, temperatures, flags) at 50 Hz (every 20ms) and cumulative injector/speed telemetry at 20 Hz (every 50ms, staggered) over a 500kbps CAN Bus.
 
 ### 2. Display & Regulator MCU (Cabin Controller - ESP32)
 

@@ -22,7 +22,7 @@ flowchart TD
         ADS <==>|"I2C (SDA: GPIO21, SCL: GPIO22)"| ESP32Core
 
         %% Alternator Field Drive Subsystem (IR2110PBF High/Low Driver)
-        ESP32Core -->|"GPIO12 (FIELD_PIN - 10-bit PWM)"| IR2110["IR2110PBF Gate Driver IC<br/>VDD: 3.3V | VCC: 12V | LIN: GPIO12"]
+        ESP32Core -->|"GPIO12 (FIELD_PIN - 10-bit PWM)"| IR2110["IR2110PBF Gate Driver IC<br/>VDD: GPIO17 rail | VCC: 12V | LIN: GPIO12"]
         IR2110 -->|"LO (Pin 1) via 10Ω Resistor"| GateMOS["IRLZ44N / IRF3205 N-Ch MOSFET"]
         GateMOS -->|"Drain"| FieldCoilNeg["Field Coil (-) Terminal"]
         ESP32Core -->|"GPIO14 (field_relay_pin)"| FieldRelayDriver["ULN2003 Driver Ch 6"]
@@ -36,7 +36,9 @@ flowchart TD
         ESP32Core -->|"GPIO13 (PIN_RELAY_START)"| ULN
         ESP32Core -->|"GPIO27 (PIN_5V_GATE)"| ULN
         ESP32Core -->|"GPIO32 (PIN_RELAY_LOCK)"| ULN
-        ESP32Core -->|"GPIO17 (PIN_3V3_DIGITAL_GATE)"| LevelShifterGate["P-Ch MOSFET Power Switch"]
+        ESP32Core -->|"GPIO17 (PIN_3V3_DIGITAL_GATE)"| Rail3V3["Switched 3.3V Rail<br/>(powered directly by the GPIO pin, ~1-3 mA)"]
+        Rail3V3 -->|"VDD + I2C pull-ups"| ADS
+        Rail3V3 -->|"VDD (Pin 9)"| IR2110
 
         ULN --> RelayACC["Terminal 15R (Accessory Relay)"]
         ULN --> RelayIGN["Terminal 15 (Ignition POS2 Relay)"]
@@ -53,7 +55,7 @@ flowchart TD
         CoolantSen["Coolant Level Switch"] -->|"GPIO34 (coolant_level_pin)<br/>Pull-Down Resistor"| ESP32Core
 
         %% CAN Communication Interface
-        ESP32Core <==>|"TWAI (TX: GPIO23, RX: GPIO19)"| SN65HVD230_Cabin["SN65HVD230 3.3V CAN Transceiver (with 120Ω Term Resistor)"]
+        ESP32Core <==>|"TWAI (TX: GPIO23, RX: GPIO19, RS: GPIO18)"| SN65HVD230_Cabin["SN65HVD230 3.3V CAN Transceiver (with 120Ω Term Resistor)"]
 
         %% Audio & Video Peripherals
         ESP32Core -->|"GPIO25 (DAC1)"| RCAJack["Composite Video RCA (PAL/NTSC - 75Ω Impedance)"]
@@ -114,7 +116,7 @@ flowchart TD
 | **GPIO26** | `PIN_RELAY_IGN` | **ULN2003 Driver Ch 2 -> Terminal 15 Relay** | Controls primary ignition rail. Active High. Held during deep sleep via `gpio_hold_en`. |
 | **GPIO13** | `PIN_RELAY_START` | **ULN2003 Driver Ch 3 -> Terminal 50 Relay** | Controls starter solenoid relay. Active High with non-blocking 5s max crank timeout. |
 | **GPIO27** | `PIN_5V_GATE` | **ULN2003 Driver Ch 4 -> 5V Main Rail Relay** | Switches the main 5V buck rail on setup; held LOW during deep sleep. |
-| **GPIO17** | `PIN_3V3_DIGITAL_GATE`| **P-Channel MOSFET Gate** | Gates +3.3V power to external digital level shifters and pull-ups to eliminate sleep leakage. |
+| **GPIO17** | `PIN_3V3_DIGITAL_GATE`| **Switched 3.3V rail (pin-powered, no transistor)** | GPIO17 directly supplies the ADS1115 VDD, the 4.7kΩ I2C pull-ups and the IR2110PBF logic supply VDD (Pin 9). Total load ~1–3 mA (pin output ~3.2V). Driven HIGH in `setup()`, LOW before deep sleep. GPIO17 is in the VDD_SDIO power domain, so in deep sleep the pin floats and the rail drains to 0V. Do not add large capacitance or LED loads to this rail. |
 | **GPIO32** | `PIN_RELAY_LOCK` | **ULN2003 Driver Ch 5 -> Lock Relay** | Pulsed Active High output to lock the vehicle doors automatically or on long press. |
 | **GPIO33** | `PIN_BTN_START` | **Push-Start Button Switch** | Input-only with RTC capability. Connects to ground when pressed; filtered with 10kΩ pull-up & 100nF ceramic debouncing capacitor. |
 | **GPIO35** | `PIN_WAKE_UNLOCK` | **PC817 Optocoupler #2 Collector** | Input-only with RTC capability. Senses vehicle central locking unlock 12V pulse to wake ESP32 from Deep Sleep (`ext1` wake trigger). |
@@ -122,13 +124,14 @@ flowchart TD
 | **GPIO34** | `coolant_level_pin`| **Engine Coolant Level Probe** | Input-only (GPI). Analog threshold input with pull-down resistor to detect low coolant expansion tank level. |
 | **GPIO4** | `buzzer_pin` | **NPN Transistor (2N2222) -> Buzzer** | Drives active/passive piezo alert buzzer for cabin warnings (overheat, low fuel, charge failure). |
 | **GPIO25 (DAC1)**| **Composite Video** | **RCA Female Jack** | Native hardware DAC output using `ESP_8_BIT_GFX` library. Impedance-matched 75Ω line output to PAL/NTSC dash display. |
-| **GPIO21** | `I2C_SDA` | **ADS1115 16-bit ADC (Pin 4 SDA)** | I2C Data Line. Pulled up to 3.3V via 4.7kΩ resistors. Includes I2C bus recovery routine in software (`recoverI2CBus`). |
-| **GPIO22** | `I2C_SCL` | **ADS1115 16-bit ADC (Pin 3 SCL)** | I2C Clock Line (100 kHz). Pulled up to 3.3V via 4.7kΩ resistors. |
-| **GPIO23** | `PIN_CAN_TX` | **SN65HVD230 CAN Transceiver (Pin 1 D / "CTX")** | ESP32 internal TWAI controller TX. Held recessive via `INPUT_PULLUP` before driver start and after driver stop. |
+| **GPIO21** | `I2C_SDA` | **ADS1115 16-bit ADC (Pin 4 SDA)** | I2C Data Line. Pulled up to the GPIO17 switched 3.3V rail via 4.7kΩ resistors. Includes I2C bus recovery routine in software (`recoverI2CBus`). |
+| **GPIO22** | `I2C_SCL` | **ADS1115 16-bit ADC (Pin 3 SCL)** | I2C Clock Line (100 kHz). Pulled up to the GPIO17 switched 3.3V rail via 4.7kΩ resistors. |
+| **GPIO23** | `PIN_CAN_TX` | **SN65HVD230 CAN Transceiver (Pin 1 D / "CTX")** | ESP32 internal TWAI controller TX. Parked recessive (`INPUT_PULLUP`) before driver start/after stop, and latched `HIGH` via `gpio_hold_en` across deep sleep & wakeup bootloader. |
 | **GPIO19** | `PIN_CAN_RX` | **SN65HVD230 CAN Transceiver (Pin 4 R / "CRX")** | ESP32 internal TWAI controller RX (500 kbps). |
-| **GPIO5 / GPIO18** | — | *Unused (freed)* | Formerly MCP2515 SPI CS / SCK. |
+| **GPIO18** | `PIN_CAN_RS` | **SN65HVD230 CAN Transceiver (Pin 8 "RS")** | Mode control (`VDD3P3_CPU` domain): set to High-Z (`INPUT`) during operation to let the on-board 10kΩ pull-down engage low-EMI Slope Control Mode (~15V/µs); driven `OUTPUT HIGH` (3.3V, held across deep sleep) for low-power Standby mode (~370µA IC + ~330µA pull-down ≈ ~700µA total). |
+| **GPIO5** | — | *Unused (freed)* | Formerly MCP2515 SPI CS. |
 
-> **SN65HVD230 power:** 3.3V from the switched `PIN_3V3_DIGITAL_GATE` rail (cut during deep sleep). Pin 8 (Rs) to GND for high-speed mode. No level shifter needed — the transceiver is 3.3V logic.
+> **SN65HVD230 power & standby control:** Powered from permanent 3.3V rail. Pin 8 (Rs) is controlled by GPIO18 (`PIN_CAN_RS` — keep this wire short, as `Rs` is an analog slope-setting node): during operation, GPIO18 is set to High-Z (`INPUT`), allowing the module's on-board 10kΩ (`103`) resistor to ground to set Slope Control Mode (~15V/µs edge rate, ~105ns loop delay) for minimal radiated EMI in the vehicle harness. During deep sleep, GPIO18 and GPIO23 (`CTX`) are driven `OUTPUT HIGH` (3.3V) and latched via `gpio_hold_en` + `gpio_deep_sleep_hold_en` (~700µA total sleep draw). Optional extra hardening: a 10kΩ pull-up from `CTX` (GPIO23) to permanent 3.3V guarantees recessive idle even during the ~150ms bootloader after a power-on or watchdog reset.
 > **Termination:** The bus needs exactly two 120Ω resistors, one at each end. Most SN65HVD230 modules ship with a 120Ω resistor already fitted (R2); keep it if the cabin node is a bus end, otherwise remove it.
 
 ---
@@ -151,7 +154,7 @@ The ATmega328P Pin D5 outputs a 500Hz PWM signal mapped from engine coolant temp
 ### 2. ADS1115 16-Bit I2C ADC Module (Address 0x48) & Sensor Wiring
 
 ```
-                         +3.3V Rail
+              GPIO17 Switched 3.3V Rail (PIN_3V3_DIGITAL_GATE)
                              |
              +---------------+---------------+
              |               |               |
@@ -200,9 +203,10 @@ The ATmega328P Pin D5 outputs a 500Hz PWM signal mapped from engine coolant temp
 
    =========================== IR2110PBF DRIVER IC ===========================
 
-        +3.3V ESP Rail ----> VDD (Pin 11)        VCC (Pin 3) <---- +12V Clean Rail
-        ESP32 GPIO12   ----> LIN (Pin 12)        LO  (Pin 1) ----> [ 10Ω Gate Resistor ] ---> MOSFET Gate
-        System GND     ----> COM (Pin 2)         VSS (Pin 13) ---> System GND
+        GPIO17 3.3V Rail --> VDD (Pin 9)         VCC (Pin 3) <---- +12V Clean Rail
+        System GND     ----> SD  (Pin 11)        LO  (Pin 1) ----> [ 10Ω Gate Resistor ] ---> MOSFET Gate
+        ESP32 GPIO12   ----> LIN (Pin 12)        VSS (Pin 13) ---> System GND (0.1µF cap from VDD to VSS)
+        System GND     ----> COM (Pin 2)         HIN (Pin 10) ---> System GND (unused high-side input)
 ```
 
 ---

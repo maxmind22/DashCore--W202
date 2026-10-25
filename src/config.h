@@ -24,7 +24,7 @@
 #define PIN_INPUT_BRAKE 36      // Brake Light Sensor (Active High, Opto-isolated, Input-only)
 #define PIN_WAKE_UNLOCK 35      // Unlock Pulse Input (Active Low, Opto-isolated, RTC Input-only)
 #define PIN_5V_GATE 27          // Controls the 5V Relay (via ULN2003)
-#define PIN_3V3_DIGITAL_GATE 17 // Powers the Level Shifter LV and digital 3.3V pull-ups
+#define PIN_3V3_DIGITAL_GATE 17 // Directly powers ADS1115 VDD, I2C pull-ups, and IR2110 VDD (~1-3mA)
 #define PIN_RELAY_LOCK 32       // Controls the vehicle lock relay (Active High)
 #define buzzer_pin 4
 #define coolant_level_pin 34
@@ -38,9 +38,10 @@
 // Avoid GPIO5 for CTX: it is a strapping pin that toggles during boot and would glitch the bus.
 #define PIN_CAN_TX 23           // ESP32 TX -> SN65HVD230 "CTX" / D (pin 1)
 #define PIN_CAN_RX 19           // ESP32 RX <- SN65HVD230 "CRX" / R (pin 4)
+#define PIN_CAN_RS 18           // ESP32 GPIO 18 -> SN65HVD230 "RS" (pin 8): INPUT (High-Z) = Slope Control, OUTPUT HIGH = Standby
 #define CAN_RX_QUEUE_LEN 32     // Driver RX queue (frames); MCP2515 only had 2 HW buffers
 #define CAN_TX_QUEUE_LEN 4      // Driver TX queue (frames)
-#define CAN_RX_DRAIN_MAX 16     // Max frames processed per drainCanRxBuffer() call
+#define CAN_RX_DRAIN_MAX 32     // Drain full TWAI RX queue down to the freshest sample
 #define CAN_STALE_REINIT_MS 2000 // No RX for this long -> periodically re-init TWAI driver
 #define CAN_REINIT_INTERVAL_MS 1000
 
@@ -109,7 +110,14 @@ const unsigned long OFFLINE_CRANK_TIME_MS = 1200; // Cranking duration when Fron
 #define FRONT_MCU_TIMEOUT_MS 5000
 #define FRONT_MCU_CAN_TIMEOUT_MS 1000
 const unsigned long ENGINE_STALL_DEBOUNCE_MS = 1500; // Require 1.5s persistent 0 RPM before cutting ignition
-#define FRONT_MCU_CAN_SEND_INTERVAL_US 50000.0f      // Front MCU sends every 50ms
+#define FRONT_MCU_CAN_SEND_INTERVAL_US 20000.0f      // Front MCU sends 0x02 every 20ms (50Hz) and 0x04 every 50ms (20Hz)
+
+// Cross-core safe packet age check: Core 0's CAN RX task may stamp packetTime a few ms
+// after Core 1 sampled `now`, making (int32_t)(now - packetTime) slightly negative.
+// Signed 32-bit difference avoids unsigned underflow (~4.29B ms false timeout).
+inline bool isCanPacketFresh(unsigned long now, unsigned long packetTime, uint32_t timeoutMs) {
+  return ((int32_t)(now - packetTime) <= (int32_t)timeoutMs);
+}
 #define CHARGE_MALFUNCTION_DELAY_MS 20000
 #define BATTERY_LOW_DELAY_MS 10000
 #define CAN_HEALTH_SEND_INTERVAL_MS 200
