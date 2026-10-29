@@ -67,7 +67,7 @@ flowchart TD
         SN65HVD230_Cabin <==>|"CAN_H / CAN_L Twisted Pair"| TJA1050_Front["TJA1050 CAN Transceiver (Front MCU)"]
     end
 
-    subgraph FrontMCU["Engine Bay Controller (ATmega328P / Arduino Nano)"]
+    subgraph FrontMCU["Engine Bay Controller (ATmega328P / Arduino Nano — Powered ONLY in POS2 / Driving via Terminal 15)"]
         TJA1050_Front <==> MCP2515_Front["MCP2515 CAN Controller"]
         MCP2515_Front <==>|"SPI (CS: D10)"| NanoCore["ATmega328P"]
         
@@ -113,7 +113,7 @@ flowchart TD
 | **GPIO12** | `FIELD_PIN` | **IR2110PBF Driver IC (Pin 12 - LIN)** | 10-bit PWM output for closed-loop PID field regulation. Inputs into 3.3V-logic compatible `LIN` pin on IR2110PBF. |
 | **GPIO14** | `field_relay_pin` | **ULN2003 Driver Ch 6 -> Field Emergency Relay** | Hardware relay drive. Cuts high-side +12V power to the alternator field coil on overvoltage, overcurrent (>40A), or I2C sensor loss. |
 | **GPIO16** | `PIN_RELAY_ACC` | **ULN2003 Driver Ch 1 -> Terminal 15R Relay** | Controls accessory power rail (Radio, HVAC, Aux). Active High. |
-| **GPIO26** | `PIN_RELAY_IGN` | **ULN2003 Driver Ch 2 -> Terminal 15 Relay** | Controls primary ignition rail. Active High. Held during deep sleep via `gpio_hold_en`. |
+| **GPIO26** | `PIN_RELAY_IGN` | **ULN2003 Driver Ch 2 -> Terminal 15 Relay** | Controls primary ignition rail (POS2), which also supplies power to the **Front MCU** (ATmega328P + MCP2515 + TJA1050) and engine bay sensors. Active High. Held LOW during deep sleep via `gpio_hold_en`. |
 | **GPIO13** | `PIN_RELAY_START` | **ULN2003 Driver Ch 3 -> Terminal 50 Relay** | Controls starter solenoid relay. Active High with non-blocking 5s max crank timeout. |
 | **GPIO27** | `PIN_5V_GATE` | **ULN2003 Driver Ch 4 -> 5V Main Rail Relay** | Switches the main 5V buck rail on setup; held LOW during deep sleep. |
 | **GPIO17** | `PIN_3V3_DIGITAL_GATE`| **Switched 3.3V rail (pin-powered, no transistor)** | GPIO17 directly supplies the ADS1115 VDD, the 4.7kΩ I2C pull-ups and the IR2110PBF logic supply VDD (Pin 9). Total load ~1–3 mA (pin output ~3.2V). Driven HIGH in `setup()`, LOW before deep sleep. GPIO17 is in the VDD_SDIO power domain, so in deep sleep the pin floats and the rail drains to 0V. Do not add large capacitance or LED loads to this rail. |
@@ -133,6 +133,7 @@ flowchart TD
 
 > **SN65HVD230 power & standby control:** Powered from permanent 3.3V rail. Pin 8 (Rs) is controlled by GPIO18 (`PIN_CAN_RS` — keep this wire short, as `Rs` is an analog slope-setting node): during operation, GPIO18 is set to High-Z (`INPUT`), allowing the module's on-board 10kΩ (`103`) resistor to ground to set Slope Control Mode (~15V/µs edge rate, ~105ns loop delay) for minimal radiated EMI in the vehicle harness. During deep sleep, GPIO18 and GPIO23 (`CTX`) are driven `OUTPUT HIGH` (3.3V) and latched via `gpio_hold_en` + `gpio_deep_sleep_hold_en` (~700µA total sleep draw). Optional extra hardening: a 10kΩ pull-up from `CTX` (GPIO23) to permanent 3.3V guarantees recessive idle even during the ~150ms bootloader after a power-on or watchdog reset.
 > **Termination:** The bus needs exactly two 120Ω resistors, one at each end. Most SN65HVD230 modules ship with a 120Ω resistor already fitted (R2); keep it if the cabin node is a bus end, otherwise remove it.
+> **Front MCU Power Domain (POS2 & Driving Only):** The Front MCU (ATmega328P, MCP2515, and TJA1050) is powered from **Terminal 15 (`PIN_RELAY_IGN`)**. It is **only powered in POS2 (`STATE_IGNITION`) and active engine/driving states (`STATE_CRANKING`, `STATE_RUNNING`, `STATE_AUTO_STOP`)**, and is **completely unpowered in `STATE_SLEEP`, `STATE_STANDBY`, and `STATE_ACC` (POS1)**. Outside POS2/driving, the cabin ESP32 suppresses periodic `0x03` CAN heartbeat transmissions, TWAI bus-recovery diagnostics, and all Front-MCU-derived HUD warnings/readouts so an unpowered Front MCU never causes CAN ACK error churn or false alarms.
 
 ---
 

@@ -50,8 +50,20 @@ void warnings(unsigned long now)
   }
 
   //--------------------------------------------
-  if (overspeed_state == 0 &&
-      spd >= OVERSPEED_KMH)
+  // Front MCU is powered only in POS2 (IGN) and driving modes; suppress all Front-MCU-derived
+  // warnings and indicators when it is unpowered (SLEEP, STANDBY, ACC) or timed out.
+  bool frontMcuPowered = isCanActiveState(currentState);
+  bool frontMcuFastLive = frontMcuPowered &&
+                          isCanPacketFresh(now, lastPacketTime, FRONT_MCU_CAN_TIMEOUT_MS);
+  bool frontMcuLive = frontMcuPowered &&
+                      isCanPacketFresh(now, lastPacketTime, FRONT_MCU_TIMEOUT_MS);
+
+  if (!frontMcuFastLive)
+  {
+    overspeed_state = 0;
+  }
+  else if (overspeed_state == 0 &&
+           spd >= OVERSPEED_KMH)
   { // -------- over speed warning --------//
     overspeed_state = 1;
     counter = 0;
@@ -92,7 +104,8 @@ void warnings(unsigned long now)
   }
 
   //------------------------------------------------
-  if (oil_level > 0 && lowBlinkState && priority == 0)
+  bool lowOilActive = frontMcuLive && (oil_level > 0);
+  if (lowOilActive && lowBlinkState && priority == 0)
   {
     if (oil_on)
     {
@@ -104,13 +117,14 @@ void warnings(unsigned long now)
     }
     buzzer_state = 1;
   }
-  else if (!lowBlinkState && oil == true)
+  else if ((!lowBlinkState || !lowOilActive) && oil == true)
   {
     tv.fillRect(WARNING_X + 30, WARNING_Y + 18, 84, 8, 0x00);
     oil = false;
   }
   //------------------------------------------------
-  if (temp_out >= OVERHEAT_TEMP_C && lowBlinkState && priority == 0)
+  bool overheatActive = frontMcuLive && (temp_out >= OVERHEAT_TEMP_C);
+  if (overheatActive && lowBlinkState && priority == 0)
   {
     if (temp_on)
     {
@@ -123,14 +137,29 @@ void warnings(unsigned long now)
 
     buzzer_state = 1;
   }
-  else if (!lowBlinkState && hot == true)
+  else if ((!lowBlinkState || !overheatActive) && hot == true)
   {
     tv.fillRect(WARNING_X + 30, WARNING_Y + 26, 90, 8,
                 0x00); // clear old warning
     hot = false;
   }
-  bool frontMcuAlive = isCanPacketFresh(now, lastPacketTime, FRONT_MCU_TIMEOUT_MS);
-  if (!frontMcuAlive &&
+  // Only diagnose Front MCU CAN connection in POS2 (IGN) or driving states (Front MCU is unpowered in STANDBY/ACC)
+  static unsigned long canDiagActiveSince = 0;
+  if (!frontMcuPowered)
+  {
+    canDiagActiveSince = 0;
+  }
+  else if (canDiagActiveSince == 0)
+  {
+    canDiagActiveSince = (now != 0) ? now : 1;
+  }
+
+  bool frontMcuDisconnected =
+      frontMcuPowered &&
+      ((now - canDiagActiveSince) >= FRONT_MCU_TIMEOUT_MS) &&
+      !frontMcuLive;
+
+  if (frontMcuDisconnected &&
       conn_on)
   { // -----connection check--------------
     tv.setCursor(WARNING_X, WARNING_Y + 34);
@@ -139,17 +168,18 @@ void warnings(unsigned long now)
     conn_on = false;
     spd = 0;
   }
-  else if (frontMcuAlive && conn_on == false)
+  else if (!frontMcuDisconnected && conn_on == false)
   {
     tv.fillRect(WARNING_X, WARNING_Y + 34, 140, 8, 0x00);
     conn_on = true;
   }
-  if (injector_state == 1 && inj_on == true)
+  bool injCutShown = frontMcuFastLive && (injector_state == 1);
+  if (injCutShown && inj_on == true)
   {
     tv.fillCircle(10, 25, 5, 0x1C);
     inj_on = false;
   }
-  else if (inj_on == false && injector_state == 0)
+  else if (inj_on == false && !injCutShown)
   {
     tv.fillCircle(10, 25, 5, 0x00);
     inj_on = true;
@@ -224,7 +254,8 @@ void warnings(unsigned long now)
   static bool vac_leak_drawn = false;
 
   unsigned long lastVacTime = lastVacPacketTime;
-  bool vac_valid = (lastVacTime != 0) &&
+  bool vac_valid = frontMcuPowered &&
+                   (lastVacTime != 0) &&
                    isCanPacketFresh(now, lastVacTime, FRONT_MCU_TIMEOUT_MS) &&
                    !map_sensor_fault && isBaroValid();
   bool idle_conditions = (MAP_SENSOR_ENABLED &&
@@ -323,7 +354,7 @@ void warnings(unsigned long now)
   else
   {
     air_filter_detect_start_ms = 0;
-    if (!MAP_SENSOR_ENABLED || !vac_valid || temp_out < AIR_FILTER_MIN_TEMP_C)
+    if (!MAP_SENSOR_ENABLED || !frontMcuLive || !vac_valid || temp_out < AIR_FILTER_MIN_TEMP_C)
     {
       air_filter_alert_until_ms = 0;
     }
@@ -433,6 +464,7 @@ void warnings(unsigned long now)
   static bool fuel_diag_drawn = false;
 
   bool fuel_diag_conditions = (currentState == STATE_RUNNING &&
+                               frontMcuLive &&
                                rpm >= VAC_LEAK_MIN_RPM && rpm <= VAC_LEAK_MAX_RPM &&
                                spd <= VAC_LEAK_MAX_SPD_KMH &&
                                temp_out >= FPR_LEAK_MIN_TEMP_C &&
@@ -482,7 +514,7 @@ void warnings(unsigned long now)
   {
     fuel_diag_rich_start_ms = 0;
     fuel_diag_lean_start_ms = 0;
-    if (temp_out < FPR_LEAK_MIN_TEMP_C)
+    if (!frontMcuLive || temp_out < FPR_LEAK_MIN_TEMP_C)
     {
       fuel_diag_fault = 0;
     }

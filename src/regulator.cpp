@@ -224,7 +224,8 @@ void regulatorTask(void *pvParameters) {
     // --- Load-Aware Acceleration De-Excitation (Full Field Cutoff) ---
     static bool accel_cutoff_active = false;
 
-    bool vac_connected = (in_last_vac != 0) &&
+    bool vac_connected = isCanActiveState(in_state) &&
+                         (in_last_vac != 0) &&
                          isCanPacketFresh(reg_now, in_last_vac, FRONT_MCU_TIMEOUT_MS) &&
                          !in_map_fault;
     bool voltage_safe_for_cutoff = (new_v >= REGULATOR_V_CUTOFF_FLOOR);

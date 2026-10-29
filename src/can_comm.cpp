@@ -109,16 +109,35 @@ bool canIsRunning()
 void checkCanErrors(unsigned long now)
 {
   static unsigned long lastResetAttempt = 0;
+  static unsigned long canActiveSince = 0;
 
   if (!canInstalled)
   {
-    // Driver install failed earlier (or was torn down) -> retry periodically
+    // Driver install failed earlier -> retry until installed so passive RX is ready
     if (now - lastResetAttempt >= CAN_REINIT_INTERVAL_MS)
     {
       canBegin();
       lastResetAttempt = now;
     }
     return;
+  }
+
+  portENTER_CRITICAL(&dataMux);
+  SystemState state = currentState;
+  unsigned long pktTime = lastPacketTime;
+  portEXIT_CRITICAL(&dataMux);
+
+  // Front MCU is unpowered outside POS2 (IGN) and driving modes (SLEEP, STANDBY, ACC),
+  // so skip all CAN diagnostics and driver re-initializations completely.
+  if (!isCanActiveState(state))
+  {
+    canActiveSince = 0;
+    return;
+  }
+
+  if (canActiveSince == 0)
+  {
+    canActiveSince = (now != 0) ? now : 1;
   }
 
   bool needsReinit = false;
@@ -138,11 +157,12 @@ void checkCanErrors(unsigned long now)
     needsReinit = true;
   }
 
-  // Auto-recovery for stale/disconnected communication:
-  // If no packets received for > 2000ms (or controller entered BUS_OFF/STOPPED),
-  // periodically tear down and re-install the TWAI driver every 1000ms.
-  bool staleLink = !isCanPacketFresh(now, lastPacketTime, CAN_STALE_REINIT_MS);
-  if ((needsReinit || staleLink) && (now - lastResetAttempt >= CAN_REINIT_INTERVAL_MS))
+  // Allow Front MCU CAN_STALE_REINIT_MS after POS2 turns ON to finish booting before
+  // diagnosing a missing RX stream as a stale link.
+  bool bootGracePassed = ((now - canActiveSince) >= CAN_STALE_REINIT_MS);
+  bool staleLink = bootGracePassed && !isCanPacketFresh(now, pktTime, CAN_STALE_REINIT_MS);
+  if ((needsReinit && (now - lastResetAttempt >= CAN_REINIT_INTERVAL_MS)) ||
+      (staleLink && (now - lastResetAttempt >= CAN_STALE_REINIT_INTERVAL_MS)))
   {
     canEnd();
     canBegin();
@@ -495,6 +515,7 @@ static void canRxTask(void *pvParameters)
     Serial.println("[CAN] TWAI driver start failed - will retry in CanRxTask");
   }
 
+  bool wasCanActive = false;
   twai_message_t rxMsg;
   for (;;)
   {
@@ -529,15 +550,42 @@ static void canRxTask(void *pvParameters)
 
     unsigned long nowMs = millis();
 
-    // Zero RPM atomically on CAN link timeout so neither Core 0 nor Core 1 holds stale RPM
+    // Clear Front MCU live telemetry immediately when leaving POS2/driving (Front MCU loses
+    // Terminal 15 power in SLEEP/STANDBY/ACC) and zero fast motion/injector states on CAN timeout.
     portENTER_CRITICAL(&dataMux);
-    bool timedOut = !isCanPacketFresh(nowMs, lastPacketTime, FRONT_MCU_CAN_TIMEOUT_MS);
-    if (timedOut)
+    bool canActive = isCanActiveState(currentState);
+    if (wasCanActive && !canActive)
+    {
+      lastPacketTime = 0;
+      lastVacPacketTime = 0;
+      rpm = 0;
+      new_rpm = 0;
+      spd_t = 0;
+      oil_level_t = 0;
+      th_switch_state = 1;
+      ac_switch_state = 0;
+      map_sensor_fault = false;
+      vacuum_psi = 0.0f;
+      injector_state = 0;
+      live_inj_duty_cycle = 0.0f;
+    }
+    else if (!isCanPacketFresh(nowMs, lastPacketTime, FRONT_MCU_CAN_TIMEOUT_MS))
     {
       rpm = 0;
       new_rpm = 0;
+      spd_t = 0;
+      injector_state = 0;
+      live_inj_duty_cycle = 0.0f;
     }
     portEXIT_CRITICAL(&dataMux);
+
+    if (wasCanActive && !canActive)
+    {
+      // Reset sequence/counter sync so the Front MCU's next power-up in POS2 syncs cleanly from frame #1
+      seq_02_synced = false;
+      inj_04_synced = false;
+    }
+    wasCanActive = canActive;
 
     checkCanErrors(nowMs);
     esp_task_wdt_reset();

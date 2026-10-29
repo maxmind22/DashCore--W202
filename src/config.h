@@ -42,8 +42,9 @@
 #define CAN_RX_QUEUE_LEN 32     // Driver RX queue (frames); MCP2515 only had 2 HW buffers
 #define CAN_TX_QUEUE_LEN 4      // Driver TX queue (frames)
 #define CAN_RX_DRAIN_MAX 32     // Drain full TWAI RX queue down to the freshest sample
-#define CAN_STALE_REINIT_MS 2000 // No RX for this long -> periodically re-init TWAI driver
-#define CAN_REINIT_INTERVAL_MS 1000
+#define CAN_STALE_REINIT_MS 2000 // No RX for this long in POS2/driving -> link considered stale
+#define CAN_REINIT_INTERVAL_MS 1000 // Re-init rate when controller is BUS_OFF/STOPPED (real fault)
+#define CAN_STALE_REINIT_INTERVAL_MS 5000 // Fallback re-init rate if link stays silent in POS2/driving
 
 // --- Alternator Regulator Constants ---
 #define REGULATOR_V_TARGET 13.60f           // LiFePO4 safe full absorption voltage (3.40V/cell)
@@ -115,8 +116,9 @@ const unsigned long ENGINE_STALL_DEBOUNCE_MS = 1500; // Require 1.5s persistent 
 // Cross-core safe packet age check: Core 0's CAN RX task may stamp packetTime a few ms
 // after Core 1 sampled `now`, making (int32_t)(now - packetTime) slightly negative.
 // Signed 32-bit difference avoids unsigned underflow (~4.29B ms false timeout).
+// packetTime == 0 is reserved strictly for "no packet received yet" (or Front MCU unpowered).
 inline bool isCanPacketFresh(unsigned long now, unsigned long packetTime, uint32_t timeoutMs) {
-  return ((int32_t)(now - packetTime) <= (int32_t)timeoutMs);
+  return (packetTime != 0) && ((int32_t)(now - packetTime) <= (int32_t)timeoutMs);
 }
 #define CHARGE_MALFUNCTION_DELAY_MS 20000
 #define BATTERY_LOW_DELAY_MS 10000
@@ -235,6 +237,7 @@ const unsigned long BRAKE_CHECK_SETTLE_MS = 100; // Window (ms) to energize and 
 #define BLE_RESCAN_TIMEOUT_MS 5000 // Quick on-demand scan on start button press (5s)
 #define BLE_MIN_RSSI -95           // Minimum RSSI filter in dBm (-128 to disable)
 #define AUTH_SUCCESS_BEEP_MS 500   // Confirmation beep duration when phone is authorized (ms)
+#define BLE_SCAN_REFRESH_MS 60000  // Restart the continuous scan periodically to flush NimBLE's internal advertiser cache
 
 #if __has_include("secrets.h")
 #include "secrets.h"
@@ -274,6 +277,17 @@ enum SystemState
   STATE_RUNNING,
   STATE_AUTO_STOP
 };
+
+// Front MCU is powered from Terminal 15 (POS2 / Ignition), so CAN traffic and bus diagnostics
+// only apply in POS2 (STATE_IGNITION) and active engine/driving modes
+// (STATE_CRANKING, STATE_RUNNING, STATE_AUTO_STOP) — never in SLEEP, STANDBY, or ACC.
+inline bool isCanActiveState(SystemState state)
+{
+  return (state == STATE_IGNITION ||
+          state == STATE_CRANKING ||
+          state == STATE_RUNNING ||
+          state == STATE_AUTO_STOP);
+}
 
 enum ToneState
 {

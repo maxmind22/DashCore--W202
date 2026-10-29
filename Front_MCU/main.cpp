@@ -357,7 +357,7 @@ void loop()
     int dutyCycle = max(dutyCycle_temp, dutyCycle_ac);
     analogWrite(fan, dutyCycle);
 
-    // --- OEM-Style Oil Level Filter (Mercedes W202 / S11) ---
+    // --- OEM-Style Oil Level switch (Mercedes W202 / S11) ---
     // Hardware: 47k pull-up to D6 -> Sensor -> GND.
     // Tested state: LOW = Oil OK, HIGH = Low Oil.
     // Damping: Requires 30s sustained LOW oil reading (HIGH) while engine is running (RPM >= 500)
@@ -641,7 +641,7 @@ void loop()
     digitalWriteFast(regulator_pin, LOW); // De-energize field disconnect relay
   }
 
-  //================= Send to Display MCU: 0x02 (Every 20ms) & 0x04 (Every 50ms, Staggered) ===============//
+  //================= Send to cabin MCU (ESP32): 0x02 (Every 20ms) & 0x04 (Every 50ms, Staggered) ===============//
   if (currentMillis - lastCan02SendTime >= CAN_FAST_SEND_INTERVAL_MS)
   {
     static uint8_t seq_02 = 0;

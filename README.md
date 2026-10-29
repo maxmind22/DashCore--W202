@@ -10,7 +10,7 @@ The project is split into two physical microcontrollers:
 
 ### 1. Front MCU (Engine Bay Controller - Arduino Nano / ATmega328P)
 
-Located in the engine bay, this controller handles raw engine sensor acquisition and primary safety-critical components:
+Located in the engine bay and **powered from Terminal 15 (POS2 / Ignition)**, this controller is active **only in POS2 (`STATE_IGNITION`) and driving/engine states (`STATE_CRANKING`, `STATE_RUNNING`, `STATE_AUTO_STOP`)** — it remains completely unpowered in `SLEEP`, `STANDBY`, and `ACC` (POS1). When powered, it handles raw engine sensor acquisition and primary safety-critical components:
 
 - **RPM, Fuel Consumption & Speed Tracking:** High-frequency pulse counting via hardware interrupts.
 - **Thermal Management:** Reads engine coolant temperature and monitors A/C state to dynamically control the electric radiator cooling fan using variable PWM duty cycles.
@@ -27,12 +27,12 @@ Located in the vehicle cabin, this ESP32 manages the display, alternator regulat
   - **Remaining Distance Range (`REM`):** Continuously calculates remaining driving range (km) based on remaining fuel and real-time average consumption (`avg_l_100km`).
 - **Software-Defined Alternator Regulator (Core 0):** A high-priority FreeRTOS task running a closed-loop PID control loop. It samples alternator voltage and current through a high-precision ADS1115 ADC to dynamically drive the alternator field coil via 10-bit PWM. Implements seamless CV/CC regulation (targeting 13.6V max and a 20A current ceiling specifically to protect and optimize charging for a LiFePO4 start battery) with secondary physical relay emergency overrides for overcurrent/overvoltage protection.
 - **Smart Keyless Push-to-Start:** Manages the ignition and engine start sequence via a non-blocking state machine driving 3 physical relays (ACC, IGN, Starter).
-- **Cabin Alerts & Warnings:** Non-blocking buzzer tone queue and on-screen HUD flashes for:
-  - Low Fuel Level (with noise-rejecting calibration tables)
-  - Low Engine Oil / Coolant Levels
-  - Engine Overheating (Temp > 96°C)
+- **Cabin Alerts & Warnings:** Non-blocking buzzer tone queue and on-screen HUD flashes (all Front-MCU-derived alerts, gauges, and CAN diagnostics are automatically gated on POS2 / driving states so they never trigger while the Front MCU is unpowered in `STANDBY` or `ACC`):
+  - Low Fuel Level & Low Coolant Level (direct cabin inputs)
+  - Low Engine Oil Level & Engine Overheating (Front MCU signals, active in POS2 / driving)
+  - Intake Vacuum Leak, Air Filter Restriction, Idle Switch & Rich/Lean Fuel Trim Diagnostics (active while running)
   - Battery Low / Charging System Malfunction
-  - Front MCU Connection Timeout
+  - Front MCU Connection Timeout (monitored only in POS2 / driving)
 
 ---
 

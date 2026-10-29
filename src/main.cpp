@@ -7,6 +7,26 @@
 #include "fuel.h"
 #include "security.h"
 #include <Fonts/FreeSansBold24pt7b.h>
+#include <esp_heap_caps.h>
+
+// Short label for abnormal resets (panic / watchdog / brownout), nullptr for normal boots.
+// Shown on screen for 30 s after boot so field reboots can be diagnosed without a laptop.
+static const char *abnormalResetLabel = nullptr;
+
+static const char *getAbnormalResetLabel(esp_reset_reason_t reason)
+{
+  switch (reason)
+  {
+  case ESP_RST_PANIC:    return "RST:PANIC";
+  case ESP_RST_INT_WDT:  return "RST:INT_WDT";
+  case ESP_RST_TASK_WDT: return "RST:TASK_WDT";
+  case ESP_RST_WDT:      return "RST:WDT";
+  case ESP_RST_BROWNOUT: return "RST:BROWNOUT";
+  case ESP_RST_SW:       return "RST:SW";
+  case ESP_RST_UNKNOWN:  return "RST:UNKNOWN";
+  default:               return nullptr; // POWERON, DEEPSLEEP, EXT, SDIO
+  }
+}
 
 //=================== setup ===============//
 void setup()
@@ -73,6 +93,11 @@ void setup()
   {
     Serial.printf("[SAFETY] Unexpected reset (reason %d) while engine running — ACC/IGN restored.\n", (int)resetReason);
   }
+  abnormalResetLabel = getAbnormalResetLabel(resetReason);
+  if (abnormalResetLabel != nullptr)
+  {
+    Serial.printf("[BOOT] Abnormal reset: %s (reason %d)\n", abnormalResetLabel, (int)resetReason);
+  }
 
   recoverI2CBus(PIN_I2C_SDA, PIN_I2C_SCL);
   Wire.begin();
@@ -109,8 +134,8 @@ void setup()
   ledcSetup(0, 400, 10);      // channel, freq, resolution
   ledcAttachPin(FIELD_PIN, 0);
 
-  lastPacketTime = millis(); // Initialize before starting Core 0 CAN RX task to avoid startup timeout
-  startCanRxTask();          // Install TWAI & drain CAN RX on Core 0 (zero video V-Sync lag)
+  lastPacketTime = 0; // 0 = no Front MCU packet received yet (grace handled per-state)
+  startCanRxTask();   // Install TWAI & drain CAN RX on Core 0 (zero video V-Sync lag)
 
   // Configure FreeRTOS task for regulator loop instead of hardware timer
   if (adcReady)
@@ -133,9 +158,10 @@ void loop()
   // uint32_t start = micros();
   unsigned long now = millis();
 
-  //============= send health signal to front MCU ==================
+  //============= send health signal to front MCU (only when POS2/IGN is active) ==================
   static unsigned long lastCanSendTimeMs = 0;
-  if (now - lastCanSendTimeMs >= CAN_HEALTH_SEND_INTERVAL_MS)
+  if (isCanActiveState(currentState) &&
+      now - lastCanSendTimeMs >= CAN_HEALTH_SEND_INTERVAL_MS)
   {
     sendCanHealthFrame(now);
     lastCanSendTimeMs = now;
@@ -146,6 +172,35 @@ void loop()
     tv.fillScreen(0x00);
     drawStaticGauge();
     last_clear++;
+  }
+
+  // Show abnormal reset reason (if any) for 30 s once the initial screen clears are done
+  static unsigned long resetLabelShownAt = 0;
+  if (abnormalResetLabel != nullptr && last_clear >= 6)
+  {
+    if (resetLabelShownAt == 0)
+    {
+      tv.setCursor(5, 70);
+      tv.setTextColor(0xE0, 0x00);
+      tv.print(abnormalResetLabel);
+      resetLabelShownAt = (now != 0) ? now : 1;
+    }
+    else if (now - resetLabelShownAt >= 30000)
+    {
+      tv.fillRect(5, 70, 6 * 12, 8, 0x00);
+      abnormalResetLabel = nullptr;
+    }
+  }
+
+  // Heap health log (Serial): a steadily falling "min" points to a leak
+  static unsigned long lastHeapLogMs = 0;
+  if (now - lastHeapLogMs >= 30000)
+  {
+    lastHeapLogMs = now;
+    Serial.printf("[HEAP] up=%lus free=%u min=%u largest=%u\n", now / 1000UL,
+                  (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL),
+                  (unsigned)heap_caps_get_minimum_free_size(MALLOC_CAP_INTERNAL),
+                  (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL));
   }
 
   // Clear reset message after 5 seconds
@@ -239,15 +294,15 @@ void loop()
   //================================ Read data from engine MCU
   //==============================================//
   // CAN frames (0x02 @ 50Hz, 0x04 @ 20Hz) are drained continuously on Core 0 by CanRxTask.
-  // Front MCU sends km/h directly (pulse-counted from instrument cluster VSS)
-  spd_l = constrain((int)spd_t, 0, 220);
+  // Front MCU is only powered in POS2 (IGN) and driving states; force 0 km/h when unpowered or timed out.
+  bool frontMcuSpeedValid = isCanActiveState(currentState) &&
+                            isCanPacketFresh(now, lastPacketTime, FRONT_MCU_CAN_TIMEOUT_MS);
+  spd_l = frontMcuSpeedValid ? constrain((int)spd_t, 0, 220) : 0;
   int spd_in = spd_l;
 
   // --------------- filter SPD ----------------
-  bool canTimedOut = !isCanPacketFresh(now, lastPacketTime, FRONT_MCU_CAN_TIMEOUT_MS);
-  if (lastTime == 0 || canTimedOut)
+  if (lastTime == 0 || !frontMcuSpeedValid)
   {
-    last_spd = spd_in;
     spd = spd_in;
   }
   else
@@ -356,7 +411,8 @@ void loop()
   }
 
   unsigned long local_last_vac = lastVacPacketTime;
-  bool vac_valid = (local_last_vac != 0) &&
+  bool vac_valid = isCanActiveState(currentState) &&
+                   (local_last_vac != 0) &&
                    isCanPacketFresh(now, local_last_vac, FRONT_MCU_TIMEOUT_MS) &&
                    !map_sensor_fault && isBaroValid();
 
@@ -601,16 +657,20 @@ void loop()
     }
 
     //--------------------------------------------------------------------------
-    fill2 = map(temp_out, 40, 120, 0, TEMP_HEIGHT); // ----------for temp gauge
+    bool temp_valid = isCanActiveState(currentState) &&
+                      isCanPacketFresh(now, lastPacketTime, FRONT_MCU_TIMEOUT_MS);
+    int effective_temp = temp_valid ? temp_out : 40;
+    fill2 = map(effective_temp, 40, 120, 0, TEMP_HEIGHT); // ----------for temp gauge
     int tick_y = 0;
     fill2 = constrain(fill2, 0, TEMP_HEIGHT);
     t = TEMP_HEIGHT + TEMP_Y - fill2;
+    int disp_key = temp_valid ? temp_out : -2; // -2 = "---" while Front MCU is unpowered/offline
     static int last_temp_disp = -1;
     if (last_clear < 6)
     {
       last_temp_disp = -1;
     }
-    if (last_t != t || last_temp_disp != temp_out || lastTime == 0)
+    if (last_t != t || last_temp_disp != disp_key || lastTime == 0)
     {
       // Erase previous needle only
       tv.fillRect(TEMP_X - 5, last_t - 2, TEMP_VALUE_TICK_WIDTH,
@@ -622,18 +682,28 @@ void loop()
         tv.fillRect(TEMP_X - 2, tick_y, TEMP_TICKS_WIDTH, TEMP_TICKS_HEIGHT,
                     0xFF);
       }
-      // draw temp_value tick
-      tv.fillRect(TEMP_X - 5, t - 2, TEMP_VALUE_TICK_WIDTH,
-                  TEMP_VALUE_TICK_HEIGHT, 0xE0);
+      if (temp_valid)
+      {
+        // draw temp_value tick only when Front MCU temperature signal is live
+        tv.fillRect(TEMP_X - 5, t - 2, TEMP_VALUE_TICK_WIDTH,
+                    TEMP_VALUE_TICK_HEIGHT, 0xE0);
+      }
 
-      // Display digital temperature readout on top of temp gauge
+      // Display digital temperature readout on top of temp gauge ("---" when Front MCU unpowered)
       tv.setCursor(TEMP_X - 8, TEMP_Y - 10);
-      uint8_t temp_color = (temp_out >= OVERHEAT_TEMP_C) ? 0xE0 : 0xFF;
+      uint8_t temp_color = (temp_valid && temp_out >= OVERHEAT_TEMP_C) ? 0xE0 : 0xFF;
       tv.setTextColor(temp_color, 0x00);
       char bufTemp[4];
-      snprintf(bufTemp, sizeof(bufTemp), "%3d", temp_out);
+      if (temp_valid)
+      {
+        snprintf(bufTemp, sizeof(bufTemp), "%3d", temp_out);
+      }
+      else
+      {
+        snprintf(bufTemp, sizeof(bufTemp), "---");
+      }
       tv.print(bufTemp);
-      last_temp_disp = temp_out;
+      last_temp_disp = disp_key;
     }
 
     // --- Fuel Consumption Calculations ---

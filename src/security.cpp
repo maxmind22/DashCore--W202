@@ -44,6 +44,8 @@ static bool isZeroKey(const uint8_t key[16])
 }
 
 static volatile bool authGrantedPending = false;
+static unsigned long lastScanRefreshMs = 0;
+
 
 // Centralized authorization helper
 static void grantPhoneAuthorization(const char *reason, const char *deviceInfo)
@@ -71,6 +73,30 @@ void processBLEEvents()
     teardownBLESecurity();
     Serial.println("[SECURITY] Bluetooth radio completely stopped & disabled.\n");
     playAuthSuccessTone();
+    return;
+  }
+
+  // Periodically restart the continuous scan. With maxResults = 0 NimBLE still keeps an entry
+  // for ADV_IND advertisers while it waits for their scan response; entries whose response is
+  // never received would otherwise linger forever. stop() flushes them (maxResults == 0).
+  if (bleScanning && !phoneAuthorized && !isPhoneAuthorized())
+  {
+    unsigned long nowMs = millis();
+    if (nowMs - lastScanRefreshMs >= BLE_SCAN_REFRESH_MS)
+    {
+      lastScanRefreshMs = nowMs;
+      NimBLEScan *pBLEScan = NimBLEDevice::getScan();
+      if (pBLEScan != nullptr && pBLEScan->isScanning())
+      {
+        pBLEScan->stop(); // Also clears stored results because maxResults == 0
+        pBLEScan->clearResults();
+        if (!pBLEScan->start(0, nullptr, true)) // is_continue: results already cleared while stopped
+        {
+          Serial.println("[SECURITY] ERROR: BLE scan refresh failed to restart!");
+          bleScanning = false;
+        }
+      }
+    }
   }
 }
 
@@ -517,6 +543,21 @@ class SecurityScanCallbacks : public NimBLEAdvertisedDeviceCallbacks
 static SecurityServerCallbacks serverCallbacks;
 static SecurityScanCallbacks scanCallbacks;
 
+// NimBLE 1.4.x defaults to maxResults = 0xFF, which stores EVERY unique advertiser address it
+// ever hears as a heap-allocated NimBLEAdvertisedDevice (+ payload vector). A continuous scan
+// (duration 0) never flushes them, and phones/watches/tags rotate random addresses, so the list
+// grows without bound until the internal heap (already tight next to the composite video
+// framebuffers) is exhausted and the ESP32 aborts/reboots. Only the onResult() callback is
+// needed, so store nothing.
+static void configureScan(NimBLEScan *pBLEScan)
+{
+  pBLEScan->setAdvertisedDeviceCallbacks(&scanCallbacks, true); // wantDuplicates = true for continuous reception
+  pBLEScan->setMaxResults(0);                                   // Callbacks only: never accumulate scan results
+  pBLEScan->setActiveScan(true);                                // Active scan catches Android discovery/scan responses
+  pBLEScan->setInterval(100);                                   // 100ms interval
+  pBLEScan->setWindow(50);                                      // 50ms window (balanced 50% scan / 50% advertising duty cycle)
+}
+
 void setupBLESecurity()
 {
   if (phoneAuthorized)
@@ -573,13 +614,11 @@ void setupBLESecurity()
   NimBLEScan *pBLEScan = NimBLEDevice::getScan();
   if (pBLEScan != nullptr)
   {
-    pBLEScan->setAdvertisedDeviceCallbacks(&scanCallbacks, true); // wantDuplicates = true for continuous reception
-    pBLEScan->setActiveScan(true);                                // Active scan catches Android discovery/scan responses
-    pBLEScan->setInterval(100);                                   // 100ms interval
-    pBLEScan->setWindow(50);                                      // 50ms window (balanced 50% scan / 50% advertising duty cycle)
+    configureScan(pBLEScan);
 
     Serial.println("[SECURITY] Starting continuous BLE scan & server (until authorized or sleep)...");
     bleScanning = true;
+    lastScanRefreshMs = millis();
     if (!pBLEScan->start(0, nullptr, false))
     {
       Serial.println("[SECURITY] ERROR: BLE Scan failed to start!");
@@ -642,13 +681,11 @@ void triggerBLERescan(unsigned long durationMs)
   NimBLEScan *pBLEScan = NimBLEDevice::getScan();
   if (pBLEScan != nullptr)
   {
-    pBLEScan->setAdvertisedDeviceCallbacks(&scanCallbacks, true);
-    pBLEScan->setActiveScan(true);
-    pBLEScan->setInterval(100);
-    pBLEScan->setWindow(50);
+    configureScan(pBLEScan);
 
     Serial.println("[SECURITY] Re-starting continuous BLE scan & server...");
     bleScanning = true;
+    lastScanRefreshMs = millis();
     if (!pBLEScan->start(0, nullptr, false))
     {
       Serial.println("[SECURITY] ERROR: BLE Re-scan failed to start!");
