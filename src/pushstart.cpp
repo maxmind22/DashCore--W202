@@ -169,7 +169,7 @@ bool isEngineRunning(unsigned long now)
   if (currentState == STATE_RUNNING)
     return true;
 
-  if (isCanPacketFresh(now, lastPacketTime, FRONT_MCU_CAN_TIMEOUT_MS))
+  if (isCanPacketFresh(now, lastFastPacketTime, FRONT_MCU_CAN_TIMEOUT_MS))
   {
     if (rpm >= ENGINE_STARTED_RPM || new_rpm >= ENGINE_STARTED_RPM)
       return true;
@@ -366,7 +366,7 @@ void processPushStart(unsigned long now)
   // (e.g. after MCU reset while driving, or manual push/roll start)
   if (currentState != STATE_RUNNING && currentState != STATE_CRANKING && currentState != STATE_AUTO_STOP && !emergencyStopLatched)
   {
-    if (isCanPacketFresh(now, lastPacketTime, FRONT_MCU_CAN_TIMEOUT_MS) &&
+    if (isCanPacketFresh(now, lastFastPacketTime, FRONT_MCU_CAN_TIMEOUT_MS) &&
         (rpm >= ENGINE_STARTED_RPM || new_rpm >= ENGINE_STARTED_RPM))
     {
       // Only auto-sync if not in the middle of an intentional shutdown
@@ -467,7 +467,7 @@ void processPushStart(unsigned long now)
   // or the vehicle is confirmed stationary with the engine stopped over a live CAN link.
   if (emergencyStopLatched)
   {
-    bool canAlive = isCanPacketFresh(now, lastPacketTime, FRONT_MCU_CAN_TIMEOUT_MS);
+    bool canAlive = isCanPacketFresh(now, lastFastPacketTime, FRONT_MCU_CAN_TIMEOUT_MS);
     if (btnEdgeDown || (canAlive && spd == 0 && rpm < ENGINE_STARTED_RPM))
     {
       emergencyStopLatched = false;
@@ -736,7 +736,7 @@ void processPushStart(unsigned long now)
 
       // Safety check: If engine is already running (starter is OFF, so no starter electrical noise),
       // transition immediately to STATE_RUNNING without ever engaging the starter!
-      if (isCanPacketFresh(now, lastPacketTime, FRONT_MCU_CAN_TIMEOUT_MS) && currentRpm >= ENGINE_STARTED_RPM)
+      if (isCanPacketFresh(now, lastFastPacketTime, FRONT_MCU_CAN_TIMEOUT_MS) && currentRpm >= ENGINE_STARTED_RPM)
       {
         currentState = STATE_RUNNING;
         lastEngineStartTime = now;
@@ -753,7 +753,7 @@ void processPushStart(unsigned long now)
       {
         // Starter protection: If engine is still rotating/spinning down (> 50 RPM),
         // hold in prime stage until stationary before engaging starter pinion
-        if (isCanPacketFresh(now, lastPacketTime, FRONT_MCU_CAN_TIMEOUT_MS) && currentRpm > ENGINE_SPINDOWN_RPM_THRESHOLD)
+        if (isCanPacketFresh(now, lastFastPacketTime, FRONT_MCU_CAN_TIMEOUT_MS) && currentRpm > ENGINE_SPINDOWN_RPM_THRESHOLD)
         {
           if (now - crankStageTime < MAX_CRANK_TIME_MS)
           {
@@ -774,7 +774,7 @@ void processPushStart(unsigned long now)
       //   to mitigate the noisy RPM signal during starter engagement that causes premature cutoff/starting failure.
       // - Else if Front MCU is offline, use 1.2s cranking time to transition into STATE_RUNNING
       bool startDetected = false;
-      if (isCanPacketFresh(now, lastPacketTime, FRONT_MCU_CAN_TIMEOUT_MS))
+      if (isCanPacketFresh(now, lastFastPacketTime, FRONT_MCU_CAN_TIMEOUT_MS))
       {
         startDetected = (now - crankStageTime >= MIN_CRANK_TIME_MS) && (currentRpm > ENGINE_STARTED_RPM);
       }
@@ -835,7 +835,8 @@ void processPushStart(unsigned long now)
                                (temp_out >= AUTO_STOP_MIN_TEMP_C) &&
                                (temp_out <= AUTO_STOP_MAX_TEMP_C) &&
                                (voltage_filtered >= AUTO_STOP_MIN_VOLTAGE) &&
-                               isCanPacketFresh(now, lastPacketTime, FRONT_MCU_TIMEOUT_MS);
+                               isCanPacketFresh(now, lastFastPacketTime, FRONT_MCU_CAN_TIMEOUT_MS) &&
+                               isCanPacketFresh(now, lastEnvPacketTime, FRONT_MCU_TIMEOUT_MS);
 
       if (autoStopPermitted && standstillStartTime != 0 &&
           (now - standstillStartTime >= AUTO_STOP_STANDSTILL_DELAY_MS))
@@ -853,7 +854,7 @@ void processPushStart(unsigned long now)
     // Only treat rpm==0 as stall if CAN packets are currently actively being received from Front MCU
     // and 0 RPM persists for at least ENGINE_STALL_DEBOUNCE_MS (prevents ignition cut on transient glitches/stumbles)
     static unsigned long zeroRpmStartTime = 0;
-    if (currentRpm == 0 && isCanPacketFresh(now, lastPacketTime, FRONT_MCU_CAN_TIMEOUT_MS))
+    if (currentRpm == 0 && isCanPacketFresh(now, lastFastPacketTime, FRONT_MCU_CAN_TIMEOUT_MS))
     {
       if (zeroRpmStartTime == 0)
       {
@@ -881,7 +882,7 @@ void processPushStart(unsigned long now)
     // Without CAN, use the 3 s long-press emergency stop instead.
     if (btnShortPressed && (now - lastButtonPressTime >= BUTTON_COOLDOWN_MS))
     {
-      bool canAlive = isCanPacketFresh(now, lastPacketTime, FRONT_MCU_TIMEOUT_MS);
+      bool canAlive = isCanPacketFresh(now, lastFastPacketTime, FRONT_MCU_CAN_TIMEOUT_MS);
       bool isBrakeHeld = (digitalRead(PIN_INPUT_BRAKE) == LOW) || brakeHeldOnPress;
       if ((spd == 0 && canAlive) || (!canAlive && isBrakeHeld))
       { // Safety check: speed must be zero or stationary with brake held
@@ -951,7 +952,8 @@ void processPushStart(unsigned long now)
     // - Maximum stop duration exceeded (90s)
     bool batteryLow = (voltage_filtered < AUTO_STOP_RESTART_VOLTAGE);
     bool tempCreep = (temp_out > AUTO_STOP_MAX_TEMP_C);
-    bool canLoss = !isCanPacketFresh(now, lastPacketTime, FRONT_MCU_TIMEOUT_MS);
+    bool canLoss = !isCanPacketFresh(now, lastFastPacketTime, FRONT_MCU_TIMEOUT_MS) ||
+                   !isCanPacketFresh(now, lastEnvPacketTime, FRONT_MCU_TIMEOUT_MS);
     bool maxDurationReached = (autoStopStartTime != 0 && (now - autoStopStartTime >= AUTO_STOP_MAX_DURATION_MS));
 
     if (brakeReleased || batteryLow || tempCreep || canLoss || maxDurationReached)
@@ -962,7 +964,7 @@ void processPushStart(unsigned long now)
 
       // Safety check: If engine is already running (e.g. caught upon injector restore or didn't stall),
       // transition directly to STATE_RUNNING without engaging starter!
-      if (isCanPacketFresh(now, lastPacketTime, FRONT_MCU_CAN_TIMEOUT_MS) && currentRpm >= ENGINE_STARTED_RPM)
+      if (isCanPacketFresh(now, lastFastPacketTime, FRONT_MCU_CAN_TIMEOUT_MS) && currentRpm >= ENGINE_STARTED_RPM)
       {
         currentState = STATE_RUNNING;
         isEcoRestart = false;

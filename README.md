@@ -16,7 +16,7 @@ Located in the engine bay and **powered from Terminal 15 (POS2 / Ignition)**, th
 - **Thermal Management:** Reads engine coolant temperature and monitors A/C state to dynamically control the electric radiator cooling fan using variable PWM duty cycles.
 - **Custom DFCO (Deceleration Fuel Cut Off):** Cuts fuel during deceleration when RPM > 1500, throttle closed, and engine warm.
 - **Failsafe System:** Features a hardware watchdog timer (`avr/wdt.h`), regulator failsafe hysteresis (preventing relay chatter), and heartbeat frame monitoring from the display unit. If communication is lost, it cuts field voltage to the regulator for safety.
-- **CAN Broadcast:** Packages fast engine status (RPM, manifold vacuum/baro, speed, oil level, temperatures, flags) at 50 Hz (every 20ms) and cumulative injector/speed telemetry at 20 Hz (every 50ms, staggered) over a 500kbps CAN Bus.
+- **CAN Broadcast:** Broadcasts fully unpacked telemetry frames over a 500kbps CAN Bus (staggered >= 4ms): fast engine & motion (`0x02`: RPM, speed, DFCO, eco-cut, idle switch) at 50 Hz, manifold & barometric pressure (`0x05`: 0.01 PSI vacuum, 0.01 PSI baro, filtered MAP ADC, MAP fault) at 50 Hz, cumulative injector/speed counters (`0x04`) at 20 Hz, and thermal/auxiliary status (`0x06`: coolant temp ADC, oil level, A/C state, radiator fan PWM duty) at 10 Hz.
 
 ### 2. Display & Regulator MCU (Cabin Controller - ESP32)
 

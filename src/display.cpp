@@ -54,7 +54,9 @@ void warnings(unsigned long now)
   // warnings and indicators when it is unpowered (SLEEP, STANDBY, ACC) or timed out.
   bool frontMcuPowered = isCanActiveState(currentState);
   bool frontMcuFastLive = frontMcuPowered &&
-                          isCanPacketFresh(now, lastPacketTime, FRONT_MCU_CAN_TIMEOUT_MS);
+                          isCanPacketFresh(now, lastFastPacketTime, FRONT_MCU_CAN_TIMEOUT_MS);
+  bool frontMcuEnvLive = frontMcuPowered &&
+                         isCanPacketFresh(now, lastEnvPacketTime, FRONT_MCU_TIMEOUT_MS);
   bool frontMcuLive = frontMcuPowered &&
                       isCanPacketFresh(now, lastPacketTime, FRONT_MCU_TIMEOUT_MS);
 
@@ -104,7 +106,7 @@ void warnings(unsigned long now)
   }
 
   //------------------------------------------------
-  bool lowOilActive = frontMcuLive && (oil_level > 0);
+  bool lowOilActive = frontMcuEnvLive && (oil_level > 0);
   if (lowOilActive && lowBlinkState && priority == 0)
   {
     if (oil_on)
@@ -123,7 +125,7 @@ void warnings(unsigned long now)
     oil = false;
   }
   //------------------------------------------------
-  bool overheatActive = frontMcuLive && (temp_out >= OVERHEAT_TEMP_C);
+  bool overheatActive = frontMcuEnvLive && (temp_out >= OVERHEAT_TEMP_C);
   if (overheatActive && lowBlinkState && priority == 0)
   {
     if (temp_on)

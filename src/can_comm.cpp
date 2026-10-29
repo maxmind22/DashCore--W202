@@ -43,7 +43,7 @@ bool canBegin()
 
   twai_timing_config_t t_config = TWAI_TIMING_CONFIG_500KBITS();
 
-  // Hardware acceptance filter: accept standard IDs 0x000..0x007 only (Front MCU uses 0x02/0x04).
+  // Hardware acceptance filter: accept standard IDs 0x000..0x007 only (Front MCU uses 0x02/0x04/0x05/0x06).
   // Single-filter layout for std frames: ID in bits [31:21]; mask bit = 1 -> "don't care".
   // ID bits [10:3] must be 0, bits [2:0] + RTR + data bytes are don't-care.
   twai_filter_config_t f_config;
@@ -242,6 +242,10 @@ static uint16_t last_rx_spd_pulses = 0;
 
 static uint8_t last_seq_02 = 0;
 static bool seq_02_synced = false;
+static uint8_t last_seq_05 = 0;
+static bool seq_05_synced = false;
+static uint8_t last_seq_06 = 0;
+static bool seq_06_synced = false;
 static bool inj_04_synced = false;
 static unsigned long last_04_rx_time = 0;
 // Time the injector snapshot last advanced. The Front MCU re-sends the previous snapshot
@@ -260,26 +264,19 @@ static void processCanFrame(const twai_message_t &msg, unsigned long rxNow)
 
   if (msg.identifier == 0x02)
   {
-    uint16_t rx_raw2 = (uint16_t)(msg.data[0] | (msg.data[1] << 8));
-    int rx_temp = rawAdcToTempC(rx_raw2);
-    uint16_t rx_spd = (uint16_t)msg.data[2];
-    uint16_t rx_rpm = (uint16_t)(msg.data[3] | (msg.data[4] << 8));
-
-    uint8_t raw_vac_x10 = msg.data[5];
-    uint8_t flags = msg.data[6];
-    uint8_t new_inj_state = flags & 0x01;
-    uint8_t rx_oil = (flags >> 1) & 0x01;
-    uint8_t rx_th = (flags >> 2) & 0x01;
-    uint8_t rx_ac = (flags >> 4) & 0x01;
-    bool is_baro = (flags >> 5) & 0x01;
-    bool rx_map_fault = (flags >> 6) & 0x01;
+    uint16_t rx_rpm = (uint16_t)(msg.data[0] | (msg.data[1] << 8));
+    uint16_t rx_spd = (uint16_t)(msg.data[2] | (msg.data[3] << 8));
+    uint8_t rx_dfco = msg.data[4] ? 1 : 0;
+    uint8_t rx_eco_cut = msg.data[5] ? 1 : 0;
+    uint8_t new_inj_state = (rx_dfco || rx_eco_cut) ? 1 : 0;
+    uint8_t rx_th = msg.data[6] ? 1 : 0;
     uint8_t rx_seq_02 = msg.data[7];
 
-    unsigned long prevPacketTime = lastPacketTime;
-    uint8_t prevInjState = injector_state;
+    unsigned long prev02Time = lastFastPacketTime;
+    uint8_t prevDfcoState = dfco_cut_state;
 
     uint8_t lost_delta = 0;
-    if (seq_02_synced && isCanPacketFresh(rxNow, prevPacketTime, FRONT_MCU_CAN_TIMEOUT_MS))
+    if (seq_02_synced && isCanPacketFresh(rxNow, prev02Time, FRONT_MCU_CAN_TIMEOUT_MS))
     {
       uint8_t expected = (last_seq_02 + 1) & 0xFF;
       if (rx_seq_02 != expected)
@@ -293,11 +290,11 @@ static void processCanFrame(const twai_message_t &msg, unsigned long rxNow)
     }
     last_seq_02 = rx_seq_02;
 
-    // Transition 0 -> 1: injDisable just engaged (DFCO cutoff starts).
+    // Transition 0 -> 1 on DFCO: injDisable just engaged during deceleration.
     // Calculate and latch the average net injector pulse width over the active period before cutoff.
     bool latch_active_pulse = false;
     float latched_avg_net = 0.0f;
-    if (prevInjState == 0 && new_inj_state == 1)
+    if (prevDfcoState == 0 && rx_dfco == 1)
     {
       float total_net_us = 0.0f;
       uint32_t total_p = 0;
@@ -317,35 +314,16 @@ static void processCanFrame(const twai_message_t &msg, unsigned long rxNow)
       }
     }
 
-    float parsed_val = (float)raw_vac_x10 / 10.0f;
-
-    // Publish all fast status fields atomically (~0.5 us critical section, zero division/loops)
+    // Publish all fast engine/motion fields atomically (~0.3 us critical section, zero division/loops)
     portENTER_CRITICAL(&dataMux);
-    raw2 = rx_raw2;
-    temp_out = rx_temp;
     spd_t = rx_spd;
     new_rpm = rx_rpm;
     rpm = rx_rpm;
-    oil_level_t = rx_oil;
+    if (rx_rpm == 0)
+    {
+      vacuum_psi = 0.0f;
+    }
     th_switch_state = rx_th;
-    ac_switch_state = rx_ac;
-    map_sensor_fault = rx_map_fault;
-    if (is_baro)
-    {
-      if (!rx_map_fault && parsed_val >= 8.0f && parsed_val <= 16.5f)
-      {
-        baro_psi = parsed_val;
-      }
-      if (rx_rpm == 0)
-      {
-        vacuum_psi = 0.0f;
-      }
-    }
-    else
-    {
-      vacuum_psi = parsed_val;
-    }
-    lastVacPacketTime = rxNow;
     if (lost_delta > 0)
     {
       can_packets_lost_02 += lost_delta;
@@ -354,7 +332,10 @@ static void processCanFrame(const twai_message_t &msg, unsigned long rxNow)
     {
       last_active_inj_pulse_us = latched_avg_net;
     }
+    dfco_cut_state = rx_dfco;
+    eco_cut_state = rx_eco_cut;
     injector_state = new_inj_state;
+    lastFastPacketTime = rxNow;
     lastPacketTime = rxNow;
     portEXIT_CRITICAL(&dataMux);
   }
@@ -487,6 +468,91 @@ static void processCanFrame(const twai_message_t &msg, unsigned long rxNow)
       portEXIT_CRITICAL(&dataMux);
     }
   }
+  else if (msg.identifier == 0x05)
+  {
+    uint16_t raw_vac_x100 = (uint16_t)(msg.data[0] | (msg.data[1] << 8));
+    uint16_t raw_baro_x100 = (uint16_t)(msg.data[2] | (msg.data[3] << 8));
+    uint16_t rx_map_adc = (uint16_t)(msg.data[4] | (msg.data[5] << 8));
+    bool rx_map_fault = (msg.data[6] != 0);
+    uint8_t rx_seq_05 = msg.data[7];
+
+    unsigned long prevVacTime = lastVacPacketTime;
+    uint8_t lost_delta_05 = 0;
+    if (seq_05_synced && isCanPacketFresh(rxNow, prevVacTime, FRONT_MCU_CAN_TIMEOUT_MS))
+    {
+      uint8_t expected = (last_seq_05 + 1) & 0xFF;
+      if (rx_seq_05 != expected)
+      {
+        lost_delta_05 = (uint8_t)(rx_seq_05 - expected);
+      }
+    }
+    else
+    {
+      seq_05_synced = true;
+    }
+    last_seq_05 = rx_seq_05;
+
+    float parsed_vac = (float)raw_vac_x100 / 100.0f;
+    if (parsed_vac > 15.0f)
+      parsed_vac = 15.0f;
+    float parsed_baro = (float)raw_baro_x100 / 100.0f;
+    bool baro_in_range = (!rx_map_fault && parsed_baro >= 8.0f && parsed_baro <= 16.5f);
+
+    portENTER_CRITICAL(&dataMux);
+    raw_map_adc = rx_map_adc;
+    map_sensor_fault = rx_map_fault;
+    vacuum_psi = (!rx_map_fault && rpm > 0) ? parsed_vac : 0.0f;
+    if (baro_in_range)
+    {
+      baro_psi = parsed_baro;
+    }
+    if (lost_delta_05 > 0)
+    {
+      can_packets_lost_05 += lost_delta_05;
+    }
+    lastVacPacketTime = rxNow;
+    lastPacketTime = rxNow;
+    portEXIT_CRITICAL(&dataMux);
+  }
+  else if (msg.identifier == 0x06)
+  {
+    uint16_t rx_raw2 = (uint16_t)(msg.data[0] | (msg.data[1] << 8));
+    int rx_temp = rawAdcToTempC(rx_raw2);
+    uint8_t rx_oil = msg.data[2] ? 1 : 0;
+    uint8_t rx_ac = msg.data[3] ? 1 : 0;
+    uint8_t rx_fan = msg.data[4];
+    uint8_t rx_seq_06 = msg.data[7];
+
+    unsigned long prevEnvTime = lastEnvPacketTime;
+    uint8_t lost_delta_06 = 0;
+    if (seq_06_synced && isCanPacketFresh(rxNow, prevEnvTime, FRONT_MCU_TIMEOUT_MS))
+    {
+      uint8_t expected = (last_seq_06 + 1) & 0xFF;
+      if (rx_seq_06 != expected)
+      {
+        lost_delta_06 = (uint8_t)(rx_seq_06 - expected);
+      }
+    }
+    else
+    {
+      seq_06_synced = true;
+    }
+    last_seq_06 = rx_seq_06;
+
+    portENTER_CRITICAL(&dataMux);
+    raw2 = rx_raw2;
+    temp_out = rx_temp;
+    oil_level_t = rx_oil;
+    ac_switch_state = rx_ac;
+    fan_pwm_duty = rx_fan;
+    if (lost_delta_06 > 0)
+    {
+      can_packets_lost_06 += lost_delta_06;
+    }
+    lastEnvPacketTime = rxNow;
+    lastPacketTime = rxNow;
+    portEXIT_CRITICAL(&dataMux);
+  }
 }
 
 void drainCanRxBuffer(unsigned long now)
@@ -557,25 +623,51 @@ static void canRxTask(void *pvParameters)
     if (wasCanActive && !canActive)
     {
       lastPacketTime = 0;
+      lastFastPacketTime = 0;
       lastVacPacketTime = 0;
+      lastEnvPacketTime = 0;
+      raw2 = 0;
+      raw_map_adc = 0;
+      temp_out = 40;
       rpm = 0;
       new_rpm = 0;
       spd_t = 0;
       oil_level_t = 0;
       th_switch_state = 1;
       ac_switch_state = 0;
+      fan_pwm_duty = 0;
       map_sensor_fault = false;
       vacuum_psi = 0.0f;
       injector_state = 0;
+      dfco_cut_state = 0;
+      eco_cut_state = 0;
       live_inj_duty_cycle = 0.0f;
     }
-    else if (!isCanPacketFresh(nowMs, lastPacketTime, FRONT_MCU_CAN_TIMEOUT_MS))
+    else
     {
-      rpm = 0;
-      new_rpm = 0;
-      spd_t = 0;
-      injector_state = 0;
-      live_inj_duty_cycle = 0.0f;
+      if (!isCanPacketFresh(nowMs, lastFastPacketTime, FRONT_MCU_CAN_TIMEOUT_MS))
+      {
+        rpm = 0;
+        new_rpm = 0;
+        spd_t = 0;
+        injector_state = 0;
+        dfco_cut_state = 0;
+        eco_cut_state = 0;
+        live_inj_duty_cycle = 0.0f;
+      }
+      if (!isCanPacketFresh(nowMs, lastVacPacketTime, FRONT_MCU_CAN_TIMEOUT_MS))
+      {
+        vacuum_psi = 0.0f;
+        raw_map_adc = 0;
+      }
+      if (!isCanPacketFresh(nowMs, lastEnvPacketTime, FRONT_MCU_TIMEOUT_MS))
+      {
+        raw2 = 0;
+        temp_out = 40;
+        oil_level_t = 0;
+        ac_switch_state = 0;
+        fan_pwm_duty = 0;
+      }
     }
     portEXIT_CRITICAL(&dataMux);
 
@@ -583,6 +675,8 @@ static void canRxTask(void *pvParameters)
     {
       // Reset sequence/counter sync so the Front MCU's next power-up in POS2 syncs cleanly from frame #1
       seq_02_synced = false;
+      seq_05_synced = false;
+      seq_06_synced = false;
       inj_04_synced = false;
     }
     wasCanActive = canActive;

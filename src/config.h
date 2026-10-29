@@ -111,7 +111,7 @@ const unsigned long OFFLINE_CRANK_TIME_MS = 1200; // Cranking duration when Fron
 #define FRONT_MCU_TIMEOUT_MS 5000
 #define FRONT_MCU_CAN_TIMEOUT_MS 1000
 const unsigned long ENGINE_STALL_DEBOUNCE_MS = 1500; // Require 1.5s persistent 0 RPM before cutting ignition
-#define FRONT_MCU_CAN_SEND_INTERVAL_US 20000.0f      // Front MCU sends 0x02 every 20ms (50Hz) and 0x04 every 50ms (20Hz)
+#define FRONT_MCU_CAN_SEND_INTERVAL_US 20000.0f      // Front MCU sends 0x02 & 0x05 @ 20ms (50Hz), 0x04 @ 50ms (20Hz), 0x06 @ 100ms (10Hz)
 
 // Cross-core safe packet age check: Core 0's CAN RX task may stamp packetTime a few ms
 // after Core 1 sampled `now`, making (int32_t)(now - packetTime) slightly negative.

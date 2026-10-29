@@ -134,8 +134,11 @@ void setup()
   ledcSetup(0, 400, 10);      // channel, freq, resolution
   ledcAttachPin(FIELD_PIN, 0);
 
-  lastPacketTime = 0; // 0 = no Front MCU packet received yet (grace handled per-state)
-  startCanRxTask();   // Install TWAI & drain CAN RX on Core 0 (zero video V-Sync lag)
+  lastPacketTime = 0;     // 0 = no Front MCU packet received yet (grace handled per-state)
+  lastFastPacketTime = 0; // 0 = no 0x02 fast engine/speed frame received yet
+  lastVacPacketTime = 0;  // 0 = no 0x05 manifold vacuum/baro frame received yet
+  lastEnvPacketTime = 0;  // 0 = no 0x06 thermal/aux frame received yet
+  startCanRxTask();       // Install TWAI & drain CAN RX on Core 0 (zero video V-Sync lag)
 
   // Configure FreeRTOS task for regulator loop instead of hardware timer
   if (adcReady)
@@ -293,10 +296,10 @@ void loop()
 
   //================================ Read data from engine MCU
   //==============================================//
-  // CAN frames (0x02 @ 50Hz, 0x04 @ 20Hz) are drained continuously on Core 0 by CanRxTask.
+  // CAN frames (0x02 @ 50Hz, 0x05 @ 50Hz, 0x04 @ 20Hz, 0x06 @ 10Hz) are drained continuously on Core 0 by CanRxTask.
   // Front MCU is only powered in POS2 (IGN) and driving states; force 0 km/h when unpowered or timed out.
   bool frontMcuSpeedValid = isCanActiveState(currentState) &&
-                            isCanPacketFresh(now, lastPacketTime, FRONT_MCU_CAN_TIMEOUT_MS);
+                            isCanPacketFresh(now, lastFastPacketTime, FRONT_MCU_CAN_TIMEOUT_MS);
   spd_l = frontMcuSpeedValid ? constrain((int)spd_t, 0, 220) : 0;
   int spd_in = spd_l;
 
@@ -620,9 +623,9 @@ void loop()
     lastRpmUpdateTime = now;
   }
 
-  // `temp_out` is converted from `raw2` directly inside CanRxTask on Core 0 upon 0x02 arrival,
+  // `temp_out` is converted from `raw2` directly inside CanRxTask on Core 0 upon 0x06 arrival,
   // and `rpm` is zeroed atomically on Core 0 when CAN times out.
-  if (!isCanPacketFresh(now, lastPacketTime, FRONT_MCU_CAN_TIMEOUT_MS))
+  if (!isCanPacketFresh(now, lastFastPacketTime, FRONT_MCU_CAN_TIMEOUT_MS))
   {
     spd = 0;
   }
@@ -658,7 +661,7 @@ void loop()
 
     //--------------------------------------------------------------------------
     bool temp_valid = isCanActiveState(currentState) &&
-                      isCanPacketFresh(now, lastPacketTime, FRONT_MCU_TIMEOUT_MS);
+                      isCanPacketFresh(now, lastEnvPacketTime, FRONT_MCU_TIMEOUT_MS);
     int effective_temp = temp_valid ? temp_out : 40;
     fill2 = map(effective_temp, 40, 120, 0, TEMP_HEIGHT); // ----------for temp gauge
     int tick_y = 0;
@@ -744,7 +747,7 @@ void loop()
 
     total_fuel_liters += fuel_consumed_liters;
 
-    if (injector_state == 1 && rpm > 0)
+    if (dfco_cut_state == 1 && rpm > 0)
     {
       // Calculate fuel saved using the pre-cutoff net pulse width (fallback 1500us net)
       float net_saved_pulse_us = (last_active_inj_pulse_us >= 500.0f)

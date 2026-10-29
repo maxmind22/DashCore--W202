@@ -34,8 +34,9 @@ const int map_pin = A3;
 float map_adc_avg = (float)MAP_CALIB_ATM_DEFAULT;
 uint16_t map_atm_adc = MAP_CALIB_ATM_DEFAULT;
 float vac_psi = 0.0f;
-uint8_t vac_psi_x10 = 0;
-uint8_t baro_psi_x10 = 147;       // Default 14.7 PSI at sea level (147 in 0.1 PSI)
+uint16_t vac_psi_x100 = 0;     // Gauge vacuum in 0.01 PSI (0..1500 => 0.00..15.00 PSI)
+uint16_t baro_psi_x100 = 1470; // Barometric baseline in 0.01 PSI (default 14.70 PSI at sea level)
+bool baro_calibrated = false;  // True once atmospheric baseline was sampled with engine stopped (RPM == 0)
 bool map_sensor_fault = false;
 unsigned long lastMapReadTime = 0;
 
@@ -69,9 +70,10 @@ unsigned long lastMapReadTime = 0;
 #define OIL_CHECK_MIN_RPM 500      // Engine running qualification threshold
 
 // --- CAN ---
-#define CAN_FAST_SEND_INTERVAL_MS 20  // 0x02: Fast status, RPM, Vacuum/Baro (50 Hz, matches 20ms MAP & regulator)
+#define CAN_FAST_SEND_INTERVAL_MS 20  // 0x02 (Engine/Speed) & 0x05 (Vacuum/MAP) at 50 Hz
 #define CAN_TELEM_SEND_INTERVAL_MS 50 // 0x04: Cumulative injector & speed counters (20 Hz)
-#define CAN_TX_STAGGER_MS 5           // Minimum spacing between 0x02 & 0x04 so SPI/TXB0 never bursts
+#define CAN_ENV_SEND_INTERVAL_MS 100  // 0x06: Thermal, Oil, AC & Fan duty (10 Hz)
+#define CAN_TX_STAGGER_MS 4           // Minimum 4ms spacing between CAN TX frames so SPI/TXB0 never bursts
 #define CAN_SENSOR_READ_INTERVAL_MS 500
 
 uint8_t oil_level = 0;
@@ -99,6 +101,7 @@ bool injDisable = false;
 bool eco_inj_cut_cmd = false;
 bool eco_inj_cut_active = false;
 bool fan_active = false;
+uint8_t fan_duty = 0;
 
 float temp_avg = 0.0f;    // Float for EMA temp
 float acState_avg = 0.0f; // Float for EMA AC
@@ -107,6 +110,8 @@ float acState_avg = 0.0f; // Float for EMA AC
 unsigned long lastSpdCalculationTime = 0;
 unsigned long lastCan02SendTime = 0;
 unsigned long lastCan04SendTime = 0;
+unsigned long lastCan05SendTime = 0;
+unsigned long lastCan06SendTime = 0;
 unsigned long lastCanAnyTxTime = 0;
 unsigned long lastSensorTime = 0;
 
@@ -254,9 +259,11 @@ void loop()
   }
 
   //=================== Read MAP Sensor & Calculate Vacuum (Every 20ms) ===================//
+  static bool map_first_read_done = false;
   static bool map_initialized = false;
-  if (currentMillis - lastMapReadTime >= MAP_READ_INTERVAL_MS)
+  if (!map_first_read_done || currentMillis - lastMapReadTime >= MAP_READ_INTERVAL_MS)
   {
+    map_first_read_done = true;
     float map_raw = (float)analogRead(map_pin);
     if (map_raw < MAP_FAULT_MIN_ADC || map_raw > MAP_FAULT_MAX_ADC)
     {
@@ -279,6 +286,7 @@ void loop()
       if (rpm == 0 && map_adc_avg >= 500.0f && map_adc_avg <= 950.0f)
       {
         map_atm_adc = (uint16_t)(map_adc_avg + 0.5f);
+        baro_calibrated = true;
       }
     }
 
@@ -288,23 +296,33 @@ void loop()
     float baro_psi_f = 14.7f + ((float)map_atm_adc - (float)MAP_CALIB_ATM_DEFAULT) * MAP_ADC_TO_PSI;
     if (baro_psi_f > 16.5f) baro_psi_f = 16.5f;
     if (baro_psi_f < 8.0f)  baro_psi_f = 8.0f;
-    baro_psi_x10 = (uint8_t)(baro_psi_f * 10.0f + 0.5f);
+    baro_psi_x100 = (uint16_t)(baro_psi_f * 100.0f + 0.5f);
 
-    // Gauge vacuum below atmospheric: delta from barometric reference
-    float vac_counts = (float)map_atm_adc - map_adc_avg;
-    if (vac_counts < 0.0f)
-      vac_counts = 0.0f;
-    vac_psi = vac_counts * MAP_ADC_TO_PSI;
-    if (vac_psi > 15.0f)
-      vac_psi = 15.0f;
-    vac_psi_x10 = (uint8_t)(vac_psi * 10.0f + 0.5f);
+    // Gauge vacuum below atmospheric: delta from barometric reference (0.00 PSI when stopped)
+    if (rpm == 0)
+    {
+      vac_psi = 0.0f;
+      vac_psi_x100 = 0;
+    }
+    else
+    {
+      float vac_counts = (float)map_atm_adc - map_adc_avg;
+      if (vac_counts < 0.0f)
+        vac_counts = 0.0f;
+      vac_psi = vac_counts * MAP_ADC_TO_PSI;
+      if (vac_psi > 15.0f)
+        vac_psi = 15.0f;
+      vac_psi_x100 = (uint16_t)(vac_psi * 100.0f + 0.5f);
+    }
 
     lastMapReadTime = currentMillis;
   }
 
   //=================== Read Sensors & Control Fan (Every 500ms) ======================//
-  if (currentMillis - lastSensorTime >= CAN_SENSOR_READ_INTERVAL_MS)
+  static bool sensor_first_read_done = false;
+  if (!sensor_first_read_done || currentMillis - lastSensorTime >= CAN_SENSOR_READ_INTERVAL_MS)
   {
+    sensor_first_read_done = true;
     float temp_t = analogRead(tempPin);
     static bool temp_initialized = false;
     if (!temp_initialized)
@@ -355,7 +373,8 @@ void loop()
       dutyCycle_ac = constrain(dutyCycle_ac, FAN_DUTY_MIN, FAN_DUTY_MAX);
     }
     int dutyCycle = max(dutyCycle_temp, dutyCycle_ac);
-    analogWrite(fan, dutyCycle);
+    fan_duty = (uint8_t)dutyCycle;
+    analogWrite(fan, fan_duty);
 
     // --- OEM-Style Oil Level switch (Mercedes W202 / S11) ---
     // Hardware: 47k pull-up to D6 -> Sensor -> GND.
@@ -641,48 +660,59 @@ void loop()
     digitalWriteFast(regulator_pin, LOW); // De-energize field disconnect relay
   }
 
-  //================= Send to cabin MCU (ESP32): 0x02 (Every 20ms) & 0x04 (Every 50ms, Staggered) ===============//
+  //================= Send to cabin MCU (ESP32): 0x02 (20ms), 0x05 (20ms), 0x04 (50ms), 0x06 (100ms), Staggered ===============//
+  static bool first_06_sent = false;
   if (currentMillis - lastCan02SendTime >= CAN_FAST_SEND_INTERVAL_MS)
   {
     static uint8_t seq_02 = 0;
 
-    uint8_t injDisable_s = (uint8_t)(injDisable || eco_inj_cut_active);
     uint16_t rpm_s = (uint16_t)rpm;
-    uint16_t temp_s = (uint16_t)temp_avg;
     uint8_t th_state = (uint8_t)digitalReadFast(th_pin); // 1 = closed (idle), 0 = open
-    uint8_t ac_state = (acState_avg >= FAN_AC_MIN_ADC) ? 1 : 0;
 
-    // Send barometric baseline when engine is stopped (rpm == 0, where vacuum is 0.0 PSI anyway).
-    // When engine is running (rpm > 0), send live vacuum 100% of the time without interruption.
-    bool send_baro = (rpm == 0);
-    uint8_t vac_or_baro = send_baro ? baro_psi_x10 : vac_psi_x10;
-
-    // CAN ID 0x02: Instantaneous Status & Vacuum/Baro (DLC 8)
+    // CAN ID 0x02: Fast Engine & Motion Telemetry (50 Hz, DLC 8) — Fully unpacked
     canMsgTx.can_id = 0x02;
     canMsgTx.can_dlc = 8;
-    canMsgTx.data[0] = temp_s & 0xFF;        // Raw Temp ADC low byte
-    canMsgTx.data[1] = (temp_s >> 8) & 0xFF; // Raw Temp ADC high byte
-    canMsgTx.data[2] = (uint8_t)spd_s;       // Vehicle speed (0..220 km/h)
-    canMsgTx.data[3] = rpm_s & 0xFF;         // RPM low byte
-    canMsgTx.data[4] = (rpm_s >> 8) & 0xFF;  // RPM high byte
-    canMsgTx.data[5] = vac_or_baro;          // Vacuum or Baro in 0.1 PSI
-    canMsgTx.data[6] = (injDisable_s & 0x01) |
-                       ((oil_level & 0x01) << 1) |
-                       ((th_state & 0x01) << 2) |
-                       // Bit 3 reserved
-                       ((ac_state & 0x01) << 4) |
-                       ((send_baro ? 1 : 0) << 5) |
-                       ((map_sensor_fault ? 1 : 0) << 6);
+    canMsgTx.data[0] = rpm_s & 0xFF;               // RPM low byte
+    canMsgTx.data[1] = (rpm_s >> 8) & 0xFF;        // RPM high byte
+    canMsgTx.data[2] = spd_s & 0xFF;               // Vehicle speed low byte (km/h)
+    canMsgTx.data[3] = (spd_s >> 8) & 0xFF;        // Vehicle speed high byte (km/h)
+    canMsgTx.data[4] = injDisable ? 1 : 0;         // DFCO fuel cut active (0 or 1)
+    canMsgTx.data[5] = eco_inj_cut_active ? 1 : 0; // Auto Start-Stop injector cut active (0 or 1)
+    canMsgTx.data[6] = th_state ? 1 : 0;           // Throttle idle switch (1 = closed/idle, 0 = open)
     canMsgTx.data[7] = seq_02++;
     mcp2515.sendMessage(&canMsgTx);
 
     lastCan02SendTime = currentMillis;
     lastCanAnyTxTime = currentMillis;
   }
+  else if ((currentMillis - lastCan05SendTime >= CAN_FAST_SEND_INTERVAL_MS) &&
+           (currentMillis - lastCanAnyTxTime >= CAN_TX_STAGGER_MS))
+  {
+    static uint8_t seq_05 = 0;
+
+    uint16_t baro_out = (!map_sensor_fault && baro_calibrated) ? baro_psi_x100 : 0;
+    uint16_t map_adc_s = (uint16_t)(map_adc_avg + 0.5f);
+
+    // CAN ID 0x05: Manifold Vacuum & Barometric Telemetry (50 Hz, DLC 8) — Fully unpacked
+    canMsgTx.can_id = 0x05;
+    canMsgTx.can_dlc = 8;
+    canMsgTx.data[0] = vac_psi_x100 & 0xFF;        // Manifold vacuum low byte (0.01 PSI)
+    canMsgTx.data[1] = (vac_psi_x100 >> 8) & 0xFF; // Manifold vacuum high byte (0.01 PSI)
+    canMsgTx.data[2] = baro_out & 0xFF;            // Barometric baseline low byte (0.01 PSI, 0 if uncalibrated)
+    canMsgTx.data[3] = (baro_out >> 8) & 0xFF;     // Barometric baseline high byte (0.01 PSI)
+    canMsgTx.data[4] = map_adc_s & 0xFF;           // Filtered MAP ADC low byte (0..1023)
+    canMsgTx.data[5] = (map_adc_s >> 8) & 0xFF;    // Filtered MAP ADC high byte (0..1023)
+    canMsgTx.data[6] = map_sensor_fault ? 1 : 0;   // MAP sensor fault (0 = OK, 1 = Fault)
+    canMsgTx.data[7] = seq_05++;
+    mcp2515.sendMessage(&canMsgTx);
+
+    lastCan05SendTime = currentMillis;
+    lastCanAnyTxTime = currentMillis;
+  }
   else if ((currentMillis - lastCan04SendTime >= CAN_TELEM_SEND_INTERVAL_MS) &&
            (currentMillis - lastCanAnyTxTime >= CAN_TX_STAGGER_MS))
   {
-    // Atomic snapshot of cumulative counters (staggered >= 5ms from 0x02 so MCP2515 TXB0 is
+    // Atomic snapshot of cumulative counters (staggered >= 4ms from other frames so MCP2515 TXB0 is
     // guaranteed idle and SPI transactions never run back-to-back in the same loop pass).
     // Only update injector snapshot when injector is not mid-fire (!inj_active)
     // to guarantee inj_time and inj_pulses reflect only complete pulses.
@@ -714,6 +744,31 @@ void loop()
     mcp2515.sendMessage(&canMsgTx);
 
     lastCan04SendTime = currentMillis;
+    lastCanAnyTxTime = currentMillis;
+  }
+  else if ((!first_06_sent || (currentMillis - lastCan06SendTime >= CAN_ENV_SEND_INTERVAL_MS)) &&
+           (currentMillis - lastCanAnyTxTime >= CAN_TX_STAGGER_MS))
+  {
+    static uint8_t seq_06 = 0;
+
+    uint16_t temp_s = (uint16_t)(temp_avg + 0.5f);
+    uint8_t ac_state = (acState_avg >= FAN_AC_MIN_ADC) ? 1 : 0;
+
+    // CAN ID 0x06: Thermal & Auxiliary Status (10 Hz, DLC 8) — Fully unpacked
+    canMsgTx.can_id = 0x06;
+    canMsgTx.can_dlc = 8;
+    canMsgTx.data[0] = temp_s & 0xFF;        // Raw Temp ADC low byte
+    canMsgTx.data[1] = (temp_s >> 8) & 0xFF; // Raw Temp ADC high byte
+    canMsgTx.data[2] = oil_level ? 1 : 0;    // Filtered oil level warning (0 = OK, 1 = Low)
+    canMsgTx.data[3] = ac_state;             // AC request state (0 = OFF, 1 = ON)
+    canMsgTx.data[4] = fan_duty;             // Radiator fan PWM duty (0..255)
+    canMsgTx.data[5] = 0;                    // Reserved
+    canMsgTx.data[6] = 0;                    // Reserved
+    canMsgTx.data[7] = seq_06++;
+    mcp2515.sendMessage(&canMsgTx);
+
+    first_06_sent = true;
+    lastCan06SendTime = currentMillis;
     lastCanAnyTxTime = currentMillis;
   }
   // Serial.println(map_adc_avg);
