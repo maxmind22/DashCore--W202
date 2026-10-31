@@ -2,6 +2,7 @@
 #include "pushstart.h"
 #include <NimBLEDevice.h>
 #include <Preferences.h>
+#include <esp_heap_caps.h>
 #include <mbedtls/aes.h>
 #include <ctype.h>
 
@@ -17,6 +18,14 @@
 #define CHARACTERISTIC_UUID "87654321-4321-4321-4321-cba987654321"
 
 #define DEBUG_PRINT_SECRETS 0 // Set 1 to print raw IRK keys and pairing PIN to Serial
+
+// --- BLE teardown & WDT safety timing ---
+static const unsigned long BLE_PAIRING_SETTLE_MS   = 100; // Let Core 0 ble_sm_persist_keys() + LL ACK finish before disconnect
+static const unsigned long BLE_DISCONNECT_DRAIN_MS = 500; // Max non-blocking wait for LL_TERMINATE_IND completion
+static const unsigned long BLE_SYNC_DRAIN_MS       = 200; // Max synchronous disconnect wait (e.g. before deep sleep)
+static const uint32_t      BLE_WDT_DEINIT_TIMEOUT_S = 3;  // > NimBLE's 2000ms ble_hs_stop timeout (Core 1 WDT is 1s)
+static const uint32_t      BLE_WDT_NORMAL_TIMEOUT_S = 1;  // Matches setup() esp_task_wdt_init(1, true)
+static const uint16_t      ESP32_MAX_BLE_CONN_HANDLES = 9; // ESP32 controller supports handles 0..8
 
 // --- NVS-persisted IRK store (pair once → detected forever) ---
 #define MAX_PERSISTED_IRKS 8
@@ -43,18 +52,99 @@ static bool isZeroKey(const uint8_t key[16])
   return true;
 }
 
-static volatile bool authGrantedPending = false;
+static volatile bool authTonePending = false;
+static volatile bool bleTeardownPending = false;
+static volatile bool pairingBondSyncPending = false;
+
+static bool teardownDrainActive = false;
+static bool teardownDisconnectSent = false;
+static unsigned long teardownStartMs = 0;
 static unsigned long lastScanRefreshMs = 0;
 
+static int secStoreIteratorCallback(int obj_type, union ble_store_value *val, void *cookie);
+
+// Temporarily widen Task WDT only if the calling task (Core 1 loopTask) is currently subscribed.
+// NimBLEDevice::deinit() / ble_hs_stop() can block up to 2000ms if a peer drops out of range,
+// which would otherwise trip the 1s panic WDT configured in setup().
+static bool extendLoopTaskWdtForBLE()
+{
+  if (esp_task_wdt_status(nullptr) == ESP_OK)
+  {
+    esp_task_wdt_reset();
+    esp_task_wdt_init(BLE_WDT_DEINIT_TIMEOUT_S, true);
+    esp_task_wdt_reset();
+    return true;
+  }
+  return false;
+}
+
+static void restoreLoopTaskWdtAfterBLE(bool extended)
+{
+  if (extended)
+  {
+    esp_task_wdt_reset();
+    esp_task_wdt_init(BLE_WDT_NORMAL_TIMEOUT_S, true);
+    esp_task_wdt_reset();
+  }
+}
+
+static void stopScanAndAdvertising()
+{
+  if (!bleInitialized && !NimBLEDevice::getInitialized())
+  {
+    bleScanning = false;
+    return;
+  }
+
+  NimBLEScan *pBLEScan = NimBLEDevice::getScan();
+  if (pBLEScan != nullptr && pBLEScan->isScanning())
+  {
+    pBLEScan->stop();
+    pBLEScan->clearResults();
+  }
+  bleScanning = false;
+
+  NimBLEAdvertising *pAdv = NimBLEDevice::getAdvertising();
+  if (pAdv != nullptr && pAdv->isAdvertising())
+  {
+    pAdv->stop();
+  }
+}
+
+// Thread-safe via NimBLE's internal ble_hs_lock(); avoids copying NimBLEServer's unguarded std::vector across cores.
+static size_t terminateAndCountOpenConnections(bool initiateTerminate)
+{
+  if (!NimBLEDevice::getInitialized())
+    return 0;
+
+  size_t openCount = 0;
+  for (uint16_t handle = 0; handle < ESP32_MAX_BLE_CONN_HANDLES; handle++)
+  {
+    if (ble_gap_conn_find(handle, nullptr) == 0)
+    {
+      openCount++;
+      if (initiateTerminate)
+      {
+        ble_gap_terminate(handle, BLE_ERR_REM_USER_CONN_TERM);
+      }
+    }
+  }
+  return openCount;
+}
 
 // Centralized authorization helper
-static void grantPhoneAuthorization(const char *reason, const char *deviceInfo)
+static void grantPhoneAuthorization(const char *reason, const char *deviceInfo, bool fromPairing = false)
 {
   if (phoneAuthorized || isPhoneAuthorized())
     return;
 
+  if (fromPairing)
+  {
+    pairingBondSyncPending = true;
+  }
   phoneAuthorized = true;
-  authGrantedPending = true;
+  authTonePending = true;
+  bleTeardownPending = true;
 
   Serial.printf("\n=======================================================\n");
   Serial.printf("🎉 [SECURITY] Authorization Granted: %s\n", reason ? reason : "Phone Authorized");
@@ -67,12 +157,69 @@ static void grantPhoneAuthorization(const char *reason, const char *deviceInfo)
 
 void processBLEEvents()
 {
-  if (authGrantedPending)
+  if (authTonePending)
   {
-    authGrantedPending = false;
-    teardownBLESecurity();
-    Serial.println("[SECURITY] Bluetooth radio completely stopped & disabled.\n");
+    authTonePending = false;
     playAuthSuccessTone();
+  }
+
+  if (bleTeardownPending)
+  {
+    unsigned long nowMs = millis();
+
+    if (!teardownDrainActive)
+    {
+      teardownDrainActive = true;
+      teardownStartMs = nowMs;
+      teardownDisconnectSent = false;
+
+      // Immediately stop active scanning and connectable advertising
+      stopScanAndAdvertising();
+
+      if (!pairingBondSyncPending)
+      {
+        terminateAndCountOpenConnections(true);
+        teardownDisconnectSent = true;
+      }
+    }
+
+    // After SMP pairing, ble_gap_enc_event() fires right BEFORE ble_sm_persist_keys() on Core 0.
+    // Give Core 0 and the Link Layer a brief non-blocking window to commit the bond and ACK the
+    // final SMP PDU before extracting the new IRK and disconnecting the phone.
+    if (pairingBondSyncPending)
+    {
+      if (nowMs - teardownStartMs < BLE_PAIRING_SETTLE_MS)
+      {
+        return;
+      }
+      pairingBondSyncPending = false;
+      if (NimBLEDevice::getInitialized())
+      {
+        bool irkFound = false;
+        ble_store_iterate(BLE_STORE_OBJ_TYPE_PEER_SEC, secStoreIteratorCallback, &irkFound);
+      }
+      teardownStartMs = nowMs;
+      terminateAndCountOpenConnections(true);
+      teardownDisconnectSent = true;
+    }
+
+    if (!teardownDisconnectSent)
+    {
+      terminateAndCountOpenConnections(true);
+      teardownDisconnectSent = true;
+    }
+
+    // Drain any open GATT connection non-blockingly across loop() frames so video rendering
+    // stays uninterrupted and ble_hs_stop() sees 0 open connections on deinit.
+    if (terminateAndCountOpenConnections(false) > 0 &&
+        (nowMs - teardownStartMs < BLE_DISCONNECT_DRAIN_MS))
+    {
+      return;
+    }
+
+    teardownBLESecurity();
+    Serial.printf("[SECURITY] Bluetooth stack deinitialized & radio powered off (free internal heap: %u B).\n\n",
+                  (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL));
     return;
   }
 
@@ -412,7 +559,7 @@ class SecurityServerCallbacks : public NimBLEServerCallbacks
     if (desc == nullptr)
       return;
 
-    if (phoneAuthorized || isPhoneAuthorized())
+    if (phoneAuthorized || isPhoneAuthorized() || bleTeardownPending)
     {
       pServer->disconnect(desc->conn_handle);
       return;
@@ -441,8 +588,14 @@ class SecurityServerCallbacks : public NimBLEServerCallbacks
 
   void onAuthenticationComplete(ble_gap_conn_desc *desc) override
   {
-    if (desc == nullptr || phoneAuthorized || isPhoneAuthorized())
+    if (desc == nullptr)
       return;
+
+    if (phoneAuthorized || isPhoneAuthorized() || bleTeardownPending)
+    {
+      NimBLEDevice::getServer()->disconnect(desc->conn_handle);
+      return;
+    }
 
     NimBLEAddress peerAddr(desc->peer_ota_addr);
     NimBLEAddress idAddr(desc->peer_id_addr);
@@ -459,25 +612,17 @@ class SecurityServerCallbacks : public NimBLEServerCallbacks
 
     Serial.printf("[SECURITY] Pairing / authentication successful for %s (bonded + encrypted)\n", devMacStr.c_str());
 
-    // Extract live IRK from bond store
-    bool irkFound = false;
-    ble_store_iterate(BLE_STORE_OBJ_TYPE_PEER_SEC, secStoreIteratorCallback, &irkFound);
-
     std::string matchDesc;
     if (isAddressAuthorized(desc->peer_ota_addr.val, devMacStr.c_str(), matchDesc) ||
         (idMacStr != "00:00:00:00:00:00" && isAddressAuthorized(desc->peer_id_addr.val, idMacStr.c_str(), matchDesc)))
     {
-      grantPhoneAuthorization("Authorized Phone Connected & Authenticated!", matchDesc.c_str());
+      grantPhoneAuthorization("Authorized Phone Connected & Authenticated!", matchDesc.c_str(), true);
       return;
     }
 
-    // Authenticated with pairing PIN passkey — auto-persist IRK for future passive detection
-    grantPhoneAuthorization("Phone Authenticated via PIN Passkey!", devMacStr.c_str());
-
-    if (dynamicIRKPresent)
-    {
-      persistNewIRK(dynamicBondedIRK);
-    }
+    // Authenticated with pairing PIN passkey — processBLEEvents() will sync the newly committed
+    // bond IRK to NVS once Core 0's ble_sm_persist_keys() finishes, then disconnect & deinit BLE.
+    grantPhoneAuthorization("Phone Authenticated via PIN Passkey!", devMacStr.c_str(), true);
   }
 
   uint32_t onPassKeyRequest() override
@@ -504,7 +649,8 @@ class SecurityServerCallbacks : public NimBLEServerCallbacks
 
   void onDisconnect(NimBLEServer *pServer) override
   {
-    if (!phoneAuthorized && !isPhoneAuthorized())
+    (void)pServer;
+    if (!phoneAuthorized && !isPhoneAuthorized() && !bleTeardownPending && !teardownDrainActive)
     {
       NimBLEDevice::startAdvertising();
     }
@@ -515,7 +661,7 @@ class SecurityScanCallbacks : public NimBLEAdvertisedDeviceCallbacks
 {
   void onResult(NimBLEAdvertisedDevice *advertisedDevice) override
   {
-    if (phoneAuthorized || isPhoneAuthorized() || advertisedDevice == nullptr)
+    if (phoneAuthorized || isPhoneAuthorized() || bleTeardownPending || advertisedDevice == nullptr)
       return;
 
     std::string devMacStr = advertisedDevice->getAddress().toString();
@@ -560,12 +706,19 @@ static void configureScan(NimBLEScan *pBLEScan)
 
 void setupBLESecurity()
 {
-  if (phoneAuthorized)
+  if (isPhoneAuthorized())
     return;
+
+  bleTeardownPending = false;
+  teardownDrainActive = false;
+  teardownDisconnectSent = false;
 
   if (!bleInitialized)
   {
+    bool wdtExtended = extendLoopTaskWdtForBLE();
     NimBLEDevice::init(BLE_DEVICE_NAME);
+    restoreLoopTaskWdtAfterBLE(wdtExtended);
+
     NimBLEDevice::setSecurityAuth(true, true, false);       // Bonding + MITM enforced, SC off for compatibility
     NimBLEDevice::setSecurityIOCap(BLE_HS_IO_DISPLAY_ONLY); // ESP32 "displays" PIN, phone must type it
 
@@ -585,7 +738,8 @@ void setupBLESecurity()
     }
 
     NimBLEServer *pServer = NimBLEDevice::createServer();
-    pServer->setCallbacks(&serverCallbacks);
+    pServer->advertiseOnDisconnect(false);          // Prevent NimBLEServer from auto-restarting adv during auth teardown
+    pServer->setCallbacks(&serverCallbacks, false); // deleteCallbacks = false: serverCallbacks is static BSS
 
     NimBLEService *pService = pServer->createService(SERVICE_UUID);
     NimBLECharacteristic *pChar = pService->createCharacteristic(
@@ -629,21 +783,71 @@ void setupBLESecurity()
 
 void teardownBLESecurity()
 {
-  if (bleInitialized)
+  bleTeardownPending = false;
+  teardownDrainActive = false;
+  teardownDisconnectSent = false;
+
+  const bool nimbleUp = NimBLEDevice::getInitialized();
+  const esp_bt_controller_status_t btStatus = esp_bt_controller_get_status();
+
+  if (bleInitialized || nimbleUp || btStatus != ESP_BT_CONTROLLER_STATUS_IDLE)
   {
-    NimBLEScan *pBLEScan = NimBLEDevice::getScan();
-    if (pBLEScan != nullptr && pBLEScan->isScanning())
+    if (nimbleUp)
     {
-      pBLEScan->stop();
-      pBLEScan->clearResults();
+      if (pairingBondSyncPending)
+      {
+        pairingBondSyncPending = false;
+        bool irkFound = false;
+        ble_store_iterate(BLE_STORE_OBJ_TYPE_PEER_SEC, secStoreIteratorCallback, &irkFound);
+      }
+
+      stopScanAndAdvertising();
+
+      // If called synchronously while a link is still active (e.g. enterPowerDownSleep),
+      // drain the disconnect cleanly before ble_hs_stop().
+      if (terminateAndCountOpenConnections(true) > 0)
+      {
+        unsigned long drainStartMs = millis();
+        while (terminateAndCountOpenConnections(false) > 0 &&
+               (millis() - drainStartMs < BLE_SYNC_DRAIN_MS))
+        {
+          if (esp_task_wdt_status(nullptr) == ESP_OK)
+          {
+            esp_task_wdt_reset();
+          }
+          delay(5);
+        }
+      }
     }
-    NimBLEAdvertising *pAdv = NimBLEDevice::getAdvertising();
-    if (pAdv != nullptr && pAdv->isAdvertising())
+    else
     {
-      pAdv->stop();
+      pairingBondSyncPending = false;
     }
+
+    bool wdtExtended = extendLoopTaskWdtForBLE();
+    if (nimbleUp)
+    {
+      NimBLEDevice::deinit(true);
+    }
+    if (esp_bt_controller_get_status() == ESP_BT_CONTROLLER_STATUS_ENABLED)
+    {
+      esp_bt_controller_disable();
+    }
+    if (esp_bt_controller_get_status() == ESP_BT_CONTROLLER_STATUS_INITED)
+    {
+      esp_bt_controller_deinit();
+    }
+    restoreLoopTaskWdtAfterBLE(wdtExtended);
+
+    bleInitialized = false;
     bleScanning = false;
   }
+  else
+  {
+    pairingBondSyncPending = false;
+    bleScanning = false;
+  }
+
   memset(dynamicBondedIRK, 0, sizeof(dynamicBondedIRK));
   dynamicIRKPresent = false;
 }
@@ -656,6 +860,28 @@ bool isPhoneAuthorized()
 void setPhoneAuthBypass(bool bypass)
 {
   phoneAuthBypassed = bypass;
+  if (bypass)
+  {
+    if (bleInitialized || NimBLEDevice::getInitialized() ||
+        esp_bt_controller_get_status() != ESP_BT_CONTROLLER_STATUS_IDLE)
+    {
+      bleTeardownPending = true;
+    }
+  }
+  else if (!phoneAuthorized)
+  {
+    bleTeardownPending = false;
+    teardownDrainActive = false;
+    teardownDisconnectSent = false;
+    if (!bleInitialized)
+    {
+      setupBLESecurity();
+    }
+    else if (!isBLEScanning())
+    {
+      triggerBLERescan(BLE_RESCAN_TIMEOUT_MS);
+    }
+  }
 }
 
 void triggerBLERescan(unsigned long durationMs)

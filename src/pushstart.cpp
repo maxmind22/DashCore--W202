@@ -142,7 +142,7 @@ void processUnlockSignals(unsigned long now)
       }
       else if (unlockPulseCount == 6)
       {
-        phoneAuthBypassed = !phoneAuthBypassed;
+        setPhoneAuthBypass(!phoneAuthBypassed);
         if (phoneAuthBypassed)
         {
           queueTone(1, 800, 0, now); // 1 long beep (800ms) = phone auth bypassed

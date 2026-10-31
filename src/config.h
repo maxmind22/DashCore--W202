@@ -1,9 +1,9 @@
 #pragma once
 
 #include <Adafruit_ADS1X15.h>
+#include <Arduino.h>
 #include <ESP_8_BIT_GFX.h>
 #include <Preferences.h>
-#include <WiFi.h>
 #include <Wire.h>
 #include <digitalWriteFast.h>
 #include <driver/dac.h>

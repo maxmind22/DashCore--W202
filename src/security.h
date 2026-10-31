@@ -6,7 +6,7 @@
 // Initialize BLE scanner and start initial scan window (e.g., on boot/wake)
 void setupBLESecurity();
 
-// Gracefully stop scan and completely power down BLE radio to avoid interference
+// Gracefully stop scan/advertising, terminate GATT links, and deinitialize BLE stack & controller
 void teardownBLESecurity();
 
 // Returns true if phone has been authenticated or if emergency bypass is active

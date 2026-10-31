@@ -13,7 +13,7 @@
 // W202 C200 instrument cluster speed pulse (205/55R16, 48 ABS teeth, falling edge)
 #define PULSES_PER_KM 24714UL
 #define SPD_WINDOW_MS 100UL
-#define SPD_MIN_EDGE_US 300UL        // Edge debounce: 220 km/h = ~660 us between pulses
+#define SPD_MIN_EDGE_US 300UL         // Edge debounce: 220 km/h = ~660 us between pulses
 #define SPD_STOP_TIMEOUT_US 1000000UL // No pulse for 1 s => 0 km/h (1 pulse/s = 0.15 km/h)
 #define RPM_STALE_TIMEOUT_US 1000000UL
 
@@ -28,8 +28,8 @@ const int map_pin = A3;
 #define MAP_CALIB_ATM_DEFAULT 780 // ~3.8V at sea level atmospheric pressure (~101.3 kPa)
 #define MAP_ADC_TO_PSI 0.02035f   // Conversion factor from ADC counts to PSI vacuum
 #define MAP_READ_INTERVAL_MS 20
-#define MAP_FAULT_MIN_ADC 10      // Broken wire / ground short
-#define MAP_FAULT_MAX_ADC 1015    // 5V short / disconnected pull-up
+#define MAP_FAULT_MIN_ADC 10   // Broken wire / ground short
+#define MAP_FAULT_MAX_ADC 1015 // 5V short / disconnected pull-up
 
 float map_adc_avg = (float)MAP_CALIB_ATM_DEFAULT;
 uint16_t map_atm_adc = MAP_CALIB_ATM_DEFAULT;
@@ -294,8 +294,10 @@ void loop()
     // referenced to the nominal 780 ADC = 14.7 PSI calibration point. (The sensor has an
     // output offset, so scaling proportionally through 0 ADC would mis-scale baro changes.)
     float baro_psi_f = 14.7f + ((float)map_atm_adc - (float)MAP_CALIB_ATM_DEFAULT) * MAP_ADC_TO_PSI;
-    if (baro_psi_f > 16.5f) baro_psi_f = 16.5f;
-    if (baro_psi_f < 8.0f)  baro_psi_f = 8.0f;
+    if (baro_psi_f > 16.5f)
+      baro_psi_f = 16.5f;
+    if (baro_psi_f < 8.0f)
+      baro_psi_f = 8.0f;
     baro_psi_x100 = (uint16_t)(baro_psi_f * 100.0f + 0.5f);
 
     // Gauge vacuum below atmospheric: delta from barometric reference (0.00 PSI when stopped)
@@ -669,7 +671,7 @@ void loop()
     uint16_t rpm_s = (uint16_t)rpm;
     uint8_t th_state = (uint8_t)digitalReadFast(th_pin); // 1 = closed (idle), 0 = open
 
-    // CAN ID 0x02: Fast Engine & Motion Telemetry (50 Hz, DLC 8) — Fully unpacked
+    // CAN ID 0x02: Fast Engine & Motion Telemetry (50 Hz, DLC 8)
     canMsgTx.can_id = 0x02;
     canMsgTx.can_dlc = 8;
     canMsgTx.data[0] = rpm_s & 0xFF;               // RPM low byte
@@ -693,7 +695,7 @@ void loop()
     uint16_t baro_out = (!map_sensor_fault && baro_calibrated) ? baro_psi_x100 : 0;
     uint16_t map_adc_s = (uint16_t)(map_adc_avg + 0.5f);
 
-    // CAN ID 0x05: Manifold Vacuum & Barometric Telemetry (50 Hz, DLC 8) — Fully unpacked
+    // CAN ID 0x05: Manifold Vacuum & Barometric Telemetry (50 Hz, DLC 8)
     canMsgTx.can_id = 0x05;
     canMsgTx.can_dlc = 8;
     canMsgTx.data[0] = vac_psi_x100 & 0xFF;        // Manifold vacuum low byte (0.01 PSI)

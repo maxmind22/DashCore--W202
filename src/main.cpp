@@ -110,8 +110,6 @@ void setup()
                            // exceeds this
     adc.setDataRate(RATE_ADS1115_250SPS);
   }
-  WiFi.mode(WIFI_OFF);
-  WiFi.disconnect(true);
   setupBLESecurity(); // Initialize BLE scanner to detect phone (auto-shuts down upon detection)
   tv.begin();
   tv.copyAfterSwap = true;
