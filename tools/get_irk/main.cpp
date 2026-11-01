@@ -123,14 +123,17 @@ class ServerCallbacks : public NimBLEServerCallbacks
 
     NimBLEAddress peerAddr(desc->peer_ota_addr);
     NimBLEAddress idAddr(desc->peer_id_addr);
+    std::string peerMac = peerAddr.toString();
+    std::string idMac = idAddr.toString();
+    bool hasDistinctIdMac = (idMac != "00:00:00:00:00:00" && idMac != peerMac);
 
     Serial.println("\n=======================================================");
     Serial.println("🎉 PAIRING SUCCESSFUL!");
     Serial.println("=======================================================");
-    Serial.printf("Connected Device MAC:  %s\n", peerAddr.toString().c_str());
-    if (idAddr.toString() != "00:00:00:00:00:00" && idAddr.toString() != peerAddr.toString())
+    Serial.printf("Connected Device MAC:  %s\n", peerMac.c_str());
+    if (hasDistinctIdMac)
     {
-      Serial.printf("Identity MAC (Static): %s\n", idAddr.toString().c_str());
+      Serial.printf("Identity MAC (Static): %s\n", idMac.c_str());
     }
 
     int numBonds = NimBLEDevice::getNumBonds();
@@ -144,10 +147,10 @@ class ServerCallbacks : public NimBLEServerCallbacks
     Serial.println("📱 [STATIC / IDENTITY MAC ADDRESS (For Android 5.0.1 / Whitelisting)]");
     Serial.println("Add this MAC address to BLE_AUTHORIZED_MACS in src/secrets.h / src/config.h:");
     Serial.println("------------------------------------------------------------");
-    Serial.printf("    \"%s\",\n", peerAddr.toString().c_str());
-    if (idAddr.toString() != "00:00:00:00:00:00" && idAddr.toString() != peerAddr.toString())
+    Serial.printf("    \"%s\",\n", peerMac.c_str());
+    if (hasDistinctIdMac)
     {
-      Serial.printf("    \"%s\",\n", idAddr.toString().c_str());
+      Serial.printf("    \"%s\",\n", idMac.c_str());
     }
     Serial.println("------------------------------------------------------------\n");
   }
@@ -157,12 +160,14 @@ class ScanCallbacks : public NimBLEAdvertisedDeviceCallbacks
 {
   void onResult(NimBLEAdvertisedDevice *advertisedDevice) override
   {
-    std::string name = advertisedDevice->getName();
-    std::string mac = advertisedDevice->getAddress().toString();
-    int rssi = advertisedDevice->getRSSI();
+    if (!advertisedDevice->haveName())
+      return;
 
+    std::string name = advertisedDevice->getName();
     if (name.length() > 0)
     {
+      std::string mac = advertisedDevice->getAddress().toString();
+      int rssi = advertisedDevice->getRSSI();
       Serial.printf("[SCAN] Name: %-20s | MAC: %s | RSSI: %d dBm\n", name.c_str(), mac.c_str(), rssi);
     }
   }
@@ -181,6 +186,7 @@ void setup()
   Serial.println("==================================================");
 
   // Initialize NimBLE with passcode bonding enabled
+  NimBLEDevice::setScanDuplicateCacheSize(10);
   NimBLEDevice::init(SETUP_DEVICE_NAME);
   NimBLEDevice::setSecurityAuth(true, true, true); // bonding, mitm, sc
   NimBLEDevice::setSecurityIOCap(BLE_HS_IO_DISPLAY_ONLY);
@@ -214,6 +220,7 @@ void setup()
   // Start background scan to discover Android MAC addresses
   NimBLEScan *pScan = NimBLEDevice::getScan();
   pScan->setAdvertisedDeviceCallbacks(&scanCallbacks, false);
+  pScan->setMaxResults(0); // Callbacks only: prevent unbounded heap accumulation
   pScan->setActiveScan(true);
   pScan->setDuplicateFilter(true);
   pScan->setInterval(100);

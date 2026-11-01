@@ -1,5 +1,20 @@
 #include "fuel.h"
-#include "display.h"
+#include "globals.h"
+#include <ESP_8_BIT_GFX.h>
+#include <Preferences.h>
+
+struct CalibrationPoint {
+  int16_t rawValue;
+  float percent;
+};
+
+static constexpr CalibrationPoint calibrationTable[] = {
+    {1326, 0.0f},   {3383, 4.9f},   {5440, 10.5f},  {7498, 16.8f},
+    {9555, 23.9f},  {11613, 35.4f}, {13670, 50.2f}, {15727, 64.4f},
+    {17785, 78.0f}, {19842, 90.5f}, {21900, 100.0f},
+};
+static constexpr int NUM_CALIBRATION_POINTS =
+    sizeof(calibrationTable) / sizeof(calibrationTable[0]);
 
 float getFuelPercent(float rawValue) {
   if (rawValue <= calibrationTable[0].rawValue)
@@ -29,9 +44,6 @@ void resetFuelTripData(unsigned long now) {
   accumulated_inj_pulses = 0;
   spd_delta_pulses = 0;
   portEXIT_CRITICAL(&dataMux);
-  avg_l_100km = 0.0f;
-  inst_val = 0.0f;
-
 
   saveTripDataToNVS();
   tv.setCursor(WARNING_X + 40, WARNING_Y + 50);
@@ -86,11 +98,11 @@ float getInjectorDeadTime(float voltage) {
     float voltage;
     float us;
   };
-  static const DTPoint dt[] = {
+  static constexpr DTPoint dt[] = {
       {10.0f, 1800.0f}, {11.0f, 1600.0f}, {12.0f, 1400.0f}, {13.0f, 1100.0f},
       {13.5f, 1000.0f}, {14.0f, 900.0f},  {15.0f, 750.0f},  {16.0f, 650.0f},
   };
-  static const int N = sizeof(dt) / sizeof(dt[0]);
+  static constexpr int N = sizeof(dt) / sizeof(dt[0]);
 
   if (voltage <= dt[0].voltage)
     return dt[0].us;

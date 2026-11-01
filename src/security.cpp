@@ -1,10 +1,28 @@
 #include "security.h"
+#include "globals.h"
 #include "pushstart.h"
 #include <NimBLEDevice.h>
 #include <Preferences.h>
+#include <esp_bt.h>
 #include <esp_heap_caps.h>
+#include <esp_task_wdt.h>
 #include <mbedtls/aes.h>
 #include <ctype.h>
+
+#if __has_include("secrets.h")
+#include "secrets.h"
+#else
+// Fallback defaults if secrets.h is not created yet (copy from secrets.example.h)
+#define BLE_DEVICE_NAME "MB-BT-Audio"
+#define BLE_PAIRING_PIN 123456
+static const char *const BLE_AUTHORIZED_MACS[] = {
+    "00:00:00:00:00:00"};
+static const size_t NUM_AUTHORIZED_MACS = sizeof(BLE_AUTHORIZED_MACS) / sizeof(BLE_AUTHORIZED_MACS[0]);
+static const uint8_t BLE_AUTHORIZED_IRKS[][16] = {
+    {0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+     0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00}};
+static const size_t NUM_AUTHORIZED_IRKS = sizeof(BLE_AUTHORIZED_IRKS) / sizeof(BLE_AUTHORIZED_IRKS[0]);
+#endif
 
 #if defined(CONFIG_NIMBLE_CPP_IDF)
 #include "host/ble_hs.h"
@@ -20,12 +38,12 @@
 #define DEBUG_PRINT_SECRETS 0 // Set 1 to print raw IRK keys and pairing PIN to Serial
 
 // --- BLE teardown & WDT safety timing ---
-static const unsigned long BLE_PAIRING_SETTLE_MS   = 100; // Let Core 0 ble_sm_persist_keys() + LL ACK finish before disconnect
-static const unsigned long BLE_DISCONNECT_DRAIN_MS = 500; // Max non-blocking wait for LL_TERMINATE_IND completion
-static const unsigned long BLE_SYNC_DRAIN_MS       = 200; // Max synchronous disconnect wait (e.g. before deep sleep)
-static const uint32_t      BLE_WDT_DEINIT_TIMEOUT_S = 3;  // > NimBLE's 2000ms ble_hs_stop timeout (Core 1 WDT is 1s)
-static const uint32_t      BLE_WDT_NORMAL_TIMEOUT_S = 1;  // Matches setup() esp_task_wdt_init(1, true)
-static const uint16_t      ESP32_MAX_BLE_CONN_HANDLES = 9; // ESP32 controller supports handles 0..8
+static constexpr unsigned long BLE_PAIRING_SETTLE_MS   = 100; // Let Core 0 ble_sm_persist_keys() + LL ACK finish before disconnect
+static constexpr unsigned long BLE_DISCONNECT_DRAIN_MS = 500; // Max non-blocking wait for LL_TERMINATE_IND completion
+static constexpr unsigned long BLE_SYNC_DRAIN_MS       = 200; // Max synchronous disconnect wait (e.g. before deep sleep)
+static constexpr uint32_t      BLE_WDT_DEINIT_TIMEOUT_S = 3;  // > NimBLE's 2000ms ble_hs_stop timeout (Core 1 WDT is 1s)
+static constexpr uint32_t      BLE_WDT_NORMAL_TIMEOUT_S = 1;  // Matches setup() esp_task_wdt_init(1, true)
+static constexpr uint16_t      ESP32_MAX_BLE_CONN_HANDLES = 9; // ESP32 controller supports handles 0..8
 
 // --- NVS-persisted IRK store (pair once → detected forever) ---
 #define MAX_PERSISTED_IRKS 8
@@ -36,8 +54,8 @@ static uint8_t  persistedIRKCount = 0;
 
 static bool bleInitialized = false;
 static bool bleScanning = false;
-static uint8_t dynamicBondedIRK[16] = {0};
-static bool dynamicIRKPresent = false;
+static bool classicBtMemReleased = false;
+static bool bleMemReleased = false;
 
 // Check if a 16-byte key is all zeros (unconfigured)
 static bool isZeroKey(const uint8_t key[16])
@@ -481,8 +499,6 @@ static int secStoreIteratorCallback(int obj_type, union ble_store_value *val, vo
   if (obj_type == BLE_STORE_OBJ_TYPE_PEER_SEC && val->sec.irk_present)
   {
     persistNewIRK(val->sec.irk);
-    memcpy(dynamicBondedIRK, val->sec.irk, 16);
-    dynamicIRKPresent = true;
 #if DEBUG_PRINT_SECRETS
     Serial.println("\n🔑 [SECURITY] Active Bonded Phone IRK extracted from Bond Store:");
     Serial.print("   { ");
@@ -503,8 +519,19 @@ static int secStoreIteratorCallback(int obj_type, union ble_store_value *val, vo
   return 0;
 }
 
+static void formatBleAddr(const uint8_t addr[6], char out[18])
+{
+  snprintf(out, 18, "%02x:%02x:%02x:%02x:%02x:%02x",
+           addr[5], addr[4], addr[3], addr[2], addr[1], addr[0]);
+}
+
+static bool isZeroBleAddr(const uint8_t addr[6])
+{
+  return (addr[0] | addr[1] | addr[2] | addr[3] | addr[4] | addr[5]) == 0;
+}
+
 // Check if a given peer address is recognized (via MAC whitelist or IRK RPA resolution)
-static bool isAddressAuthorized(const uint8_t rawAddr[6], const char *macStr, std::string &matchedDesc)
+static bool isAddressAuthorized(const uint8_t rawAddr[6], const char *macStr, char *matchedDesc, size_t descSize)
 {
   if (macStr != nullptr && macStr[0] != '\0')
   {
@@ -515,7 +542,7 @@ static bool isAddressAuthorized(const uint8_t rawAddr[6], const char *macStr, st
       {
         if (matchesMacString(macStr, BLE_AUTHORIZED_MACS[i]))
         {
-          matchedDesc = std::string("MAC Whitelist: ") + macStr;
+          snprintf(matchedDesc, descSize, "MAC Whitelist: %s", macStr);
           return true;
         }
       }
@@ -529,22 +556,15 @@ static bool isAddressAuthorized(const uint8_t rawAddr[6], const char *macStr, st
     {
       if (resolveRPA(rawAddr, BLE_AUTHORIZED_IRKS[i]))
       {
-        matchedDesc = std::string("Authorized IRK: ") + (macStr ? macStr : "");
+        snprintf(matchedDesc, descSize, "Authorized IRK: %s", macStr ? macStr : "");
         return true;
       }
     }
 
-    // 3. Check dynamic bonded IRK
-    if (dynamicIRKPresent && resolveRPA(rawAddr, dynamicBondedIRK))
-    {
-      matchedDesc = std::string("Bonded Phone IRK: ") + (macStr ? macStr : "");
-      return true;
-    }
-
-    // 4. Check NVS-persisted IRKs
+    // 3. Check NVS-persisted / bonded IRKs
     if (resolveRPAAgainstPersistedIRKs(rawAddr))
     {
-      matchedDesc = std::string("Persisted IRK: ") + (macStr ? macStr : "");
+      snprintf(matchedDesc, descSize, "Persisted IRK: %s", macStr ? macStr : "");
       return true;
     }
   }
@@ -565,25 +585,26 @@ class SecurityServerCallbacks : public NimBLEServerCallbacks
       return;
     }
 
-    NimBLEAddress peerAddr(desc->peer_ota_addr);
-    NimBLEAddress idAddr(desc->peer_id_addr);
-    std::string devMacStr = peerAddr.toString();
-    std::string idMacStr = idAddr.toString();
-    Serial.printf("[SECURITY] Connection received from OTA: %s | ID: %s\n", devMacStr.c_str(), idMacStr.c_str());
+    char devMacStr[18];
+    char idMacStr[18];
+    formatBleAddr(desc->peer_ota_addr.val, devMacStr);
+    formatBleAddr(desc->peer_id_addr.val, idMacStr);
+    Serial.printf("[SECURITY] Connection received from OTA: %s | ID: %s\n", devMacStr, idMacStr);
 
     // 1. If this phone is already known (in MAC whitelist or matches authorized IRK), authorize IMMEDIATELY!
-    std::string matchDesc;
-    if (isAddressAuthorized(desc->peer_ota_addr.val, devMacStr.c_str(), matchDesc) ||
-        (idMacStr != "00:00:00:00:00:00" && isAddressAuthorized(desc->peer_id_addr.val, idMacStr.c_str(), matchDesc)))
+    char matchDesc[48];
+    if (isAddressAuthorized(desc->peer_ota_addr.val, devMacStr, matchDesc, sizeof(matchDesc)) ||
+        (!isZeroBleAddr(desc->peer_id_addr.val) &&
+         isAddressAuthorized(desc->peer_id_addr.val, idMacStr, matchDesc, sizeof(matchDesc))))
     {
-      grantPhoneAuthorization("Authorized Phone Connected & Recognized!", matchDesc.c_str());
+      grantPhoneAuthorization("Authorized Phone Connected & Recognized!", matchDesc);
       // Disconnect immediately so Android does NOT attempt to pair or create a bond!
       pServer->disconnect(desc->conn_handle);
       return;
     }
 
     // 2. Unrecognized phone — allow connection to proceed for PIN-based pairing
-    Serial.printf("[SECURITY] Unrecognized phone %s — awaiting PIN authentication.\n", devMacStr.c_str());
+    Serial.printf("[SECURITY] Unrecognized phone %s — awaiting PIN authentication.\n", devMacStr);
   }
 
   void onAuthenticationComplete(ble_gap_conn_desc *desc) override
@@ -597,32 +618,33 @@ class SecurityServerCallbacks : public NimBLEServerCallbacks
       return;
     }
 
-    NimBLEAddress peerAddr(desc->peer_ota_addr);
-    NimBLEAddress idAddr(desc->peer_id_addr);
-    std::string devMacStr = peerAddr.toString();
-    std::string idMacStr = idAddr.toString();
+    char devMacStr[18];
+    char idMacStr[18];
+    formatBleAddr(desc->peer_ota_addr.val, devMacStr);
+    formatBleAddr(desc->peer_id_addr.val, idMacStr);
 
     if (!desc->sec_state.encrypted || !desc->sec_state.bonded)
     {
       Serial.printf("[SECURITY] Pairing / auth FAILED for %s (encrypted=%d, bonded=%d) — disconnecting.\n",
-                    devMacStr.c_str(), desc->sec_state.encrypted, desc->sec_state.bonded);
+                    devMacStr, desc->sec_state.encrypted, desc->sec_state.bonded);
       NimBLEDevice::getServer()->disconnect(desc->conn_handle);
       return;
     }
 
-    Serial.printf("[SECURITY] Pairing / authentication successful for %s (bonded + encrypted)\n", devMacStr.c_str());
+    Serial.printf("[SECURITY] Pairing / authentication successful for %s (bonded + encrypted)\n", devMacStr);
 
-    std::string matchDesc;
-    if (isAddressAuthorized(desc->peer_ota_addr.val, devMacStr.c_str(), matchDesc) ||
-        (idMacStr != "00:00:00:00:00:00" && isAddressAuthorized(desc->peer_id_addr.val, idMacStr.c_str(), matchDesc)))
+    char matchDesc[48];
+    if (isAddressAuthorized(desc->peer_ota_addr.val, devMacStr, matchDesc, sizeof(matchDesc)) ||
+        (!isZeroBleAddr(desc->peer_id_addr.val) &&
+         isAddressAuthorized(desc->peer_id_addr.val, idMacStr, matchDesc, sizeof(matchDesc))))
     {
-      grantPhoneAuthorization("Authorized Phone Connected & Authenticated!", matchDesc.c_str(), true);
+      grantPhoneAuthorization("Authorized Phone Connected & Authenticated!", matchDesc, true);
       return;
     }
 
     // Authenticated with pairing PIN passkey — processBLEEvents() will sync the newly committed
     // bond IRK to NVS once Core 0's ble_sm_persist_keys() finishes, then disconnect & deinit BLE.
-    grantPhoneAuthorization("Phone Authenticated via PIN Passkey!", devMacStr.c_str(), true);
+    grantPhoneAuthorization("Phone Authenticated via PIN Passkey!", devMacStr, true);
   }
 
   uint32_t onPassKeyRequest() override
@@ -664,22 +686,26 @@ class SecurityScanCallbacks : public NimBLEAdvertisedDeviceCallbacks
     if (phoneAuthorized || isPhoneAuthorized() || bleTeardownPending || advertisedDevice == nullptr)
       return;
 
-    std::string devMacStr = advertisedDevice->getAddress().toString();
-    const uint8_t *nativeAddr = advertisedDevice->getAddress().getNative();
-
-    // Optional RSSI threshold check
+    // Optional RSSI threshold check FIRST (before formatting address or running AES-128)
 #if defined(BLE_MIN_RSSI) && (BLE_MIN_RSSI > -128)
-    if (advertisedDevice->getRSSI() < BLE_MIN_RSSI)
+    int rssi = advertisedDevice->getRSSI();
+    if (rssi < BLE_MIN_RSSI)
     {
       return;
     }
+#else
+    int rssi = advertisedDevice->getRSSI();
 #endif
 
-    std::string matchDesc;
-    if (isAddressAuthorized(nativeAddr, devMacStr.c_str(), matchDesc))
+    const uint8_t *nativeAddr = advertisedDevice->getAddress().getNative();
+    char devMacStr[18];
+    formatBleAddr(nativeAddr, devMacStr);
+
+    char matchDesc[48];
+    if (isAddressAuthorized(nativeAddr, devMacStr, matchDesc, sizeof(matchDesc)))
     {
       char info[80];
-      snprintf(info, sizeof(info), "%s | RSSI: %d dBm", matchDesc.c_str(), advertisedDevice->getRSSI());
+      snprintf(info, sizeof(info), "%s | RSSI: %d dBm", matchDesc, rssi);
       grantPhoneAuthorization("Authorized Phone Detected via BLE Scan!", info);
       return;
     }
@@ -706,7 +732,13 @@ static void configureScan(NimBLEScan *pBLEScan)
 
 void setupBLESecurity()
 {
-  if (isPhoneAuthorized())
+  if (!classicBtMemReleased && esp_bt_controller_get_status() == ESP_BT_CONTROLLER_STATUS_IDLE)
+  {
+    esp_bt_controller_mem_release(ESP_BT_MODE_CLASSIC_BT);
+    classicBtMemReleased = true;
+  }
+
+  if (isPhoneAuthorized() || bleMemReleased)
     return;
 
   bleTeardownPending = false;
@@ -715,6 +747,7 @@ void setupBLESecurity()
 
   if (!bleInitialized)
   {
+    NimBLEDevice::setScanDuplicateCacheSize(10); // Minimum controller duplicate cache (saves internal DRAM)
     bool wdtExtended = extendLoopTaskWdtForBLE();
     NimBLEDevice::init(BLE_DEVICE_NAME);
     restoreLoopTaskWdtAfterBLE(wdtExtended);
@@ -848,8 +881,16 @@ void teardownBLESecurity()
     bleScanning = false;
   }
 
-  memset(dynamicBondedIRK, 0, sizeof(dynamicBondedIRK));
-  dynamicIRKPresent = false;
+  // Once permanently authorized by phone (not merely 6-pulse bypass toggle), release the
+  // BLE controller's static DRAM back to the internal heap for the remainder of the drive.
+  if (phoneAuthorized && !bleMemReleased &&
+      esp_bt_controller_get_status() == ESP_BT_CONTROLLER_STATUS_IDLE)
+  {
+    if (esp_bt_controller_mem_release(ESP_BT_MODE_BLE) == ESP_OK)
+    {
+      bleMemReleased = true;
+    }
+  }
 }
 
 bool isPhoneAuthorized()
@@ -879,12 +920,12 @@ void setPhoneAuthBypass(bool bypass)
     }
     else if (!isBLEScanning())
     {
-      triggerBLERescan(BLE_RESCAN_TIMEOUT_MS);
+      triggerBLERescan();
     }
   }
 }
 
-void triggerBLERescan(unsigned long durationMs)
+void triggerBLERescan()
 {
   if (phoneAuthorized || isPhoneAuthorized())
     return;

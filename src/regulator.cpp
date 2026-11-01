@@ -1,4 +1,8 @@
 #include "regulator.h"
+#include "globals.h"
+#include <Adafruit_ADS1X15.h>
+#include <Wire.h>
+#include <esp_task_wdt.h>
 
 void recoverI2CBus(int sdaPin, int sclPin) {
   pinMode(sdaPin, INPUT_PULLUP);
@@ -53,8 +57,7 @@ void stopRegulatorTask() {
   }
   // Guarantee safe hardware state upon task stop
   ledcWrite(0, 0);
-  field_pwm = 0;
-  digitalWriteFast(field_relay_pin, LOW);
+  digitalWrite(field_relay_pin, LOW);
 }
 
 static int16_t readADC_Timeout(uint8_t channel, uint32_t timeout_ms = 25) {
@@ -170,9 +173,9 @@ void regulatorTask(void *pvParameters) {
 
     bool severe_failure = relay_latched;
     if (relay_latched) {
-      digitalWriteFast(field_relay_pin, HIGH); // Open high-side safety relay
+      digitalWrite(field_relay_pin, HIGH); // Open high-side safety relay
     } else {
-      digitalWriteFast(field_relay_pin, LOW);  // Closed (normal operation)
+      digitalWrite(field_relay_pin, LOW);  // Closed (normal operation)
     }
 
     // --- 3. Snapshot Shared Engine State (Fed directly on Core 0 by CanRxTask) ---
@@ -309,7 +312,7 @@ void regulatorTask(void *pvParameters) {
       }
     }
 
-    field_pwm = (int)constrain(active_pwm, 0.0f, 1023.0f);
+    int field_pwm = (int)constrain(active_pwm, 0.0f, 1023.0f);
     ledcWrite(0, field_pwm);
 
     // --- 9. Diagnostics & Malfunction Detection ---
@@ -339,7 +342,7 @@ void regulatorTask(void *pvParameters) {
 
     bool logical_failure = overvoltage_fault || unresponsiveness_fault;
 
-    int next_charge_state = 0;
+    uint8_t next_charge_state = 0;
     if (severe_failure || logical_failure) {
       next_charge_state = 1; // Charging system malfunction warning
     } else if (in_state == STATE_RUNNING && !delay_active &&
@@ -351,7 +354,7 @@ void regulatorTask(void *pvParameters) {
 
     // --- 10. Sample Auxiliary Fuel ADC (every 2s, immediately on first pass) ---
     static bool fuel_first_read_pending = true;
-    int new_fuel_val = -1;
+    int16_t new_fuel_val = -1;
     if (fuel_first_read_pending || current_micros - last_fuel_time >= FUEL_ADC_INTERVAL_US) {
       int16_t read_f = readADC_Timeout(2, 25);
       if (read_f >= 0) {

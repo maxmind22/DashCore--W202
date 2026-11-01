@@ -6,8 +6,35 @@
 #include "can_comm.h"
 #include "fuel.h"
 #include "security.h"
+#include <Adafruit_ADS1X15.h>
+#include <ESP_8_BIT_GFX.h>
 #include <Fonts/FreeSansBold24pt7b.h>
+#include <Wire.h>
+#include <driver/gpio.h>
 #include <esp_heap_caps.h>
+#include <esp_task_wdt.h>
+
+static RTC_DATA_ATTR uint32_t rtc_trip_magic = 0;
+static unsigned long lastTime = 0;
+static unsigned long last_spd_correction = 0;
+static unsigned long lastBlinkTime = 0;
+static unsigned long lastBlinkTime2 = 0;
+static unsigned long last_fuel_correction = 0;
+static constexpr uint16_t blinkInterval = 400;
+static constexpr uint16_t over_speed_on = 500;
+static constexpr uint16_t over_speed_off = 170;
+static float smoothVal = 0.0f;
+static float fuel_percent_f = 0.0f;
+static int16_t lastValue = 0;
+static int16_t raw = 0;
+static int16_t last_v = 0;
+static int16_t last_t = 0;
+static int16_t last_spd = -1;
+static uint16_t goodSamples = 0;
+static uint16_t badSamples = 0;
+static uint16_t goodSamples2 = 0;
+static uint16_t badSamples2 = 0;
+static uint8_t last_clear = 0;
 
 // Short label for abnormal resets (panic / watchdog / brownout), nullptr for normal boots.
 // Shown on screen for 30 s after boot so field reboots can be diagnosed without a laptop.
@@ -121,10 +148,10 @@ void setup()
     rtc_trip_magic = RTC_TRIP_MAGIC_KEY;
   }
 
-  pinModeFast(buzzer_pin, OUTPUT);
-  pinModeFast(coolant_level_pin, INPUT);
+  pinMode(buzzer_pin, OUTPUT);
+  pinMode(coolant_level_pin, INPUT);
   pinMode(field_relay_pin, OUTPUT);
-  digitalWriteFast(field_relay_pin, LOW); // Start with field relay off
+  digitalWrite(field_relay_pin, LOW); // Start with field relay off
 
   esp_task_wdt_deinit();      // De-init default core WDT config
   esp_task_wdt_init(1, true); // 1s timeout with panic=true
@@ -144,7 +171,7 @@ void setup()
     xTaskCreatePinnedToCore(
         regulatorTask,   // Task function
         "RegulatorTask", // Name of task
-        8192,            // Stack size of task
+        3072,            // Stack size of task
         nullptr,         // Parameter of the task
         configMAX_PRIORITIES -
             2,                // Priority: high but not max, to avoid starving idle task
@@ -227,7 +254,7 @@ void loop()
     }
     lastBlinkTime = now;
   }
-  int over_speed_blink_interval =
+  uint16_t over_speed_blink_interval =
       lowBlinkState2 ? over_speed_on : over_speed_off;
   if (now - lastBlinkTime2 >= over_speed_blink_interval)
   {
@@ -240,19 +267,17 @@ void loop()
   }
 
   portENTER_CRITICAL(&dataMux);
-  int local_ads_fuel = ads_fuel;
+  int16_t local_ads_fuel = ads_fuel;
   float local_voltage_filtered = voltage_filtered;
   float local_current_A_filtered = current_A_filtered;
   portEXIT_CRITICAL(&dataMux);
 
-  fuel_in_temporary = local_ads_fuel; // Pre-fetched value from regulatorTask
-  if (fuel_in_temporary < 22000 && fuel_in_temporary > 1200)
+  if (local_ads_fuel < 22000 && local_ads_fuel > 1200)
   {
-    raw = fuel_in_temporary;
+    raw = local_ads_fuel;
     if (!fuel_level_valid)
     {
       smoothVal = (float)raw;
-      filtered = raw;
       lastValue = raw;
       fuel_level_valid = true;
     }
@@ -260,7 +285,8 @@ void loop()
 
   if (fuel_level_valid)
   {
-    int delta = abs(raw - lastValue);
+    int16_t filtered;
+    int delta = abs((int)raw - (int)lastValue);
     if (delta <= 2000)
     { // sample accepted
       filtered = raw;
@@ -286,11 +312,11 @@ void loop()
         0.001f * filtered +
         (1.0f - 0.001f) * smoothVal; // Exponential moving average for smoothing
     fuel_percent_f = constrain(getFuelPercent(smoothVal), 0.0f, 100.0f);
-    percent = (int)lroundf(fuel_percent_f);
+    percent = (uint8_t)lroundf(fuel_percent_f);
   }
 
   //-------------------- Coolant level
-  coolant_level = digitalReadFast(coolant_level_pin);
+  coolant_level = digitalRead(coolant_level_pin);
 
   //================================ Read data from engine MCU
   //==============================================//
@@ -298,8 +324,7 @@ void loop()
   // Front MCU is only powered in POS2 (IGN) and driving states; force 0 km/h when unpowered or timed out.
   bool frontMcuSpeedValid = isCanActiveState(currentState) &&
                             isCanPacketFresh(now, lastFastPacketTime, FRONT_MCU_CAN_TIMEOUT_MS);
-  spd_l = frontMcuSpeedValid ? constrain((int)spd_t, 0, 220) : 0;
-  int spd_in = spd_l;
+  int16_t spd_in = frontMcuSpeedValid ? (int16_t)constrain((int)spd_t, 0, 220) : 0;
 
   // --------------- filter SPD ----------------
   if (lastTime == 0 || !frontMcuSpeedValid)
@@ -632,17 +657,10 @@ void loop()
   // ============================
   if (now - lastTime >= FUEL_UPDATE_INTERVAL_MS)
   {
-    fill = map(percent, 0, 100, 0, FUEL_HEIGHT - 4); // ----------for fuel gauge
+    int16_t fill = (int16_t)map(percent, 0, 100, 0, FUEL_HEIGHT - 4); // ----------for fuel gauge
     fill = constrain(fill, 0, FUEL_HEIGHT - 4);
-    v = FUEL_HEIGHT - 2 + FUEL_Y - fill;
-    if (percent <= LOW_FUEL_LEVEL)
-    {
-      fuel_color = 0xE0;
-    }
-    else
-    {
-      fuel_color = 0xFF;
-    }
+    int16_t v = FUEL_HEIGHT - 2 + FUEL_Y - fill;
+    uint8_t fuel_color = (percent <= LOW_FUEL_LEVEL) ? 0xE0 : 0xFF;
     if (last_v != v || lastTime == 0)
     {
       tv.fillRect(FUEL_X + 2, FUEL_Y + 2, FUEL_WIDTH - 4, v - (FUEL_Y + 2),
@@ -653,7 +671,7 @@ void loop()
           0xFF,
           0x00); // White text on black background to erase old digits cleanly
       char buf[4];
-      snprintf(buf, sizeof(buf), "%3d", percent);
+      snprintf(buf, sizeof(buf), "%3u", (unsigned)percent);
       tv.print(buf);
     }
 
@@ -661,10 +679,10 @@ void loop()
     bool temp_valid = isCanActiveState(currentState) &&
                       isCanPacketFresh(now, lastEnvPacketTime, FRONT_MCU_TIMEOUT_MS);
     int effective_temp = temp_valid ? temp_out : 40;
-    fill2 = map(effective_temp, 40, 120, 0, TEMP_HEIGHT); // ----------for temp gauge
+    int16_t fill2 = (int16_t)map(effective_temp, 40, 120, 0, TEMP_HEIGHT); // ----------for temp gauge
     int tick_y = 0;
     fill2 = constrain(fill2, 0, TEMP_HEIGHT);
-    t = TEMP_HEIGHT + TEMP_Y - fill2;
+    int16_t t = TEMP_HEIGHT + TEMP_Y - fill2;
     int disp_key = temp_valid ? temp_out : -2; // -2 = "---" while Front MCU is unpowered/offline
     static int last_temp_disp = -1;
     if (last_clear < 6)
@@ -775,6 +793,7 @@ void loop()
     bool is_moving = (speed_val >= 3.0f);
 
     // Calculate instant consumption
+    float inst_val;
     if (is_moving)
     {
       float dist_for_calc = (interval_dist_km > 0.0001f)
@@ -801,14 +820,9 @@ void loop()
     }
 
     // Calculate average consumption in L/100km
-    if (total_distance_km > 0.001)
-    {
-      avg_l_100km = (float)((total_fuel_liters / total_distance_km) * 100.0);
-    }
-    else
-    {
-      avg_l_100km = 0.0f;
-    }
+    float avg_l_100km = (total_distance_km > 0.001)
+                            ? (float)((total_fuel_liters / total_distance_km) * 100.0)
+                            : 0.0f;
 
     // Render fuel and distance metrics to screen
     tv.setTextSize(2);
@@ -891,7 +905,6 @@ void loop()
     last_v = v;
     last_t = t;
   }
-  oil_level = (int)oil_level_t;
   warnings(now);
   processPushStart(now);
 

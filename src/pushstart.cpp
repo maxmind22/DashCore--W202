@@ -1,9 +1,34 @@
 #include "pushstart.h"
+#include "globals.h"
 #include "security.h"
 #include "fuel.h" // For resetFuelTripData
 #include "regulator.h"
 #include "can_comm.h"
+#include <ESP_8_BIT_GFX.h>
+#include <Wire.h>
+#include <driver/dac.h>
+#include <driver/gpio.h>
+#include <esp_sleep.h>
+#include <esp_task_wdt.h>
+#include <soc/i2s_struct.h>
 
+enum ToneState : uint8_t
+{
+  TONE_IDLE,
+  TONE_ON,
+  TONE_OFF
+};
+enum LockRelayState : uint8_t
+{
+  LOCK_IDLE,
+  LOCK_PULSE_ACTIVE
+};
+
+static RTC_DATA_ATTR bool vehicleLockDisabled = false;
+static unsigned long lastButtonPressTime = 0;
+static bool isEcoRestart = false;
+static unsigned long autoStopStartTime = 0;
+static unsigned long standstillStartTime = 0;
 
 static LockRelayState lockRelayState = LOCK_IDLE;
 static unsigned long lockRelayStartTime = 0;
@@ -16,11 +41,11 @@ static unsigned long lastUnlockEdgeTime = 0;
 
 static ToneState toneState = TONE_IDLE;
 static unsigned long tonePhaseStart = 0;
-static int toneBeepsRemaining = 0;
-static unsigned long toneOnMs = 0;
-static unsigned long toneOffMs = 0;
+static int8_t toneBeepsRemaining = 0;
+static uint16_t toneOnMs = 0;
+static uint16_t toneOffMs = 0;
 
-void triggerLockPulse(unsigned long now)
+static void triggerLockPulse(unsigned long now = 0)
 {
   if (lockRelayState == LOCK_IDLE && !vehicleLockDisabled)
   {
@@ -31,7 +56,7 @@ void triggerLockPulse(unsigned long now)
   }
 }
 
-void updateLockRelay(unsigned long now)
+static void updateLockRelay(unsigned long now = 0)
 {
   if (now == 0)
     now = millis();
@@ -44,17 +69,17 @@ void updateLockRelay(unsigned long now)
   }
 }
 
-void queueTone(int beeps, unsigned long onMs, unsigned long offMs, unsigned long now)
+static void queueTone(int8_t beeps, uint16_t onMs, uint16_t offMs, unsigned long now = 0)
 {
   toneBeepsRemaining = beeps;
   toneOnMs = onMs;
   toneOffMs = offMs;
-  digitalWriteFast(buzzer_pin, HIGH);
+  digitalWrite(buzzer_pin, HIGH);
   tonePhaseStart = (now != 0) ? now : millis();
   toneState = TONE_ON;
 }
 
-void updateToneStateMachine(unsigned long now)
+static void updateToneStateMachine(unsigned long now = 0)
 {
   if (toneState == TONE_IDLE)
     return;
@@ -66,7 +91,7 @@ void updateToneStateMachine(unsigned long now)
 
   if (toneState == TONE_ON && (currentMs - tonePhaseStart >= toneOnMs))
   {
-    digitalWriteFast(buzzer_pin, LOW);
+    digitalWrite(buzzer_pin, LOW);
     toneBeepsRemaining--;
     if (toneBeepsRemaining <= 0)
     {
@@ -80,7 +105,7 @@ void updateToneStateMachine(unsigned long now)
   }
   else if (toneState == TONE_OFF && (currentMs - tonePhaseStart >= toneOffMs))
   {
-    digitalWriteFast(buzzer_pin, HIGH);
+    digitalWrite(buzzer_pin, HIGH);
     tonePhaseStart = currentMs;
     toneState = TONE_ON;
   }
@@ -88,7 +113,7 @@ void updateToneStateMachine(unsigned long now)
 
 bool isTonePlaying() { return toneState != TONE_IDLE; }
 
-void playUnlockToggleTone(bool disabled)
+static void playUnlockToggleTone(bool disabled)
 {
   if (disabled)
     queueTone(2, 200, 200); // 2 short beeps
@@ -101,12 +126,12 @@ void playAuthSuccessTone()
   queueTone(1, AUTH_SUCCESS_BEEP_MS, 0); // 1 single confirmation chime
 }
 
-void playAuthWarningTone()
+static void playAuthWarningTone()
 {
   queueTone(2, 100, 100); // 2 quick beeps
 }
 
-void processUnlockSignals(unsigned long now)
+static void processUnlockSignals(unsigned long now = 0)
 {
   if (now == 0)
     now = millis();
@@ -161,7 +186,7 @@ void processUnlockSignals(unsigned long now)
   }
 }
 
-bool isEngineRunning(unsigned long now)
+static bool isEngineRunning(unsigned long now = 0)
 {
   if (now == 0)
     now = millis();
@@ -171,14 +196,14 @@ bool isEngineRunning(unsigned long now)
 
   if (isCanPacketFresh(now, lastFastPacketTime, FRONT_MCU_CAN_TIMEOUT_MS))
   {
-    if (rpm >= ENGINE_STARTED_RPM || new_rpm >= ENGINE_STARTED_RPM)
+    if (rpm >= ENGINE_STARTED_RPM)
       return true;
   }
 
   return false;
 }
 
-void setRelays(bool acc, bool ign, bool start)
+static void setRelays(bool acc, bool ign, bool start)
 {
   // HARDWARE SAFETY INTERLOCK:
   // Strictly prevent starter engagement if system state is not actively in STATE_CRANKING
@@ -197,15 +222,7 @@ void setRelays(bool acc, bool ign, bool start)
   digitalWrite(PIN_RELAY_START, start ? HIGH : LOW);
 }
 
-void startTVDisplay()
-{
-  dac_output_enable(DAC_CHANNEL_1);
-  dac_i2s_enable();
-  I2S0.conf.tx_start = 1;
-  I2S0.out_link.start = 1;
-}
-
-void stopTVDisplay()
+static void stopTVDisplay()
 {
   tv.waitForFrame();       // Let any in-flight DMA frame complete first
   I2S0.out_link.start = 0; // Stop DMA linked list (must stop before tx)
@@ -216,15 +233,13 @@ void stopTVDisplay()
   dac_i2s_disable();
 }
 
-void sleepCANController()
+static void sleepCANController()
 {
   stopCanRxTask();
   canEnd();
 } // Stop Core 0 CAN RX task, uninstall TWAI driver, park CTX recessive
 
-void wakeupCANController() { startCanRxTask(); }
-
-void enterPowerDownSleep()
+static void enterPowerDownSleep()
 {
   // --- ORDERED SHUTDOWN: Stop everything safely before deep sleep ---
 
@@ -367,7 +382,7 @@ void processPushStart(unsigned long now)
   if (currentState != STATE_RUNNING && currentState != STATE_CRANKING && currentState != STATE_AUTO_STOP && !emergencyStopLatched)
   {
     if (isCanPacketFresh(now, lastFastPacketTime, FRONT_MCU_CAN_TIMEOUT_MS) &&
-        (rpm >= ENGINE_STARTED_RPM || new_rpm >= ENGINE_STARTED_RPM))
+        rpm >= ENGINE_STARTED_RPM)
     {
       // Only auto-sync if not in the middle of an intentional shutdown
       if (lastEngineStopTime == 0 || now - lastEngineStopTime >= ENGINE_SPINDOWN_SAFETY_MS)
@@ -562,7 +577,7 @@ void processPushStart(unsigned long now)
         {
           if (!isBLEScanning())
           {
-            triggerBLERescan(BLE_RESCAN_TIMEOUT_MS);
+            triggerBLERescan();
           }
           // Serial.println("[SECURITY] Engine start blocked! PLZ AUTHENTICATE");
           playAuthWarningTone();
@@ -586,7 +601,7 @@ void processPushStart(unsigned long now)
         lastButtonPressTime = now;
         if (!isPhoneAuthorized() && !isBLEScanning())
         {
-          triggerBLERescan(BLE_RESCAN_TIMEOUT_MS);
+          triggerBLERescan();
         }
         // Temporarily turn on ACC & IGN to power the brake switch circuit
         setRelays(true, true, false);
@@ -629,7 +644,7 @@ void processPushStart(unsigned long now)
         {
           if (!isBLEScanning())
           {
-            triggerBLERescan(BLE_RESCAN_TIMEOUT_MS);
+            triggerBLERescan();
           }
           Serial.println("[SECURITY] Engine start blocked! PLZ AUTHENTICATE");
           playAuthWarningTone();
@@ -661,7 +676,7 @@ void processPushStart(unsigned long now)
         lastButtonPressTime = now;
         if (!isPhoneAuthorized() && !isBLEScanning())
         {
-          triggerBLERescan(BLE_RESCAN_TIMEOUT_MS);
+          triggerBLERescan();
         }
         // Temporarily turn on IGN to power the brake switch circuit
         setRelays(true, true, false);
@@ -681,7 +696,7 @@ void processPushStart(unsigned long now)
       lastButtonPressTime = now;
       if (!isPhoneAuthorized() && !isBLEScanning())
       {
-        triggerBLERescan(BLE_RESCAN_TIMEOUT_MS);
+        triggerBLERescan();
       }
 
       if (brakeHeld)

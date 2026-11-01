@@ -1,6 +1,4 @@
 #pragma once
-#include "config.h"
-#include "globals.h"
 
 void regulatorTask(void *pvParameters);
 void stopRegulatorTask();

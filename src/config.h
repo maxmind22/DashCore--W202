@@ -1,20 +1,6 @@
 #pragma once
 
-#include <Adafruit_ADS1X15.h>
 #include <Arduino.h>
-#include <ESP_8_BIT_GFX.h>
-#include <Preferences.h>
-#include <Wire.h>
-#include <digitalWriteFast.h>
-#include <driver/dac.h>
-#include <driver/gpio.h>
-#include <driver/rtc_io.h>
-#include <driver/twai.h>
-#include <esp_bt.h>
-#include <esp_sleep.h>
-#include <esp_task_wdt.h>
-#include <math.h>
-#include <soc/i2s_struct.h>
 
 // --- PUSH START PIN DEFINITIONS ---
 #define PIN_RELAY_ACC 16        // Terminal 15R (Accessory)
@@ -54,21 +40,16 @@
 #define REGULATOR_RELAY_RESET_V 13.20f      // Relay re-engages only when voltage drops below this (1.0V hysteresis band)
 #define REGULATOR_RAMP_UP_PER_SEC 250.0f    // Soft-start slew rate (~4s for 0 -> 100% PWM)
 #define REGULATOR_RAMP_DOWN_PER_SEC 500.0f  // Controlled smooth ramp-down rate (prevents current plunge)
-#define REGULATOR_NOMINAL_RPM 1500.0f       // Baseline RPM for gain scheduling / Front MCU offline
 #define FUEL_ADC_INTERVAL_US 2000000UL      // Fuel sender ADC read interval (2s)
 
 // --- MAP / Vacuum Sensor Feature Toggle & Atmospheric Load Model ---
 // Set to true to enable load-aware alternator cutoff, manifold vacuum HUD warnings,
 // and vacuum-dependent intake/fuel diagnostics.
 #define MAP_SENSOR_ENABLED true
-#define REFERENCE_BARO_PSI 14.7f // Standard atmospheric pressure at sea level (101.3 kPa)
 
 extern RTC_DATA_ATTR float baro_psi;
 inline bool isBaroValid() {
   return (baro_psi >= 8.0f && baro_psi <= 16.5f);
-}
-inline float getBaroScale() {
-  return isBaroValid() ? (baro_psi / REFERENCE_BARO_PSI) : 0.0f;
 }
 
 // --- Load-Aware Alternator De-Excitation (Vacuum Threshold) ---
@@ -78,13 +59,6 @@ inline float getBaroScale() {
 #define REGULATOR_LOAD_REENGAGE_VAC_PSI 2.5f // Manifold vacuum >= 2.5 psi: re-engage alternator (0.5 psi hysteresis)
 #define REGULATOR_V_CUTOFF_FLOOR 12.60f      // Safety floor: abort cutoff if battery drops below 12.60V
 #define REGULATOR_LOAD_MIN_TEMP_C 60         // Minimum coolant temp (°C) before allowing load-based alternator de-excitation
-
-inline float getAccelCutoffVacPsi() {
-  return REGULATOR_LOAD_CUTOFF_VAC_PSI;
-}
-inline float getAccelReengageVacPsi() {
-  return REGULATOR_LOAD_REENGAGE_VAC_PSI;
-}
 
 // --- Alternator Regulator Calibration ---
 #define CURRENT_SENSOR_OFFSET_MV 2495.44f  // FS500E2T zero-current offset (calibrated from 2500.0 nominal)
@@ -103,15 +77,14 @@ inline float getAccelReengageVacPsi() {
 #define OVERHEAT_TEMP_C 108
 #define ENGINE_STARTED_RPM 400
 #define ENGINE_SPINDOWN_RPM_THRESHOLD 50
-const unsigned long MIN_CRANK_TIME_MS = 600;      // Blind crank duration to ignore RPM spikes
-const unsigned long ENGINE_SPINDOWN_SAFETY_MS = 2000;    // Cooldown duration to prevent auto-syncing during intentional stop
-const unsigned long OFFLINE_CRANK_TIME_MS = 1200; // Cranking duration when Front MCU is offline
+constexpr unsigned long MIN_CRANK_TIME_MS = 600;           // Blind crank duration to ignore RPM spikes
+constexpr unsigned long ENGINE_SPINDOWN_SAFETY_MS = 2000;  // Cooldown duration to prevent auto-syncing during intentional stop
+constexpr unsigned long OFFLINE_CRANK_TIME_MS = 1200;      // Cranking duration when Front MCU is offline
 #define ENGINE_ACTIVE_RPM_THRESHOLD 200
 #define EMERGENCY_OVERCURRENT_A 40.0f
 #define FRONT_MCU_TIMEOUT_MS 5000
 #define FRONT_MCU_CAN_TIMEOUT_MS 1000
-const unsigned long ENGINE_STALL_DEBOUNCE_MS = 1500; // Require 1.5s persistent 0 RPM before cutting ignition
-#define FRONT_MCU_CAN_SEND_INTERVAL_US 20000.0f      // Front MCU sends 0x02 & 0x05 @ 20ms (50Hz), 0x04 @ 50ms (20Hz), 0x06 @ 100ms (10Hz)
+constexpr unsigned long ENGINE_STALL_DEBOUNCE_MS = 1500;   // Require 1.5s persistent 0 RPM before cutting ignition
 
 // Cross-core safe packet age check: Core 0's CAN RX task may stamp packetTime a few ms
 // after Core 1 sampled `now`, making (int32_t)(now - packetTime) slightly negative.
@@ -147,9 +120,6 @@ inline bool isCanPacketFresh(unsigned long now, unsigned long packetTime, uint32
 #define TEMP_VALUE_TICK_WIDTH 11
 #define TEMP_VALUE_TICK_HEIGHT 6
 
-#define GAUGE_CX 128
-#define GAUGE_CY 165
-#define GAUGE_R 85
 #define WARNING_X 50
 #define WARNING_Y 20
 
@@ -160,7 +130,6 @@ inline bool isCanPacketFresh(unsigned long now, unsigned long packetTime, uint32
 #define VACUUM_DISPLAY_Y 38
 #define LOAD_RATIO_ECO_WARNING    0.945f      // 94.5% engine load (~0.8 psi vac): instant ECO indicator
 #define LOAD_RATIO_ECO_CLEAR      0.932f      // 93.2% engine load (~1.0 psi vac): clear ECO indicator (hysteresis)
-#define ECO_MIN_TEMP_C 60                     // Minimum coolant temp (°C) before checking economy (cold start fast idle drops vacuum)
 #define ECO_BEEP_ON_MS            200         // Pulsing beep ON duration while ECO is displayed (ms)
 #define ECO_BEEP_OFF_MS           200         // Pulsing beep OFF duration while ECO is displayed (ms)
 
@@ -214,60 +183,41 @@ inline float getIdleConfirmVacPsi() {
 #define FPR_LEAK_DETECT_PERSIST_MS 8000UL // 8 seconds continuous abnormal idle to confirm steady-state condition
 
 // Fuel/Trip Constants
-#define PULSES_PER_KM 24714
-const float PULSES_PER_KM_F = 24714.33f;
-const int LOW_FUEL_LEVEL = 10;
-const float INJECTOR_FLOW_RATE_CC_MIN = 228.0f; // Rated 228 cc/min @ 3.8 bar OEM regulator pressure
-const int NUM_INJECTORS = 4;
-const float FUEL_TANK_CAPACITY_LITERS = 62.0f;
-const float RANGE_MIN_TRIP_KM = 5.0f; // Min trip distance before REM (range) is shown; avoids absurd values right after a reset
-const uint32_t MAX_INJ_PULSE_PER_INTERVAL_US = 1000000; // 1,000,000us (1s): handles multiple deferred CAN sends if Front MCU skips sending for up to 1 second
-#define RTC_TRIP_MAGIC_KEY 0xCAFE4567
+constexpr float PULSES_PER_KM_F = 24714.33f;
+constexpr uint8_t LOW_FUEL_LEVEL = 10;
+constexpr float INJECTOR_FLOW_RATE_CC_MIN = 228.0f; // Rated 228 cc/min @ 3.8 bar OEM regulator pressure
+constexpr uint8_t NUM_INJECTORS = 4;
+constexpr float FUEL_TANK_CAPACITY_LITERS = 62.0f;
+constexpr float RANGE_MIN_TRIP_KM = 5.0f; // Min trip distance before REM (range) is shown; avoids absurd values right after a reset
+#define RTC_TRIP_MAGIC_KEY 0xCAFE4567UL
 
 // Timeout Constants
-const unsigned long STANDBY_TIMEOUT_MS = 60000;     // 1 Minute
-const unsigned long ACCESSORY_TIMEOUT_MS = 3600000; // 1 Hour
-const unsigned long BUTTON_COOLDOWN_MS = 500;
-const unsigned long BUTTON_LONGPRESS_RESET_MS = 3000;
-const unsigned long MAX_CRANK_TIME_MS = 5000;
-const unsigned long BRAKE_CHECK_SETTLE_MS = 100; // Window (ms) to energize and continuously sample brake circuit
+constexpr unsigned long STANDBY_TIMEOUT_MS = 60000;     // 1 Minute
+constexpr unsigned long ACCESSORY_TIMEOUT_MS = 3600000; // 1 Hour
+constexpr unsigned long BUTTON_COOLDOWN_MS = 500;
+constexpr unsigned long BUTTON_LONGPRESS_RESET_MS = 3000;
+constexpr unsigned long MAX_CRANK_TIME_MS = 5000;
+constexpr unsigned long BRAKE_CHECK_SETTLE_MS = 100; // Window (ms) to energize and continuously sample brake circuit
 
 // --- BLE PHONE KEY SECURITY ---
-#define BLE_SCAN_TIMEOUT_MS 10000  // Initial boot/wake scan duration (10s)
-#define BLE_RESCAN_TIMEOUT_MS 5000 // Quick on-demand scan on start button press (5s)
 #define BLE_MIN_RSSI -95           // Minimum RSSI filter in dBm (-128 to disable)
 #define AUTH_SUCCESS_BEEP_MS 500   // Confirmation beep duration when phone is authorized (ms)
 #define BLE_SCAN_REFRESH_MS 60000  // Restart the continuous scan periodically to flush NimBLE's internal advertiser cache
 
-#if __has_include("secrets.h")
-#include "secrets.h"
-#else
-// Fallback defaults if secrets.h is not created yet (copy from secrets.example.h)
-#define BLE_DEVICE_NAME "MB-BT-Audio"
-#define BLE_PAIRING_PIN 123456
-static const char *const BLE_AUTHORIZED_MACS[] = {
-    "00:00:00:00:00:00"};
-static const size_t NUM_AUTHORIZED_MACS = sizeof(BLE_AUTHORIZED_MACS) / sizeof(BLE_AUTHORIZED_MACS[0]);
-static const uint8_t BLE_AUTHORIZED_IRKS[][16] = {
-    {0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-     0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00}};
-static const size_t NUM_AUTHORIZED_IRKS = sizeof(BLE_AUTHORIZED_IRKS) / sizeof(BLE_AUTHORIZED_IRKS[0]);
-#endif
-
 // Auto Start-Stop Constants & Wear-Protection Thresholds
-const unsigned long AUTO_STOP_STANDSTILL_DELAY_MS = 2500;  // 2.5s standstill before stop
-const unsigned long AUTO_STOP_COOLDOWN_MS = 45000;         // 45s engine runtime cooldown between stops
-const int AUTO_STOP_MIN_TEMP_C = 75;                       // Coolant temp >= 75°C
-const int AUTO_STOP_MAX_TEMP_C = 98;                       // Coolant temp <= 98°C
-const float AUTO_STOP_MIN_VOLTAGE = 12.00f;                // Min battery voltage to allow stop
-const float AUTO_STOP_RESTART_VOLTAGE = 11.60f;            // Battery floor triggering auto-restart
-const unsigned long AUTO_STOP_MAX_DURATION_MS = 90000;     // 90s max stop duration before restart
-const unsigned long COLD_CRANK_PRIME_MS = 500;             // ECU cold boot & trigger sync delay (ms)
-const unsigned long ECO_CRANK_PRIME_MS = 30;               // Fast warm restart prime delay (ms)
-const float BASELINE_IDLE_FUEL_L_PER_HR = 0.90f;           // Idle fuel consumption baseline (L/h)
+constexpr unsigned long AUTO_STOP_STANDSTILL_DELAY_MS = 2500;  // 2.5s standstill before stop
+constexpr unsigned long AUTO_STOP_COOLDOWN_MS = 45000;         // 45s engine runtime cooldown between stops
+constexpr int16_t AUTO_STOP_MIN_TEMP_C = 75;                   // Coolant temp >= 75°C
+constexpr int16_t AUTO_STOP_MAX_TEMP_C = 98;                   // Coolant temp <= 98°C
+constexpr float AUTO_STOP_MIN_VOLTAGE = 12.00f;                // Min battery voltage to allow stop
+constexpr float AUTO_STOP_RESTART_VOLTAGE = 11.60f;            // Battery floor triggering auto-restart
+constexpr unsigned long AUTO_STOP_MAX_DURATION_MS = 90000;     // 90s max stop duration before restart
+constexpr unsigned long COLD_CRANK_PRIME_MS = 500;             // ECU cold boot & trigger sync delay (ms)
+constexpr unsigned long ECO_CRANK_PRIME_MS = 30;               // Fast warm restart prime delay (ms)
+constexpr float BASELINE_IDLE_FUEL_L_PER_HR = 0.90f;           // Idle fuel consumption baseline (L/h)
 
 // --- SYSTEM STATES ---
-enum SystemState
+enum SystemState : uint8_t
 {
   STATE_SLEEP,
   STATE_STANDBY,
@@ -288,36 +238,3 @@ inline bool isCanActiveState(SystemState state)
           state == STATE_RUNNING ||
           state == STATE_AUTO_STOP);
 }
-
-enum ToneState
-{
-  TONE_IDLE,
-  TONE_ON,
-  TONE_OFF
-};
-enum LockRelayState
-{
-  LOCK_IDLE,
-  LOCK_PULSE_ACTIVE
-};
-
-struct CalibrationPoint
-{
-  int rawValue;
-  float percent;
-};
-
-const int NUM_CALIBRATION_POINTS = 11;
-const CalibrationPoint calibrationTable[NUM_CALIBRATION_POINTS] = {
-    {1326, 0.0f},
-    {3383, 4.9f},
-    {5440, 10.5f},
-    {7498, 16.8f},
-    {9555, 23.9f},
-    {11613, 35.4f},
-    {13670, 50.2f},
-    {15727, 64.4f},
-    {17785, 78.0f},
-    {19842, 90.5f},
-    {21900, 100.0f},
-};

@@ -1,6 +1,20 @@
 #include "display.h"
+#include "globals.h"
 #include "pushstart.h"
 #include "security.h"
+#include <ESP_8_BIT_GFX.h>
+
+static bool fuel = false;
+static bool cool = false;
+static bool speed_on = true;
+static bool oil = false;
+static bool hot = false;
+static bool conn_on = true;
+static bool inj_on = true;
+static bool chg = false;
+static bool chg2 = false;
+static uint8_t overspeed_state = 0;
+static uint8_t boot_chime = 0;
 
 void drawStaticGauge()
 {
@@ -9,8 +23,8 @@ void drawStaticGauge()
 
 void warnings(unsigned long now)
 {
-  buzzer_state = 0;
-  static int priority = 0;
+  bool buzzer_state = false;
+  static uint8_t priority = 0;
   //------------------------------------------
   if (fuel_level_valid && percent <= LOW_FUEL_LEVEL && lowBlinkState && fuel_run)
   {
@@ -106,7 +120,7 @@ void warnings(unsigned long now)
   }
 
   //------------------------------------------------
-  bool lowOilActive = frontMcuEnvLive && (oil_level > 0);
+  bool lowOilActive = frontMcuEnvLive && (oil_level_t > 0);
   if (lowOilActive && lowBlinkState && priority == 0)
   {
     if (oil_on)
@@ -187,43 +201,43 @@ void warnings(unsigned long now)
     inj_on = true;
   }
   portENTER_CRITICAL(&dataMux);
-  int local_charge_state = charge_state;
+  uint8_t local_charge_state = charge_state;
   uint32_t local_last_charge = last_charge;
   portEXIT_CRITICAL(&dataMux);
 
   if (local_charge_state == 1 && lowBlinkState &&
       now - local_last_charge > CHARGE_MALFUNCTION_DELAY_MS && priority == 0)
   {
-    if (chg == 0)
+    if (!chg)
     {
       tv.setCursor(WARNING_X + 10, WARNING_Y + 10);
       tv.setTextColor(0xFF);
       tv.print("CHARGING SYSTEM FAIL !");
-      chg = 1;
+      chg = true;
     }
-    buzzer_state = 1;
+    buzzer_state = true;
   }
-  else if ((!lowBlinkState || local_charge_state != 1) && chg == 1)
+  else if ((!lowBlinkState || local_charge_state != 1) && chg)
   {
     tv.fillRect(WARNING_X + 10, WARNING_Y + 10, 140, 8, 0x00);
-    chg = 0;
+    chg = false;
   }
   if (local_charge_state == 2 && lowBlinkState &&
       now - local_last_charge > BATTERY_LOW_DELAY_MS && priority == 0 && rpm > ENGINE_ACTIVE_RPM_THRESHOLD)
   {
-    if (chg2 == 0)
+    if (!chg2)
     {
       tv.setCursor(WARNING_X + 40, WARNING_Y + 10);
       tv.setTextColor(0xFF);
       tv.print("BATTERY LOW !");
-      chg2 = 1;
+      chg2 = true;
     }
-    buzzer_state = 1;
+    buzzer_state = true;
   }
-  else if ((!lowBlinkState || local_charge_state != 2) && chg2 == 1)
+  else if ((!lowBlinkState || local_charge_state != 2) && chg2)
   {
     tv.fillRect(WARNING_X + 40, WARNING_Y + 10, 84, 8, 0x00);
-    chg2 = 0;
+    chg2 = false;
   }
 
   // -------- Phone Key Detection Warning --------//
@@ -598,10 +612,10 @@ void warnings(unsigned long now)
   if (now >= 1000 && boot_chime <= 70)
   {
     boot_chime++;
-    buzzer_state = 1;
+    buzzer_state = true;
   }
   if (!isTonePlaying())
   {
-    digitalWriteFast(buzzer_pin, buzzer_state ? HIGH : LOW);
+    digitalWrite(buzzer_pin, buzzer_state ? HIGH : LOW);
   }
 }

@@ -17,10 +17,10 @@
 #define SPD_STOP_TIMEOUT_US 1000000UL // No pulse for 1 s => 0 km/h (1 pulse/s = 0.15 km/h)
 #define RPM_STALE_TIMEOUT_US 1000000UL
 
-const int tempPin = A0;
-const int fan = 5;
-const int ac = A1;
-const int map_pin = A3;
+constexpr uint8_t tempPin = A0;
+constexpr uint8_t fan = 5;
+constexpr uint8_t ac = A1;
+constexpr uint8_t map_pin = A3;
 #define inj_sense_pin 7
 
 // --- MAP / Vacuum Sensor (Toyota 89420-02010 / 89420-02020) ---
@@ -33,7 +33,6 @@ const int map_pin = A3;
 
 float map_adc_avg = (float)MAP_CALIB_ATM_DEFAULT;
 uint16_t map_atm_adc = MAP_CALIB_ATM_DEFAULT;
-float vac_psi = 0.0f;
 uint16_t vac_psi_x100 = 0;     // Gauge vacuum in 0.01 PSI (0..1500 => 0.00..15.00 PSI)
 uint16_t baro_psi_x100 = 1470; // Barometric baseline in 0.01 PSI (default 14.70 PSI at sea level)
 bool baro_calibrated = false;  // True once atmospheric baseline was sampled with engine stopped (RPM == 0)
@@ -65,8 +64,8 @@ unsigned long lastMapReadTime = 0;
 #define MAX_SPEED_KMH 220
 
 // --- Oil Level Filter (W202 S11 Switch: LOW = OK, HIGH = Low Oil with 47k pull-up) ---
-#define OIL_LOW_PERSIST_MS 30000UL // 30s sustained low oil to trigger warning (rejects slosh)
-#define OIL_OK_RECOVERY_MS 10000UL // 10s continuous OK to clear warning
+#define OIL_LOW_PERSIST_MS 30000U  // 30s sustained low oil to trigger warning (rejects slosh)
+#define OIL_OK_RECOVERY_MS 10000U  // 10s continuous OK to clear warning
 #define OIL_CHECK_MIN_RPM 500      // Engine running qualification threshold
 
 // --- CAN ---
@@ -94,9 +93,8 @@ volatile bool inj_just_ended = false;
 volatile bool inj_active = false;
 
 // State variables (loop only)
-uint32_t rpm = 0;
-uint32_t spd = 0;
-uint16_t spd_s = 0;
+uint16_t rpm = 0;
+uint16_t spd = 0;
 bool injDisable = false;
 bool eco_inj_cut_cmd = false;
 bool eco_inj_cut_active = false;
@@ -115,8 +113,6 @@ unsigned long lastCan06SendTime = 0;
 unsigned long lastCanAnyTxTime = 0;
 unsigned long lastSensorTime = 0;
 
-struct can_frame canMsgRx;
-struct can_frame canMsgTx;
 MCP2515 mcp2515(10, 8000000);
 
 //=============Interrupt Service Routine ===============//
@@ -214,7 +210,6 @@ void setup()
   pinModeFast(oil_level_pin, INPUT);
   pinModeFast(regulator_pin, OUTPUT);
   digitalWriteFast(regulator_pin, LOW); // Safe state on boot
-  Serial.begin(115200);
 
   // Attach interrupts
   attachInterrupt(digitalPinToInterrupt(rpm_pin), rpmISR, FALLING);
@@ -303,7 +298,6 @@ void loop()
     // Gauge vacuum below atmospheric: delta from barometric reference (0.00 PSI when stopped)
     if (rpm == 0)
     {
-      vac_psi = 0.0f;
       vac_psi_x100 = 0;
     }
     else
@@ -311,7 +305,7 @@ void loop()
       float vac_counts = (float)map_atm_adc - map_adc_avg;
       if (vac_counts < 0.0f)
         vac_counts = 0.0f;
-      vac_psi = vac_counts * MAP_ADC_TO_PSI;
+      float vac_psi = vac_counts * MAP_ADC_TO_PSI;
       if (vac_psi > 15.0f)
         vac_psi = 15.0f;
       vac_psi_x100 = (uint16_t)(vac_psi * 100.0f + 0.5f);
@@ -384,8 +378,8 @@ void loop()
     // Damping: Requires 30s sustained LOW oil reading (HIGH) while engine is running (RPM >= 500)
     // to reject cornering/braking slosh. Requires 10s continuous OK (LOW) to clear warning.
     uint8_t raw_oil = digitalReadFast(oil_level_pin);
-    static uint32_t oil_low_accum_ms = 0;
-    static uint32_t oil_ok_accum_ms = 0;
+    static uint16_t oil_low_accum_ms = 0;
+    static uint16_t oil_ok_accum_ms = 0;
 
     if (rpm >= OIL_CHECK_MIN_RPM)
     {
@@ -453,7 +447,7 @@ void loop()
   }
   else if (p >= 2500UL)
   {
-    rpm = 30000000UL / p; // 60,000,000 / (p * 2 pulses/rev)
+    rpm = (uint16_t)(30000000UL / p); // 60,000,000 / (p * 2 pulses/rev)
   }
   // If p < 2500UL (noise glitch > 12,000 RPM), retain previous valid rpm reading
 
@@ -595,7 +589,7 @@ void loop()
         float kmh = ((float)new_pulses * 3.6e9f) / ((float)PULSES_PER_KM * (float)dt_us);
         if (kmh <= (float)MAX_SPEED_KMH * 1.5f) // Ignore physically impossible readings (noise)
         {
-          spd = (uint32_t)(kmh + 0.5f);
+          spd = (uint16_t)(kmh + 0.5f);
         }
       }
       spd_ref_pulses = pulses_now;
@@ -615,21 +609,20 @@ void loop()
         // Real speed is at most 1 pulse per since_edge_us: lets the reading fall smoothly to 0 when stopping
         float kmh_max = 3.6e9f / ((float)PULSES_PER_KM * (float)since_edge_us);
         if ((float)spd > kmh_max)
-          spd = (uint32_t)(kmh_max + 0.5f);
+          spd = (uint16_t)(kmh_max + 0.5f);
       }
     }
-    spd_s = (spd > MAX_SPEED_KMH) ? MAX_SPEED_KMH : (uint16_t)spd;
 
     lastSpdCalculationTime = currentMillis;
   }
 
-  static int alive = 0;
   // Process CAN and auto-recover errors
+  struct can_frame canMsgRx;
   for (uint8_t i = 0; i < 10 && mcp2515.readMessage(&canMsgRx) == MCP2515::ERROR_OK; i++)
   {
     if (canMsgRx.can_id == 0x03)
     {
-      alive = canMsgRx.data[0];
+      uint8_t alive = canMsgRx.data[0];
       eco_inj_cut_cmd = (canMsgRx.data[1] & 0x01) != 0;
       last_check = currentMillis;
 
@@ -657,7 +650,6 @@ void loop()
   // Failsafe timeout: if no message in 1000ms, assume dead
   if (currentMillis - last_check > HEARTBEAT_TIMEOUT_MS)
   {
-    alive = 0;
     eco_inj_cut_cmd = false;              // Safe state: clear fuel cut so engine can run
     digitalWriteFast(regulator_pin, LOW); // De-energize field disconnect relay
   }
@@ -668,10 +660,12 @@ void loop()
   {
     static uint8_t seq_02 = 0;
 
-    uint16_t rpm_s = (uint16_t)rpm;
+    uint16_t rpm_s = rpm;
+    uint16_t spd_s = (spd > MAX_SPEED_KMH) ? MAX_SPEED_KMH : spd;
     uint8_t th_state = (uint8_t)digitalReadFast(th_pin); // 1 = closed (idle), 0 = open
 
     // CAN ID 0x02: Fast Engine & Motion Telemetry (50 Hz, DLC 8)
+    struct can_frame canMsgTx;
     canMsgTx.can_id = 0x02;
     canMsgTx.can_dlc = 8;
     canMsgTx.data[0] = rpm_s & 0xFF;               // RPM low byte
@@ -696,6 +690,7 @@ void loop()
     uint16_t map_adc_s = (uint16_t)(map_adc_avg + 0.5f);
 
     // CAN ID 0x05: Manifold Vacuum & Barometric Telemetry (50 Hz, DLC 8)
+    struct can_frame canMsgTx;
     canMsgTx.can_id = 0x05;
     canMsgTx.can_dlc = 8;
     canMsgTx.data[0] = vac_psi_x100 & 0xFF;        // Manifold vacuum low byte (0.01 PSI)
@@ -733,6 +728,7 @@ void loop()
     interrupts();
 
     // CAN ID 0x04: Cumulative Injector & Speed Telemetry (DLC 8)
+    struct can_frame canMsgTx;
     canMsgTx.can_id = 0x04;
     canMsgTx.can_dlc = 8;
     canMsgTx.data[0] = inj_time_snap & 0xFF;
@@ -757,6 +753,7 @@ void loop()
     uint8_t ac_state = (acState_avg >= FAN_AC_MIN_ADC) ? 1 : 0;
 
     // CAN ID 0x06: Thermal & Auxiliary Status (10 Hz, DLC 8) — Fully unpacked
+    struct can_frame canMsgTx;
     canMsgTx.can_id = 0x06;
     canMsgTx.can_dlc = 8;
     canMsgTx.data[0] = temp_s & 0xFF;        // Raw Temp ADC low byte
