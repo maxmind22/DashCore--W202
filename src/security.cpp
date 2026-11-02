@@ -41,6 +41,7 @@ static const size_t NUM_AUTHORIZED_IRKS = sizeof(BLE_AUTHORIZED_IRKS) / sizeof(B
 static constexpr unsigned long BLE_PAIRING_SETTLE_MS   = 100; // Let Core 0 ble_sm_persist_keys() + LL ACK finish before disconnect
 static constexpr unsigned long BLE_DISCONNECT_DRAIN_MS = 500; // Max non-blocking wait for LL_TERMINATE_IND completion
 static constexpr unsigned long BLE_SYNC_DRAIN_MS       = 200; // Max synchronous disconnect wait (e.g. before deep sleep)
+static constexpr unsigned long BLE_STOP_SETTLE_MS       = 60;  // Quiet window for controller to ACK disc_cancel/adv_stop & drain timers
 static constexpr uint32_t      BLE_WDT_DEINIT_TIMEOUT_S = 3;  // > NimBLE's 2000ms ble_hs_stop timeout (Core 1 WDT is 1s)
 static constexpr uint32_t      BLE_WDT_NORMAL_TIMEOUT_S = 1;  // Matches setup() esp_task_wdt_init(1, true)
 static constexpr uint16_t      ESP32_MAX_BLE_CONN_HANDLES = 9; // ESP32 controller supports handles 0..8
@@ -55,7 +56,6 @@ static uint8_t  persistedIRKCount = 0;
 static bool bleInitialized = false;
 static bool bleScanning = false;
 static bool classicBtMemReleased = false;
-static bool bleMemReleased = false;
 
 // Check if a 16-byte key is all zeros (unconfigured)
 static bool isZeroKey(const uint8_t key[16])
@@ -231,6 +231,12 @@ void processBLEEvents()
     // stays uninterrupted and ble_hs_stop() sees 0 open connections on deinit.
     if (terminateAndCountOpenConnections(false) > 0 &&
         (nowMs - teardownStartMs < BLE_DISCONNECT_DRAIN_MS))
+    {
+      return;
+    }
+
+    // Ensure a minimum quiet window after stopping scan/adv so controller ACKs and timers settle
+    if (nowMs - teardownStartMs < BLE_STOP_SETTLE_MS)
     {
       return;
     }
@@ -738,7 +744,7 @@ void setupBLESecurity()
     classicBtMemReleased = true;
   }
 
-  if (isPhoneAuthorized() || bleMemReleased)
+  if (isPhoneAuthorized())
     return;
 
   bleTeardownPending = false;
@@ -836,6 +842,18 @@ void teardownBLESecurity()
 
       stopScanAndAdvertising();
 
+      // Give controller and host stack a quiet window to complete cancellation of
+      // active discovery and advertising, and let the timer task drain pending callouts.
+      unsigned long stopSettleStart = millis();
+      while (millis() - stopSettleStart < BLE_STOP_SETTLE_MS)
+      {
+        if (esp_task_wdt_status(nullptr) == ESP_OK)
+        {
+          esp_task_wdt_reset();
+        }
+        delay(5);
+      }
+
       // If called synchronously while a link is still active (e.g. enterPowerDownSleep),
       // drain the disconnect cleanly before ble_hs_stop().
       if (terminateAndCountOpenConnections(true) > 0)
@@ -860,7 +878,7 @@ void teardownBLESecurity()
     bool wdtExtended = extendLoopTaskWdtForBLE();
     if (nimbleUp)
     {
-      NimBLEDevice::deinit(true);
+      NimBLEDevice::deinit(false);
     }
     if (esp_bt_controller_get_status() == ESP_BT_CONTROLLER_STATUS_ENABLED)
     {
@@ -879,17 +897,6 @@ void teardownBLESecurity()
   {
     pairingBondSyncPending = false;
     bleScanning = false;
-  }
-
-  // Once permanently authorized by phone (not merely 6-pulse bypass toggle), release the
-  // BLE controller's static DRAM back to the internal heap for the remainder of the drive.
-  if (phoneAuthorized && !bleMemReleased &&
-      esp_bt_controller_get_status() == ESP_BT_CONTROLLER_STATUS_IDLE)
-  {
-    if (esp_bt_controller_mem_release(ESP_BT_MODE_BLE) == ESP_OK)
-    {
-      bleMemReleased = true;
-    }
   }
 }
 
