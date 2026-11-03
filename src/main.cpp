@@ -142,7 +142,9 @@ void setup()
   tv.copyAfterSwap = true;
 
   if (rtc_trip_magic != RTC_TRIP_MAGIC_KEY || isnan(total_fuel_liters) ||
-      isnan(total_distance_km) || isnan(total_fuel_saved_liters))
+      isnan(total_distance_km) || isnan(total_fuel_saved_liters) ||
+      isnan(last_known_avg_l_100km) || last_known_avg_l_100km < 3.0f ||
+      last_known_avg_l_100km > 30.0f)
   {
     loadTripDataFromNVS(); // Reads double keys (migrates legacy float keys) and sanitizes values
     rtc_trip_magic = RTC_TRIP_MAGIC_KEY;
@@ -272,7 +274,7 @@ void loop()
   float local_current_A_filtered = current_A_filtered;
   portEXIT_CRITICAL(&dataMux);
 
-  if (local_ads_fuel < 22000 && local_ads_fuel > 1200)
+  if (local_ads_fuel < 24500 && local_ads_fuel > 800)
   {
     raw = local_ads_fuel;
     if (!fuel_level_valid)
@@ -784,20 +786,24 @@ void loop()
       total_fuel_saved_liters += fuel_saved_interval;
     }
 
-    // Update trip distance from cumulative speed sensor pulses (lossless, exact)
-    float interval_dist_km = (float)interval_spd_pulses / PULSES_PER_KM_F;
-    total_distance_km += interval_dist_km;
-
     float speed_val = (float)spd;
     // Standard automotive threshold: calculate L/100km only when moving >= 3 km/h
     bool is_moving = (speed_val >= 3.0f);
+
+    // Update trip distance from cumulative speed sensor pulses (lossless, exact)
+    // Fall back to speed integration if pulse delta was delayed/zeroed across intervals while moving
+    float interval_dist_km = (float)interval_spd_pulses / PULSES_PER_KM_F;
+    float dist_increment_km = (interval_dist_km > 0.00001f)
+                                  ? interval_dist_km
+                                  : (is_moving ? ((speed_val / 3600.0f) * elapsed_sec) : 0.0f);
+    total_distance_km += dist_increment_km;
 
     // Calculate instant consumption
     float inst_val;
     if (is_moving)
     {
-      float dist_for_calc = (interval_dist_km > 0.0001f)
-                                ? interval_dist_km
+      float dist_for_calc = (dist_increment_km > 0.0001f)
+                                ? dist_increment_km
                                 : ((speed_val / 3600.0f) * elapsed_sec);
       // inst_val in L/100km, clamped to 99.9 to prevent text overflow
       inst_val = (fuel_consumed_liters / dist_for_calc) * 100.0f;
@@ -883,11 +889,31 @@ void loop()
     tv.print(bufSaved);
 
     char bufRem[20];
-    if (fuel_level_valid && avg_l_100km > 0.1f &&
-        total_distance_km >= RANGE_MIN_TRIP_KM)
+    if (fuel_level_valid)
     {
       float rem_fuel_l = (fuel_percent_f / 100.0f) * FUEL_TANK_CAPACITY_LITERS;
-      float rem_km = (rem_fuel_l / avg_l_100km) * 100.0f;
+
+      // Determine effective consumption rate (L/100km):
+      // 1. If trip distance >= RANGE_MIN_TRIP_KM and avg_l_100km is plausible (3..25 L/100km), use actual trip average
+      // 2. If trip distance is 0.5..5 km, smoothly blend from historical/nominal baseline to trip average
+      // 3. Below 0.5 km (stationary, right after reset, or at boot), use historical/nominal baseline
+      float eff_l_100km = (last_known_avg_l_100km >= 3.0f && last_known_avg_l_100km <= 25.0f)
+                              ? last_known_avg_l_100km
+                              : DEFAULT_CONSUMPTION_L_100KM;
+
+      bool avg_plausible = (avg_l_100km >= 3.0f && avg_l_100km <= 25.0f);
+      if (total_distance_km >= RANGE_MIN_TRIP_KM && avg_plausible)
+      {
+        eff_l_100km = avg_l_100km;
+        last_known_avg_l_100km = avg_l_100km;
+      }
+      else if (total_distance_km > 0.5 && avg_plausible)
+      {
+        float trip_weight = constrain((float)(total_distance_km / RANGE_MIN_TRIP_KM), 0.0f, 1.0f);
+        eff_l_100km = trip_weight * avg_l_100km + (1.0f - trip_weight) * eff_l_100km;
+      }
+
+      float rem_km = (rem_fuel_l / eff_l_100km) * 100.0f;
       rem_km = constrain(rem_km, 0.0f, 999.0f);
       snprintf(bufRem, sizeof(bufRem), "REM:%4.0fkm", rem_km);
     }

@@ -39,6 +39,7 @@ RTC_DATA_ATTR double total_fuel_liters = 0.0;
 RTC_DATA_ATTR double total_distance_km = 0.0;
 RTC_DATA_ATTR float compounded_r_int = 0.0f;
 RTC_DATA_ATTR double total_fuel_saved_liters = 0.0;
+RTC_DATA_ATTR float last_known_avg_l_100km = 9.0f;
 volatile float last_active_inj_pulse_us = 1500.0f;
 
 int16_t spd = 0;

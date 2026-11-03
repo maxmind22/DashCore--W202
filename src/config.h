@@ -188,7 +188,8 @@ constexpr uint8_t LOW_FUEL_LEVEL = 10;
 constexpr float INJECTOR_FLOW_RATE_CC_MIN = 228.0f; // Rated 228 cc/min @ 3.8 bar OEM regulator pressure
 constexpr uint8_t NUM_INJECTORS = 4;
 constexpr float FUEL_TANK_CAPACITY_LITERS = 62.0f;
-constexpr float RANGE_MIN_TRIP_KM = 5.0f; // Min trip distance before REM (range) is shown; avoids absurd values right after a reset
+constexpr float DEFAULT_CONSUMPTION_L_100KM = 9.0f; // Baseline consumption (L/100km) for range estimation
+constexpr float RANGE_MIN_TRIP_KM = 5.0f; // Min trip distance before REM fully tracks trip average
 #define RTC_TRIP_MAGIC_KEY 0xCAFE4567UL
 
 // Timeout Constants

@@ -1,4 +1,5 @@
 #include "fuel.h"
+#include "config.h"
 #include "globals.h"
 #include <ESP_8_BIT_GFX.h>
 #include <Preferences.h>
@@ -71,6 +72,7 @@ void loadTripDataFromNVS() {
     total_fuel_saved_liters = prefs.getFloat("saved", 0.0f);
   }
   compounded_r_int = prefs.getFloat("r_int", 0.0f);
+  last_known_avg_l_100km = prefs.getFloat("avg_d", DEFAULT_CONSUMPTION_L_100KM);
   prefs.end();
 
   total_fuel_liters = sanitizeTripValue(total_fuel_liters);
@@ -78,6 +80,9 @@ void loadTripDataFromNVS() {
   total_fuel_saved_liters = sanitizeTripValue(total_fuel_saved_liters);
   if (isnan(compounded_r_int) || compounded_r_int < 0.0f)
     compounded_r_int = 0.0f;
+  if (isnan(last_known_avg_l_100km) || last_known_avg_l_100km < 3.0f ||
+      last_known_avg_l_100km > 30.0f)
+    last_known_avg_l_100km = DEFAULT_CONSUMPTION_L_100KM;
 }
 
 void saveTripDataToNVS() {
@@ -87,6 +92,7 @@ void saveTripDataToNVS() {
   prefs.putDouble("dist_d", total_distance_km);
   prefs.putDouble("saved_d", total_fuel_saved_liters);
   prefs.putFloat("r_int", compounded_r_int);
+  prefs.putFloat("avg_d", last_known_avg_l_100km);
   prefs.end();
 }
 
