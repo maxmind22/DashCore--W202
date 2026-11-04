@@ -26,7 +26,6 @@ enum LockRelayState : uint8_t
 
 static RTC_DATA_ATTR bool vehicleLockDisabled = false;
 static unsigned long lastButtonPressTime = 0;
-static bool isEcoRestart = false;
 static unsigned long autoStopStartTime = 0;
 static unsigned long standstillStartTime = 0;
 

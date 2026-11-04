@@ -144,7 +144,10 @@ void setup()
   if (rtc_trip_magic != RTC_TRIP_MAGIC_KEY || isnan(total_fuel_liters) ||
       isnan(total_distance_km) || isnan(total_fuel_saved_liters) ||
       isnan(last_known_avg_l_100km) || last_known_avg_l_100km < 3.0f ||
-      last_known_avg_l_100km > 30.0f)
+      last_known_avg_l_100km > 30.0f || isnan(measured_idle_l_per_hr) ||
+      measured_idle_l_per_hr < 0.3f || measured_idle_l_per_hr > 3.0f ||
+      isnan(last_active_inj_pulse_us) || last_active_inj_pulse_us < 500.0f ||
+      last_active_inj_pulse_us > 10000.0f)
   {
     loadTripDataFromNVS(); // Reads double keys (migrates legacy float keys) and sanitizes values
     rtc_trip_magic = RTC_TRIP_MAGIC_KEY;
@@ -734,17 +737,20 @@ void loop()
     if (elapsed_sec <= 0.0f)
       elapsed_sec = 1.0f;
 
-    // Measured warm-idle consumption (L/h), learned below while idling; used for Auto Start-Stop savings
-    static float measured_idle_l_per_hr = BASELINE_IDLE_FUEL_L_PER_HR;
-
-    // Atomically fetch and reset cumulative CAN 0x04 counters from Core 0 (lossless)
+    // Atomically fetch and reset cumulative CAN 0x02/0x04 counters from Core 0 (lossless)
     portENTER_CRITICAL(&dataMux);
     uint32_t interval_inj_time_us = accumulated_inj_time_us;
     uint32_t interval_inj_pulses = accumulated_inj_pulses;
     uint32_t interval_spd_pulses = spd_delta_pulses;
+    float interval_dfco_saved_us = accumulated_dfco_saved_us;
+    uint32_t interval_auto_stop_ms = accumulated_auto_stop_ms;
+    float interval_eco_crank_net_us = accumulated_eco_crank_net_us;
     accumulated_inj_time_us = 0;
     accumulated_inj_pulses = 0;
     spd_delta_pulses = 0;
+    accumulated_dfco_saved_us = 0.0f;
+    accumulated_auto_stop_ms = 0;
+    accumulated_eco_crank_net_us = 0.0f;
     portEXIT_CRITICAL(&dataMux);
 
     // --- Dead-time compensation ---
@@ -758,32 +764,29 @@ void loop()
     if (corrected_inj_us < 0.0f)
       corrected_inj_us = 0.0f;
 
+    // Total flow factor across all injectors (liters per microsecond of single-injector net open time)
+    constexpr double INJ_LITERS_PER_US_ALL =
+        ((double)INJECTOR_FLOW_RATE_CC_MIN / 60.0 / 1000.0 / 1000000.0) *
+        (double)NUM_INJECTORS;
+
     // Fuel consumed during the interval (in liters)
-    float fuel_consumed_liters = (corrected_inj_us / 1000000.0f) *
-                                 (INJECTOR_FLOW_RATE_CC_MIN / 60.0f / 1000.0f) *
-                                 (float)NUM_INJECTORS;
+    float fuel_consumed_liters = (float)((double)corrected_inj_us * INJ_LITERS_PER_US_ALL);
 
-    total_fuel_liters += fuel_consumed_liters;
+    total_fuel_liters += (double)corrected_inj_us * INJ_LITERS_PER_US_ALL;
 
-    if (dfco_cut_state == 1 && rpm > 0)
+    // Net fuel saved (integrated at 50 Hz / 20 Hz on Core 0):
+    // 1. DFCO: closed-throttle net pulse scaled by live MAP across every 20 ms 0x02 frame
+    // 2. Auto Start-Stop: warm-idle rate over exact eco-cut duration minus eco-restart cranking fuel
+    double dfco_saved_liters = (double)interval_dfco_saved_us * INJ_LITERS_PER_US_ALL;
+    double auto_stop_saved_liters =
+        ((double)measured_idle_l_per_hr / 3600.0) * ((double)interval_auto_stop_ms * 0.001);
+    double eco_crank_used_liters =
+        (double)interval_eco_crank_net_us * INJ_LITERS_PER_US_ALL;
+
+    total_fuel_saved_liters += dfco_saved_liters + auto_stop_saved_liters - eco_crank_used_liters;
+    if (total_fuel_saved_liters < 0.0)
     {
-      // Calculate fuel saved using the pre-cutoff net pulse width (fallback 1500us net)
-      float net_saved_pulse_us = (last_active_inj_pulse_us >= 500.0f)
-                                     ? last_active_inj_pulse_us
-                                     : 1500.0f;
-      float saved_inj_time_us =
-          ((float)rpm / 120.0f) * net_saved_pulse_us * elapsed_sec;
-      float fuel_saved_interval =
-          (saved_inj_time_us / 1000000.0f) *
-          (INJECTOR_FLOW_RATE_CC_MIN / 60.0f / 1000.0f) * (float)NUM_INJECTORS;
-      total_fuel_saved_liters += fuel_saved_interval;
-    }
-    else if (currentState == STATE_AUTO_STOP)
-    {
-      // Calculate fuel saved during Auto Start-Stop based on the measured warm-idle rate
-      float fuel_saved_interval =
-          (measured_idle_l_per_hr / 3600.0f) * elapsed_sec;
-      total_fuel_saved_liters += fuel_saved_interval;
+      total_fuel_saved_liters = 0.0;
     }
 
     float speed_val = (float)spd;
@@ -815,10 +818,11 @@ void loop()
       // stationary consumption in L/h
       inst_val = (fuel_consumed_liters / elapsed_sec) * 3600.0f;
 
-      // Learn warm-idle consumption under the same conditions Auto Start-Stop engages in
+      // Learn steady warm-idle consumption (skip 5s after start to exclude after-start enrichment)
       if (currentState == STATE_RUNNING && injector_state == 0 &&
           th_switch_state == 1 && temp_out >= AUTO_STOP_MIN_TEMP_C &&
           rpm >= VAC_LEAK_MIN_RPM && rpm <= VAC_LEAK_MAX_RPM &&
+          (lastEngineStartTime == 0 || (now - lastEngineStartTime >= 5000UL)) &&
           inst_val >= 0.3f && inst_val <= 3.0f)
       {
         measured_idle_l_per_hr = 0.02f * inst_val + 0.98f * measured_idle_l_per_hr; // ~50 s time constant

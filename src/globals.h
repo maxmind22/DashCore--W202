@@ -25,6 +25,7 @@ extern bool stoppedToAcc;
 extern volatile bool regulatorTaskRunning;
 
 extern bool ecoInjCutActive;
+extern volatile bool isEcoRestart;
 extern unsigned long lastEngineStartTime;
 
 extern bool lowBlinkState;
@@ -37,6 +38,9 @@ extern bool fuel_level_valid; // True once the first valid fuel sender sample wa
 extern volatile uint32_t accumulated_inj_time_us;
 extern volatile uint32_t accumulated_inj_pulses;
 extern volatile uint32_t spd_delta_pulses;
+extern volatile float accumulated_dfco_saved_us;
+extern volatile uint32_t accumulated_auto_stop_ms;
+extern volatile float accumulated_eco_crank_net_us;
 extern volatile float live_inj_duty_cycle;
 extern volatile float live_net_pulse_us;
 extern RTC_DATA_ATTR double total_fuel_liters;
@@ -44,7 +48,9 @@ extern RTC_DATA_ATTR double total_distance_km;
 extern RTC_DATA_ATTR float compounded_r_int;
 extern RTC_DATA_ATTR double total_fuel_saved_liters;
 extern RTC_DATA_ATTR float last_known_avg_l_100km;
-extern volatile float last_active_inj_pulse_us;
+extern RTC_DATA_ATTR float measured_idle_l_per_hr;
+extern RTC_DATA_ATTR volatile float last_active_inj_pulse_us;
+extern RTC_DATA_ATTR volatile float last_active_dfco_map_psi;
 
 extern int16_t spd;
 extern volatile uint16_t spd_t;

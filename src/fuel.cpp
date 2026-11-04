@@ -44,6 +44,9 @@ void resetFuelTripData(unsigned long now) {
   accumulated_inj_time_us = 0;
   accumulated_inj_pulses = 0;
   spd_delta_pulses = 0;
+  accumulated_dfco_saved_us = 0.0f;
+  accumulated_auto_stop_ms = 0;
+  accumulated_eco_crank_net_us = 0.0f;
   portEXIT_CRITICAL(&dataMux);
 
   saveTripDataToNVS();
@@ -73,6 +76,9 @@ void loadTripDataFromNVS() {
   }
   compounded_r_int = prefs.getFloat("r_int", 0.0f);
   last_known_avg_l_100km = prefs.getFloat("avg_d", DEFAULT_CONSUMPTION_L_100KM);
+  measured_idle_l_per_hr = prefs.getFloat("idle_lh", BASELINE_IDLE_FUEL_L_PER_HR);
+  float saved_dfco_us = prefs.getFloat("dfco_us", 1500.0f);
+  float saved_dfco_map = prefs.getFloat("dfco_map", 0.0f);
   prefs.end();
 
   total_fuel_liters = sanitizeTripValue(total_fuel_liters);
@@ -83,9 +89,30 @@ void loadTripDataFromNVS() {
   if (isnan(last_known_avg_l_100km) || last_known_avg_l_100km < 3.0f ||
       last_known_avg_l_100km > 30.0f)
     last_known_avg_l_100km = DEFAULT_CONSUMPTION_L_100KM;
+  if (isnan(measured_idle_l_per_hr) || isinf(measured_idle_l_per_hr) ||
+      measured_idle_l_per_hr < 0.3f || measured_idle_l_per_hr > 3.0f)
+    measured_idle_l_per_hr = BASELINE_IDLE_FUEL_L_PER_HR;
+  if (isnan(saved_dfco_us) || isinf(saved_dfco_us) ||
+      saved_dfco_us < 500.0f || saved_dfco_us > 10000.0f) {
+    saved_dfco_us = 1500.0f;
+    saved_dfco_map = 0.0f;
+  }
+  if (isnan(saved_dfco_map) || isinf(saved_dfco_map) ||
+      saved_dfco_map < 1.0f || saved_dfco_map > 16.5f) {
+    saved_dfco_map = 0.0f;
+  }
+  portENTER_CRITICAL(&dataMux);
+  last_active_inj_pulse_us = saved_dfco_us;
+  last_active_dfco_map_psi = saved_dfco_map;
+  portEXIT_CRITICAL(&dataMux);
 }
 
 void saveTripDataToNVS() {
+  portENTER_CRITICAL(&dataMux);
+  float dfco_us = last_active_inj_pulse_us;
+  float dfco_map = last_active_dfco_map_psi;
+  portEXIT_CRITICAL(&dataMux);
+
   Preferences prefs;
   prefs.begin("trip_data", false);
   prefs.putDouble("fuel_d", total_fuel_liters);
@@ -93,6 +120,9 @@ void saveTripDataToNVS() {
   prefs.putDouble("saved_d", total_fuel_saved_liters);
   prefs.putFloat("r_int", compounded_r_int);
   prefs.putFloat("avg_d", last_known_avg_l_100km);
+  prefs.putFloat("idle_lh", measured_idle_l_per_hr);
+  prefs.putFloat("dfco_us", dfco_us);
+  prefs.putFloat("dfco_map", dfco_map);
   prefs.end();
 }
 

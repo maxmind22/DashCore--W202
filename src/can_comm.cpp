@@ -218,22 +218,84 @@ static int rawAdcToTempC(uint16_t raw_adc)
   return constrain(t_c, 40, 120);
 }
 
-#define INJ_HISTORY_SAMPLES 20 // 20 samples @ 50ms = 1000ms rolling window
+#define INJ_HISTORY_SAMPLES 20       // 20 samples @ 50ms = 1000ms closed-throttle window
+#define DFCO_LATCH_SETTLED_MS 800UL  // Settled overrun window (skips initial ~200ms throttle-snap transient)
+#define DFCO_LATCH_MAX_AGE_MS 1200UL // Fallback max age if settled window had no completed pulse
 
 static float inj_history_net_us[INJ_HISTORY_SAMPLES] = {0};
+static float inj_history_map_weighted[INJ_HISTORY_SAMPLES] = {0};
 static uint16_t inj_history_pulses[INJ_HISTORY_SAMPLES] = {0};
+static uint16_t inj_history_map_pulses[INJ_HISTORY_SAMPLES] = {0};
+static unsigned long inj_history_time_ms[INJ_HISTORY_SAMPLES] = {0};
 static uint8_t history_idx = 0;
+static bool inj_history_has_data = false;
 
 static uint32_t last_rx_inj_time_us = 0;
 static uint16_t last_rx_inj_pulses = 0;
 static uint16_t last_rx_spd_pulses = 0;
 
+static unsigned long last_02_rx_time = 0;
 static bool inj_04_synced = false;
 static unsigned long last_04_rx_time = 0;
 // Time the injector snapshot last advanced. The Front MCU re-sends the previous snapshot
 // while an injector is mid-pulse, so at high duty several consecutive 0x04 frames can carry
 // delta = 0 and the next delta then spans several 50 ms intervals.
 static unsigned long last_inj_change_time = 0;
+
+static void clearInjHistory()
+{
+  for (int k = 0; k < INJ_HISTORY_SAMPLES; k++)
+  {
+    inj_history_net_us[k] = 0.0f;
+    inj_history_map_weighted[k] = 0.0f;
+    inj_history_pulses[k] = 0;
+    inj_history_map_pulses[k] = 0;
+    inj_history_time_ms[k] = 0;
+  }
+  history_idx = 0;
+  inj_history_has_data = false;
+}
+
+static bool getLiveMapPsi(unsigned long rxNow, float &out_map_psi)
+{
+#if MAP_SENSOR_ENABLED
+  if (!map_sensor_fault && isBaroValid() &&
+      isCanPacketFresh(rxNow, lastVacPacketTime, FRONT_MCU_CAN_TIMEOUT_MS))
+  {
+    float m = baro_psi - vacuum_psi;
+    if (m >= 1.0f && m <= baro_psi)
+    {
+      out_map_psi = m;
+      return true;
+    }
+  }
+#else
+  (void)rxNow;
+  (void)out_map_psi;
+#endif
+  return false;
+}
+
+static void sumInjHistoryWindow(unsigned long rxNow, uint32_t maxAgeMs,
+                                float &out_net_us, uint32_t &out_pulses,
+                                float &out_map_weighted, uint32_t &out_map_pulses)
+{
+  out_net_us = 0.0f;
+  out_pulses = 0;
+  out_map_weighted = 0.0f;
+  out_map_pulses = 0;
+  for (int k = 0; k < INJ_HISTORY_SAMPLES; k++)
+  {
+    unsigned long t = inj_history_time_ms[k];
+    if (t != 0 && (uint32_t)(rxNow - t) <= maxAgeMs)
+    {
+      out_net_us += inj_history_net_us[k];
+      out_pulses += inj_history_pulses[k];
+      out_map_weighted += inj_history_map_weighted[k];
+      out_map_pulses += inj_history_map_pulses[k];
+    }
+  }
+}
 
 static void processCanFrame(const twai_message_t &msg, unsigned long rxNow)
 {
@@ -253,29 +315,84 @@ static void processCanFrame(const twai_message_t &msg, unsigned long rxNow)
     uint8_t new_inj_state = (rx_dfco || rx_eco_cut) ? 1 : 0;
     uint8_t rx_th = msg.data[6] ? 1 : 0;
 
+    // Purge closed-throttle overrun history immediately whenever throttle opens
+    if (rx_th == 0 && inj_history_has_data)
+    {
+      clearInjHistory();
+    }
+
     uint8_t prevDfcoState = dfco_cut_state;
 
-    // Transition 0 -> 1 on DFCO: injDisable just engaged during deceleration.
-    // Calculate and latch the average net injector pulse width over the active period before cutoff.
+    // Transition 0 -> 1 on DFCO: injDisable just engaged after 1000ms of closed-throttle overrun.
+    // Latch average closed-throttle net pulse width and matched MAP over the settled pre-cut window.
     bool latch_active_pulse = false;
     float latched_avg_net = 0.0f;
+    float latched_avg_map = 0.0f;
     if (prevDfcoState == 0 && rx_dfco == 1)
     {
       float total_net_us = 0.0f;
       uint32_t total_p = 0;
-      for (int k = 0; k < INJ_HISTORY_SAMPLES; k++)
+      float total_map_weighted = 0.0f;
+      uint32_t total_map_p = 0;
+
+      sumInjHistoryWindow(rxNow, DFCO_LATCH_SETTLED_MS,
+                          total_net_us, total_p, total_map_weighted, total_map_p);
+      if (total_p == 0)
       {
-        total_net_us += inj_history_net_us[k];
-        total_p += inj_history_pulses[k];
+        sumInjHistoryWindow(rxNow, DFCO_LATCH_MAX_AGE_MS,
+                            total_net_us, total_p, total_map_weighted, total_map_p);
       }
+
       if (total_p > 0 && total_net_us > 0.0f)
       {
         float avg_net = total_net_us / (float)total_p;
-        if (avg_net >= 500.0f)
+        if (avg_net >= 500.0f && avg_net <= 10000.0f)
         {
           latch_active_pulse = true;
           latched_avg_net = avg_net;
+          latched_avg_map = (total_map_p > 0) ? (total_map_weighted / (float)total_map_p) : 0.0f;
         }
+      }
+    }
+
+    // Integrate DFCO and Auto Start-Stop fuel savings at 50 Hz (every 0x02 frame)
+    uint32_t dt_02_ms = 0;
+    if (last_02_rx_time != 0 && isCanPacketFresh(rxNow, last_02_rx_time, FRONT_MCU_CAN_TIMEOUT_MS))
+    {
+      uint32_t raw_dt = (uint32_t)(rxNow - last_02_rx_time);
+      dt_02_ms = (raw_dt <= 200UL) ? raw_dt : 200UL;
+    }
+    last_02_rx_time = rxNow;
+
+    float saved_dfco_us = 0.0f;
+    uint32_t saved_auto_stop_ms = 0;
+    if (dt_02_ms > 0)
+    {
+      if (rx_dfco == 1 && rx_rpm > 0)
+      {
+        float base_pulse_us = latch_active_pulse ? latched_avg_net : last_active_inj_pulse_us;
+        float base_map_psi = latch_active_pulse ? latched_avg_map : last_active_dfco_map_psi;
+        if (base_pulse_us < 500.0f || base_pulse_us > 10000.0f)
+        {
+          base_pulse_us = 1500.0f;
+          base_map_psi = 0.0f;
+        }
+
+        // Scale closed-throttle pulse width by live manifold pressure as RPM falls during coasting
+        float map_scale = 1.0f;
+        float live_map_psi = 0.0f;
+        if (rx_th == 1 && base_map_psi >= 1.0f && getLiveMapPsi(rxNow, live_map_psi))
+        {
+          map_scale = constrain(live_map_psi / base_map_psi, 0.6f, 2.0f);
+        }
+
+        float eff_net_pulse_us = base_pulse_us * map_scale;
+        // 4-stroke sequential: monitored injector fires once per 2 revolutions (RPM / 120 Hz)
+        saved_dfco_us = ((float)rx_rpm / 120.0f) * eff_net_pulse_us * ((float)dt_02_ms * 0.001f);
+      }
+      else if (rx_eco_cut == 1 && currentState == STATE_AUTO_STOP)
+      {
+        saved_auto_stop_ms = dt_02_ms;
       }
     }
 
@@ -291,7 +408,10 @@ static void processCanFrame(const twai_message_t &msg, unsigned long rxNow)
     if (latch_active_pulse)
     {
       last_active_inj_pulse_us = latched_avg_net;
+      last_active_dfco_map_psi = latched_avg_map;
     }
+    accumulated_dfco_saved_us += saved_dfco_us;
+    accumulated_auto_stop_ms += saved_auto_stop_ms;
     dfco_cut_state = rx_dfco;
     injector_state = new_inj_state;
     lastFastPacketTime = rxNow;
@@ -344,6 +464,7 @@ static void processCanFrame(const twai_message_t &msg, unsigned long rxNow)
         max_plausible_time = 5000000UL;
 
       bool add_inj = false;
+      float net_pulse_us = 0.0f;
       float next_live_net_pulse = live_net_pulse_us;
       float next_live_duty = live_inj_duty_cycle;
       bool update_live_net = false;
@@ -355,21 +476,28 @@ static void processCanFrame(const twai_message_t &msg, unsigned long rxNow)
 
         // Subtract dead-time from pulses in this interval to calculate net duty cycle.
         float dead_time_us = getInjectorDeadTime(voltage_filtered);
-        float net_pulse_us = (float)delta_time_us - ((float)delta_pulses * dead_time_us);
+        net_pulse_us = (float)delta_time_us - ((float)delta_pulses * dead_time_us);
         if (net_pulse_us < 0.0f)
           net_pulse_us = 0.0f;
 
         uint8_t cur_inj_state = injector_state;
+        uint8_t cur_th_state = th_switch_state;
         uint16_t current_rpm = rpm;
 
-        // Record into rolling buffer while injectors are actively firing (filter out near-zero overrun coasting)
-        if (cur_inj_state == 0 && delta_pulses > 0)
+        // Record closed-throttle overrun samples (>1000 RPM) for pre-DFCO baseline latching
+        if (cur_inj_state == 0 && cur_th_state == 1 && current_rpm >= 1000 && delta_pulses > 0)
         {
           if ((net_pulse_us / (float)delta_pulses) >= 400.0f)
           {
+            float sample_map_psi = 0.0f;
+            bool map_ok = getLiveMapPsi(rxNow, sample_map_psi);
             inj_history_net_us[history_idx] = net_pulse_us;
             inj_history_pulses[history_idx] = delta_pulses;
+            inj_history_map_weighted[history_idx] = map_ok ? (sample_map_psi * (float)delta_pulses) : 0.0f;
+            inj_history_map_pulses[history_idx] = map_ok ? delta_pulses : 0;
+            inj_history_time_ms[history_idx] = rxNow;
             history_idx = (history_idx + 1) % INJ_HISTORY_SAMPLES;
+            inj_history_has_data = true;
           }
         }
 
@@ -410,6 +538,10 @@ static void processCanFrame(const twai_message_t &msg, unsigned long rxNow)
       {
         accumulated_inj_time_us += delta_time_us;
         accumulated_inj_pulses += delta_pulses;
+        if (isEcoRestart && currentState == STATE_CRANKING)
+        {
+          accumulated_eco_crank_net_us += net_pulse_us;
+        }
       }
       if (update_live_net)
       {
@@ -558,7 +690,9 @@ static void canRxTask(void *pvParameters)
     if (wasCanActive && !canActive)
     {
       // Reset counter sync so the Front MCU's next power-up in POS2 syncs cleanly from frame #1
+      last_02_rx_time = 0;
       inj_04_synced = false;
+      clearInjHistory();
     }
     wasCanActive = canActive;
 

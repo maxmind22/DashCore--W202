@@ -21,6 +21,7 @@ bool stoppedToAcc = false;
 volatile bool regulatorTaskRunning = true;
 
 bool ecoInjCutActive = false;
+volatile bool isEcoRestart = false;
 unsigned long lastEngineStartTime = 0;
 
 bool lowBlinkState = false;
@@ -33,6 +34,9 @@ bool fuel_level_valid = false;
 volatile uint32_t accumulated_inj_time_us = 0;
 volatile uint32_t accumulated_inj_pulses = 0;
 volatile uint32_t spd_delta_pulses = 0;
+volatile float accumulated_dfco_saved_us = 0.0f;
+volatile uint32_t accumulated_auto_stop_ms = 0;
+volatile float accumulated_eco_crank_net_us = 0.0f;
 volatile float live_inj_duty_cycle = 0.0f;
 volatile float live_net_pulse_us = 2000.0f;
 RTC_DATA_ATTR double total_fuel_liters = 0.0;
@@ -40,7 +44,9 @@ RTC_DATA_ATTR double total_distance_km = 0.0;
 RTC_DATA_ATTR float compounded_r_int = 0.0f;
 RTC_DATA_ATTR double total_fuel_saved_liters = 0.0;
 RTC_DATA_ATTR float last_known_avg_l_100km = 9.0f;
-volatile float last_active_inj_pulse_us = 1500.0f;
+RTC_DATA_ATTR float measured_idle_l_per_hr = BASELINE_IDLE_FUEL_L_PER_HR;
+RTC_DATA_ATTR volatile float last_active_inj_pulse_us = 1500.0f;
+RTC_DATA_ATTR volatile float last_active_dfco_map_psi = 0.0f;
 
 int16_t spd = 0;
 volatile uint16_t spd_t = 0;
