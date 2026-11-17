@@ -74,7 +74,7 @@ inline bool isBaroValid() {
 
 // --- Threshold Constants ---
 #define OVERSPEED_KMH 58
-#define OVERHEAT_TEMP_C 108
+#define OVERHEAT_TEMP_C 99
 #define ENGINE_STARTED_RPM 400
 #define ENGINE_SPINDOWN_RPM_THRESHOLD 50
 constexpr unsigned long MIN_CRANK_TIME_MS = 600;           // Blind crank duration to ignore RPM spikes
