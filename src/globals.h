@@ -45,6 +45,8 @@ extern volatile float live_inj_duty_cycle;
 extern volatile float live_net_pulse_us;
 extern RTC_DATA_ATTR double total_fuel_liters;
 extern RTC_DATA_ATTR double total_distance_km;
+extern double session_fuel_liters;
+extern double session_distance_km;
 extern RTC_DATA_ATTR float compounded_r_int;
 extern RTC_DATA_ATTR double total_fuel_saved_liters;
 extern RTC_DATA_ATTR float last_known_avg_l_100km;
@@ -61,8 +63,10 @@ extern volatile float vacuum_psi;
 extern RTC_DATA_ATTR float baro_psi;
 extern volatile bool map_sensor_fault;
 extern volatile unsigned long lastVacPacketTime;
-extern bool eco_warning_active;
+extern bool eco_warning_active; // Red ECO text shown (enrichment zone held >= ECO_SHOW_DELAY_MS)
+extern bool eco_beep_active;    // ECO buzzer enabled (enrichment zone held >= ECO_BEEP_DELAY_MS)
 extern volatile uint8_t oil_level_t;
+extern volatile uint8_t ac_switch_state;
 extern unsigned long resetPrintTime;
 
 extern uint8_t counter;

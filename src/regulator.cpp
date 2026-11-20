@@ -185,8 +185,10 @@ void regulatorTask(void *pvParameters) {
     unsigned long in_last_packet = lastPacketTime;
     float in_vac = vacuum_psi;
     unsigned long in_last_vac = lastVacPacketTime;
+    unsigned long in_last_env = lastEnvPacketTime;
     bool in_map_fault = map_sensor_fault;
     int in_temp = temp_out;
+    uint8_t in_ac = ac_switch_state;
     portEXIT_CRITICAL(&dataMux);
 
     unsigned long reg_now = millis();
@@ -224,35 +226,42 @@ void regulatorTask(void *pvParameters) {
     float p_term_v = Kp_v * err_v;
     float target_pwm_v = p_term_v + integral_v;
 
-    // --- Load-Aware Acceleration De-Excitation (Full Field Cutoff) ---
-    static bool accel_cutoff_active = false;
+    // --- Load-Aware Acceleration De-Excitation (Full Field Cutoff or 0A A/C Mode) ---
+    static bool accel_load_active = false;
 
     bool vac_connected = isCanActiveState(in_state) &&
                          (in_last_vac != 0) &&
                          isCanPacketFresh(reg_now, in_last_vac, FRONT_MCU_TIMEOUT_MS) &&
                          !in_map_fault;
+    bool env_connected = isCanActiveState(in_state) &&
+                         isCanPacketFresh(reg_now, in_last_env, FRONT_MCU_TIMEOUT_MS);
+    bool ac_enabled = env_connected && (in_ac != 0);
     bool voltage_safe_for_cutoff = (new_v >= REGULATOR_V_CUTOFF_FLOOR);
-    bool engine_warm = (in_temp >= REGULATOR_LOAD_MIN_TEMP_C);
+    bool engine_warm = env_connected && (in_temp >= REGULATOR_LOAD_MIN_TEMP_C);
 
     if (MAP_SENSOR_ENABLED && engine_charging_allowed && vac_connected && engine_warm && !delay_active) {
-      if (!accel_cutoff_active) {
-        // Trigger cutoff whenever manifold vacuum drops below 2.0 psi and battery voltage is healthy
+      if (!accel_load_active) {
+        // Trigger load reduction whenever manifold vacuum drops below 2.0 psi and battery voltage is healthy
         if (in_vac < REGULATOR_LOAD_CUTOFF_VAC_PSI && voltage_safe_for_cutoff) {
-          accel_cutoff_active = true;
+          accel_load_active = true;
         }
       } else {
-        // Disengage cutoff if vacuum recovers above hysteresis threshold or voltage drops below safety floor
+        // Disengage load reduction if vacuum recovers above hysteresis threshold or voltage drops below safety floor
         bool vacuum_recovered = (in_vac >= REGULATOR_LOAD_REENGAGE_VAC_PSI);
         if (vacuum_recovered || !voltage_safe_for_cutoff) {
-          accel_cutoff_active = false;
+          accel_load_active = false;
         }
       }
     } else {
-      accel_cutoff_active = false;
+      accel_load_active = false;
     }
 
-    // Current PI Controller (Ceiling 20.00A charge into battery)
-    float err_i = REGULATOR_I_LIMIT - new_c;
+    bool field_cutoff_active = (accel_load_active && !ac_enabled);
+    bool ac_zero_charge_active = (accel_load_active && ac_enabled);
+
+    // Current PI Controller (20.00A normal ceiling; 0.00A during high load with A/C ON)
+    float active_i_limit = ac_zero_charge_active ? REGULATOR_I_LIMIT_AC_LOAD : REGULATOR_I_LIMIT;
+    float err_i = active_i_limit - new_c;
     float p_term_i = Kp_i * err_i;
     float target_pwm_i = p_term_i + integral_i;
 
@@ -269,7 +278,7 @@ void regulatorTask(void *pvParameters) {
       active_pwm = 0.0f;
       integral_v = 0.0f;
       integral_i = 0.0f;
-    } else if (accel_cutoff_active) {
+    } else if (field_cutoff_active) {
       // Cut field excitation immediately for zero alternator drag, but freeze integrators
       // at their pre-cutoff operating point so charging recovers without a 10s ramp delay
       active_pwm = 0.0f;
@@ -320,10 +329,12 @@ void regulatorTask(void *pvParameters) {
 
     // Broken belt / open circuit detection:
     // Only evaluate if Front MCU is online, engine is running, start delay passed,
-    // field is near 100% duty (saturated), engine RPM >= 1200,
-    // and voltage/current remain completely unresponsive.
+    // high-load reduction is inactive (in A/C 0A mode, regulating around 0A leaves LiFePO4
+    // resting voltage <= 13.20V even under heavy excitation; genuine belt failure drops
+    // below REGULATOR_V_CUTOFF_FLOOR and exits accel_load_active), field is near 100%
+    // duty (saturated), engine RPM >= 1200, and voltage/current remain unresponsive.
     bool undercharging_detected = false;
-    if (frontMcuConnected && in_state == STATE_RUNNING && !delay_active) {
+    if (frontMcuConnected && in_state == STATE_RUNNING && !delay_active && !accel_load_active) {
       if (field_pwm >= 900 && in_rpm >= 1200 &&
           new_v <= (REGULATOR_V_TARGET - 0.40f) && new_c <= 0.0f) {
         undercharging_detected = true;

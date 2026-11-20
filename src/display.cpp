@@ -589,7 +589,7 @@ void warnings(unsigned long now)
   // -------- ECO Low-Vacuum Pulsing Warning Beep --------//
   static unsigned long eco_beep_timer = 0;
   static bool eco_beep_state = false;
-  if (eco_warning_active)
+  if (eco_beep_active)
   {
     unsigned long interval = eco_beep_state ? ECO_BEEP_ON_MS : ECO_BEEP_OFF_MS;
     if (now - eco_beep_timer >= interval)
@@ -604,7 +604,7 @@ void warnings(unsigned long now)
   }
   else
   {
-    eco_beep_state = true; // Ready to sound immediately next time ECO appears
+    eco_beep_state = true; // Ready to sound immediately once the ECO buzzer delay elapses
     eco_beep_timer = now;
   }
 

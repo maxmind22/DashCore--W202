@@ -587,10 +587,12 @@ static void processCanFrame(const twai_message_t &msg, unsigned long rxNow)
     uint16_t rx_raw2 = (uint16_t)(msg.data[0] | (msg.data[1] << 8));
     int16_t rx_temp = (int16_t)rawAdcToTempC(rx_raw2);
     uint8_t rx_oil = msg.data[2] ? 1 : 0;
+    uint8_t rx_ac = msg.data[3] ? 1 : 0;
 
     portENTER_CRITICAL(&dataMux);
     temp_out = rx_temp;
     oil_level_t = rx_oil;
+    ac_switch_state = rx_ac;
     lastEnvPacketTime = rxNow;
     lastPacketTime = rxNow;
     portEXIT_CRITICAL(&dataMux);
@@ -658,6 +660,7 @@ static void canRxTask(void *pvParameters)
       rpm = 0;
       spd_t = 0;
       oil_level_t = 0;
+      ac_switch_state = 0;
       th_switch_state = 1;
       map_sensor_fault = false;
       vacuum_psi = 0.0f;
@@ -683,6 +686,7 @@ static void canRxTask(void *pvParameters)
       {
         temp_out = 40;
         oil_level_t = 0;
+        ac_switch_state = 0;
       }
     }
     portEXIT_CRITICAL(&dataMux);

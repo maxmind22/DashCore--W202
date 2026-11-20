@@ -466,8 +466,11 @@ void loop()
     vac_drawn = true;
   }
 
-  // Red "ECO" warning with hysteresis to eliminate flickering near threshold
+  // Red "ECO" warning with hysteresis to eliminate flickering near threshold.
+  // Zone entry is time-qualified: text after ECO_SHOW_DELAY_MS, buzzer after ECO_BEEP_DELAY_MS,
+  // so brief tip-ins (merging, launches, rev-matching) stay quiet. Clearing is instant.
   static bool eco_warning_latched = false;
+  static unsigned long eco_zone_since_ms = 0;
   float eff_eco_thresh = getEcoWarningVacPsi();
   float eff_eco_clear = getEcoClearVacPsi();
 
@@ -476,6 +479,7 @@ void loop()
     if (!eco_warning_latched && vacuum_psi < eff_eco_thresh)
     {
       eco_warning_latched = true;
+      eco_zone_since_ms = now;
     }
     else if (eco_warning_latched && vacuum_psi >= eff_eco_clear)
     {
@@ -486,7 +490,9 @@ void loop()
   {
     eco_warning_latched = false;
   }
-  eco_warning_active = eco_warning_latched;
+  unsigned long eco_zone_ms = eco_warning_latched ? (now - eco_zone_since_ms) : 0;
+  eco_warning_active = eco_warning_latched && (eco_zone_ms >= ECO_SHOW_DELAY_MS);
+  eco_beep_active = eco_warning_latched && (eco_zone_ms >= ECO_BEEP_DELAY_MS);
   if (eco_warning_active != eco_warning_drawn)
   {
     if (eco_warning_active)
@@ -770,9 +776,11 @@ void loop()
         (double)NUM_INJECTORS;
 
     // Fuel consumed during the interval (in liters)
-    float fuel_consumed_liters = (float)((double)corrected_inj_us * INJ_LITERS_PER_US_ALL);
+    double interval_fuel_liters = (double)corrected_inj_us * INJ_LITERS_PER_US_ALL;
+    float fuel_consumed_liters = (float)interval_fuel_liters;
 
-    total_fuel_liters += (double)corrected_inj_us * INJ_LITERS_PER_US_ALL;
+    total_fuel_liters += interval_fuel_liters;
+    session_fuel_liters += interval_fuel_liters;
 
     // Net fuel saved (integrated at 50 Hz / 20 Hz on Core 0):
     // 1. DFCO: closed-throttle net pulse scaled by live MAP across every 20 ms 0x02 frame
@@ -800,6 +808,7 @@ void loop()
                                   ? interval_dist_km
                                   : (is_moving ? ((speed_val / 3600.0f) * elapsed_sec) : 0.0f);
     total_distance_km += dist_increment_km;
+    session_distance_km += dist_increment_km;
 
     // Calculate instant consumption
     float inst_val;
@@ -829,9 +838,9 @@ void loop()
       }
     }
 
-    // Calculate average consumption in L/100km
-    float avg_l_100km = (total_distance_km > 0.001)
-                            ? (float)((total_fuel_liters / total_distance_km) * 100.0)
+    // Calculate current drive (session) average consumption in L/100km
+    float avg_l_100km = (session_distance_km > 0.001)
+                            ? (float)((session_fuel_liters / session_distance_km) * 100.0)
                             : 0.0f;
 
     // Render fuel and distance metrics to screen
@@ -897,24 +906,16 @@ void loop()
     {
       float rem_fuel_l = (fuel_percent_f / 100.0f) * FUEL_TANK_CAPACITY_LITERS;
 
-      // Determine effective consumption rate (L/100km):
-      // 1. If trip distance >= RANGE_MIN_TRIP_KM and avg_l_100km is plausible (3..25 L/100km), use actual trip average
-      // 2. If trip distance is 0.5..5 km, smoothly blend from historical/nominal baseline to trip average
-      // 3. Below 0.5 km (stationary, right after reset, or at boot), use historical/nominal baseline
+      // Use current session average immediately once plausible (3..25 L/100km);
+      // fall back to last known / default baseline before the car starts moving.
       float eff_l_100km = (last_known_avg_l_100km >= 3.0f && last_known_avg_l_100km <= 25.0f)
                               ? last_known_avg_l_100km
                               : DEFAULT_CONSUMPTION_L_100KM;
 
-      bool avg_plausible = (avg_l_100km >= 3.0f && avg_l_100km <= 25.0f);
-      if (total_distance_km >= RANGE_MIN_TRIP_KM && avg_plausible)
+      if (avg_l_100km >= 3.0f && avg_l_100km <= 25.0f)
       {
         eff_l_100km = avg_l_100km;
         last_known_avg_l_100km = avg_l_100km;
-      }
-      else if (total_distance_km > 0.5 && avg_plausible)
-      {
-        float trip_weight = constrain((float)(total_distance_km / RANGE_MIN_TRIP_KM), 0.0f, 1.0f);
-        eff_l_100km = trip_weight * avg_l_100km + (1.0f - trip_weight) * eff_l_100km;
       }
 
       float rem_km = (rem_fuel_l / eff_l_100km) * 100.0f;

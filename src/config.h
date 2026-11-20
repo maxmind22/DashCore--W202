@@ -53,12 +53,15 @@ inline bool isBaroValid() {
 }
 
 // --- Load-Aware Alternator De-Excitation (Vacuum Threshold) ---
-// Cutoff engages whenever manifold vacuum drops below 2.0 psi (0A alternator drag) and
-// disengages when vacuum recovers above hysteresis threshold (>= 2.5 psi).
-#define REGULATOR_LOAD_CUTOFF_VAC_PSI   2.0f // Manifold vacuum < 2.0 psi: cut alternator field (0A drag)
-#define REGULATOR_LOAD_REENGAGE_VAC_PSI 2.5f // Manifold vacuum >= 2.5 psi: re-engage alternator (0.5 psi hysteresis)
-#define REGULATOR_V_CUTOFF_FLOOR 12.60f      // Safety floor: abort cutoff if battery drops below 12.60V
+// Engages whenever manifold vacuum drops below 3.0 psi (~80% load) and disengages when vacuum
+// recovers above hysteresis threshold (>= 3.5 psi). With A/C OFF, the alternator field
+// is cut (0 PWM) for minimum engine drag. With A/C ON, battery charge current is capped
+// at REGULATOR_I_LIMIT_AC_LOAD (0.0A) so the alternator covers A/C loads without draining the battery.
+#define REGULATOR_LOAD_CUTOFF_VAC_PSI   3.0f // Manifold vacuum < 3.0 psi: engage high-load reduction
+#define REGULATOR_LOAD_REENGAGE_VAC_PSI 3.5f // Manifold vacuum >= 3.5 psi: re-engage normal charging (0.5 psi hysteresis)
+#define REGULATOR_V_CUTOFF_FLOOR 12.60f      // Safety floor: abort load reduction if battery drops below 12.60V
 #define REGULATOR_LOAD_MIN_TEMP_C 60         // Minimum coolant temp (°C) before allowing load-based alternator de-excitation
+#define REGULATOR_I_LIMIT_AC_LOAD 0.0f       // Battery charge current ceiling (A) under high load when A/C is ON (0A = supply loads, no battery charge/drain)
 
 // --- Alternator Regulator Calibration ---
 #define CURRENT_SENSOR_OFFSET_MV 2495.44f  // FS500E2T zero-current offset (calibrated from 2500.0 nominal)
@@ -128,10 +131,14 @@ inline bool isCanPacketFresh(unsigned long now, unsigned long packetTime, uint32
 #define ECO_INDICATOR_Y 18
 #define VACUUM_DISPLAY_X 182
 #define VACUUM_DISPLAY_Y 38
-#define LOAD_RATIO_ECO_WARNING    0.945f      // 94.5% engine load (~0.8 psi vac): instant ECO indicator
-#define LOAD_RATIO_ECO_CLEAR      0.932f      // 93.2% engine load (~1.0 psi vac): clear ECO indicator (hysteresis)
-#define ECO_BEEP_ON_MS            200         // Pulsing beep ON duration while ECO is displayed (ms)
-#define ECO_BEEP_OFF_MS           200         // Pulsing beep OFF duration while ECO is displayed (ms)
+// ECO warns at the open-loop power-enrichment edge (~90% load), above the alternator cutoff
+// (~80% load), so all closed-loop power + alternator-shed boost stays usable without warnings.
+#define LOAD_RATIO_ECO_WARNING    0.90f       // 90% engine load (~1.47 psi vac at sea level): enter enrichment zone
+#define LOAD_RATIO_ECO_CLEAR      0.85f       // 85% engine load (~2.2 psi vac at sea level): leave zone (hysteresis)
+#define ECO_SHOW_DELAY_MS         200         // Enrichment zone must persist this long before red ECO text is shown (ms)
+#define ECO_BEEP_DELAY_MS         750         // Enrichment zone must persist this long before buzzer pulses (ignores brief tip-ins)
+#define ECO_BEEP_ON_MS            200         // Pulsing beep ON duration while ECO buzzer is active (ms)
+#define ECO_BEEP_OFF_MS           200         // Pulsing beep OFF duration while ECO buzzer is active (ms)
 
 inline float getEcoWarningVacPsi() {
   return baro_psi * (1.0f - LOAD_RATIO_ECO_WARNING);
@@ -189,7 +196,6 @@ constexpr float INJECTOR_FLOW_RATE_CC_MIN = 228.0f; // Rated 228 cc/min @ 3.8 ba
 constexpr uint8_t NUM_INJECTORS = 4;
 constexpr float FUEL_TANK_CAPACITY_LITERS = 62.0f;
 constexpr float DEFAULT_CONSUMPTION_L_100KM = 9.0f; // Baseline consumption (L/100km) for range estimation
-constexpr float RANGE_MIN_TRIP_KM = 5.0f; // Min trip distance before REM fully tracks trip average
 #define RTC_TRIP_MAGIC_KEY 0xCAFE4567UL
 
 // Timeout Constants
