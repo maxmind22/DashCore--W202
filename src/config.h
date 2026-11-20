@@ -131,20 +131,37 @@ inline bool isCanPacketFresh(unsigned long now, unsigned long packetTime, uint32
 #define ECO_INDICATOR_Y 18
 #define VACUUM_DISPLAY_X 182
 #define VACUUM_DISPLAY_Y 38
-// ECO warns at the open-loop power-enrichment edge (~90% load), above the alternator cutoff
-// (~80% load), so all closed-loop power + alternator-shed boost stays usable without warnings.
-#define LOAD_RATIO_ECO_WARNING    0.90f       // 90% engine load (~1.47 psi vac at sea level): enter enrichment zone
-#define LOAD_RATIO_ECO_CLEAR      0.85f       // 85% engine load (~2.2 psi vac at sea level): leave zone (hysteresis)
-#define ECO_SHOW_DELAY_MS         200         // Enrichment zone must persist this long before red ECO text is shown (ms)
-#define ECO_BEEP_DELAY_MS         750         // Enrichment zone must persist this long before buzzer pulses (ignores brief tip-ins)
-#define ECO_BEEP_ON_MS            200         // Pulsing beep ON duration while ECO buzzer is active (ms)
-#define ECO_BEEP_OFF_MS           200         // Pulsing beep OFF duration while ECO buzzer is active (ms)
+// Closed-Loop (lambda = 1.0) Injector-Opening-to-MAP Ratio Model:
+// With a vacuum-referenced 3.8 bar FPR, net injector pulse per PSI of absolute manifold pressure
+// (MAP = baro_psi - vacuum_psi) is constant (~800 us/PSI on M111 2.0L @ 228 cc/min) in closed loop.
+// When the Bosch HFM ECU leaves closed loop for full-load or tip-in enrichment (lambda ~ 0.85),
+// actual injector opening per PSI of MAP jumps >= 12% above the self-learned closed-loop baseline.
+#define BASELINE_CL_INJ_US_PER_PSI 800.0f   // Default M111 2.0L closed-loop ratio (us net pulse per PSI MAP)
+#define CL_INJ_US_PER_PSI_MIN      500.0f   // Plausibility lower bound for learned closed-loop ratio
+#define CL_INJ_US_PER_PSI_MAX      1100.0f  // Plausibility upper bound for learned closed-loop ratio
+#define CL_LEARN_MIN_TEMP_C        70       // Engine fully warm (post warm-up enrichment) before learning baseline
+#define CL_LEARN_MIN_LOAD_RATIO    0.45f    // 45% load (~8.1 psi vac): lower bound of steady closed-loop learning window
+#define CL_LEARN_MAX_LOAD_RATIO    0.78f    // 78% load (~3.2 psi vac): upper bound (well below open-loop threshold)
+#define CL_LEARN_MAX_MAP_STEP_PSI  0.25f    // Max MAP change per 50ms frame to qualify as steady-state closed-loop
+#define ECO_ENRICH_MIN_LOAD_RATIO  0.72f    // Minimum load (72%, ~4.1 psi vac) to evaluate open-loop enrichment ratio
+#define ECO_ENRICH_RATIO_WARN      1.12f    // >= +12% injector opening over closed-loop MAP ratio (lambda <= 0.89): flash ECO
+#define ECO_ENRICH_RATIO_CLEAR     1.07f    // <= +7% injector opening over closed-loop MAP ratio: clear enrichment state
+#define LOAD_RATIO_ECO_WARNING     0.92f    // 92% engine load (~1.18 psi vac at sea level): hard WOT airflow saturation fallback
+#define LOAD_RATIO_ECO_CLEAR       0.85f    // 85% engine load (~2.2 psi vac at sea level): leave zone (hysteresis)
+#define ECO_SHOW_DELAY_MS          200      // Enrichment zone must persist this long before red ECO text flashes (ms)
+#define ECO_FLASH_INTERVAL_MS      200      // Flashing red ECO text ON/OFF cadence while active (ms)
+#define ECO_BEEP_DELAY_MS          750      // Enrichment zone must persist this long before buzzer pulses (ignores brief tip-ins)
+#define ECO_BEEP_ON_MS             200      // Pulsing beep ON duration while ECO buzzer is active (ms)
+#define ECO_BEEP_OFF_MS            200      // Pulsing beep OFF duration while ECO buzzer is active (ms)
 
 inline float getEcoWarningVacPsi() {
   return baro_psi * (1.0f - LOAD_RATIO_ECO_WARNING);
 }
 inline float getEcoClearVacPsi() {
   return baro_psi * (1.0f - LOAD_RATIO_ECO_CLEAR);
+}
+inline float getEcoEnrichMinMapPsi() {
+  return baro_psi * ECO_ENRICH_MIN_LOAD_RATIO;
 }
 
 // --- Vacuum Leak Warning Configuration ---

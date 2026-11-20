@@ -241,6 +241,7 @@ static unsigned long last_04_rx_time = 0;
 // while an injector is mid-pulse, so at high duty several consecutive 0x04 frames can carry
 // delta = 0 and the next delta then spans several 50 ms intervals.
 static unsigned long last_inj_change_time = 0;
+static float prev_04_map_psi = 0.0f;
 
 static void clearInjHistory()
 {
@@ -467,8 +468,12 @@ static void processCanFrame(const twai_message_t &msg, unsigned long rxNow)
       float net_pulse_us = 0.0f;
       float next_live_net_pulse = live_net_pulse_us;
       float next_live_duty = live_inj_duty_cycle;
+      float next_live_us_per_psi = live_inj_us_per_psi;
+      float next_cl_us_per_psi = cl_inj_us_per_psi;
       bool update_live_net = false;
       bool update_live_duty = false;
+      bool update_live_ratio = false;
+      bool update_cl_ratio = false;
 
       if (delta_time_us <= max_plausible_time)
       {
@@ -508,6 +513,48 @@ static void processCanFrame(const twai_message_t &msg, unsigned long rxNow)
           {
             next_live_net_pulse = 0.25f * avg_net_pulse_us + 0.75f * next_live_net_pulse;
             update_live_net = true;
+
+            // Update Injector-Opening-to-MAP ratio (us per PSI of absolute manifold pressure)
+            float sample_map_psi = 0.0f;
+            if (getLiveMapPsi(rxNow, sample_map_psi) && sample_map_psi >= 2.0f)
+            {
+              float inst_us_per_psi = avg_net_pulse_us / sample_map_psi;
+              float map_step = (prev_04_map_psi > 0.0f) ? (sample_map_psi - prev_04_map_psi) : 0.0f;
+              prev_04_map_psi = sample_map_psi;
+
+              // Guard against false positive ratio spike during sudden throttle lift-off (tip-out):
+              // when the plate snaps shut, manifold pressure drops faster than the last completed
+              // cylinder pulse. If MAP dropped > 0.30 PSI in 50ms, do not let the filtered ratio rise.
+              float filtered_target = inst_us_per_psi;
+              if (map_step < -0.30f && filtered_target > next_live_us_per_psi)
+              {
+                filtered_target = next_live_us_per_psi;
+              }
+              next_live_us_per_psi = 0.35f * filtered_target + 0.65f * next_live_us_per_psi;
+              update_live_ratio = true;
+
+              // Self-learn Closed-Loop (lambda = 1.0) baseline ratio during steady warm part-throttle cruise:
+              // - Warm engine (>= 70°C), past 10s post-start enrichment
+              // - Throttle open (cur_th_state == 0), injectors active (cur_inj_state == 0)
+              // - Moderate cruise RPM (1200..3500) and mid-load closed-loop window (45%..78% of baro)
+              // - Steady manifold pressure (|map_step| <= 0.25 PSI per 50ms)
+              float cur_baro = baro_psi;
+              float load_ratio = (cur_baro >= 8.0f) ? (sample_map_psi / cur_baro) : 0.0f;
+              if (currentState == STATE_RUNNING &&
+                  cur_inj_state == 0 && cur_th_state == 0 &&
+                  temp_out >= CL_LEARN_MIN_TEMP_C &&
+                  current_rpm >= 1200 && current_rpm <= 3500 &&
+                  load_ratio >= CL_LEARN_MIN_LOAD_RATIO &&
+                  load_ratio <= CL_LEARN_MAX_LOAD_RATIO &&
+                  fabsf(map_step) <= CL_LEARN_MAX_MAP_STEP_PSI &&
+                  (lastEngineStartTime == 0 || (rxNow - lastEngineStartTime >= 10000UL)) &&
+                  inst_us_per_psi >= CL_INJ_US_PER_PSI_MIN &&
+                  inst_us_per_psi <= CL_INJ_US_PER_PSI_MAX)
+              {
+                next_cl_us_per_psi = 0.02f * inst_us_per_psi + 0.98f * next_cl_us_per_psi;
+                update_cl_ratio = true;
+              }
+            }
           }
           // Engine cycle period for 1 injector (4-stroke: 1 injection per 2 revs = 120,000,000 / RPM us)
           float cycle_period_us = 120000000.0f / (float)current_rpm;
@@ -522,6 +569,9 @@ static void processCanFrame(const twai_message_t &msg, unsigned long rxNow)
           // Engine stopped, fuel cut active, or no pulses for > 500 ms: injectors genuinely closed
           next_live_duty *= 0.75f;
           update_live_duty = true;
+          next_live_us_per_psi = next_cl_us_per_psi;
+          update_live_ratio = true;
+          prev_04_map_psi = 0.0f;
         }
         // else: no completed pulse inside this 50 ms frame (normal below ~1200 RPM, or the
         // Front MCU deferred a mid-pulse snapshot) -> hold the last value instead of feeding 0%.
@@ -550,6 +600,14 @@ static void processCanFrame(const twai_message_t &msg, unsigned long rxNow)
       if (update_live_duty)
       {
         live_inj_duty_cycle = next_live_duty;
+      }
+      if (update_live_ratio)
+      {
+        live_inj_us_per_psi = next_live_us_per_psi;
+      }
+      if (update_cl_ratio)
+      {
+        cl_inj_us_per_psi = next_cl_us_per_psi;
       }
       if (add_spd)
       {
@@ -667,6 +725,7 @@ static void canRxTask(void *pvParameters)
       injector_state = 0;
       dfco_cut_state = 0;
       live_inj_duty_cycle = 0.0f;
+      live_inj_us_per_psi = cl_inj_us_per_psi;
     }
     else
     {
@@ -677,10 +736,12 @@ static void canRxTask(void *pvParameters)
         injector_state = 0;
         dfco_cut_state = 0;
         live_inj_duty_cycle = 0.0f;
+        live_inj_us_per_psi = cl_inj_us_per_psi;
       }
       if (!isCanPacketFresh(nowMs, lastVacPacketTime, FRONT_MCU_CAN_TIMEOUT_MS))
       {
         vacuum_psi = 0.0f;
+        live_inj_us_per_psi = cl_inj_us_per_psi;
       }
       if (!isCanPacketFresh(nowMs, lastEnvPacketTime, FRONT_MCU_TIMEOUT_MS))
       {
@@ -696,6 +757,7 @@ static void canRxTask(void *pvParameters)
       // Reset counter sync so the Front MCU's next power-up in POS2 syncs cleanly from frame #1
       last_02_rx_time = 0;
       inj_04_synced = false;
+      prev_04_map_psi = 0.0f;
       clearInjHistory();
     }
     wasCanActive = canActive;

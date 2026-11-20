@@ -147,11 +147,14 @@ void setup()
       last_known_avg_l_100km > 30.0f || isnan(measured_idle_l_per_hr) ||
       measured_idle_l_per_hr < 0.3f || measured_idle_l_per_hr > 3.0f ||
       isnan(last_active_inj_pulse_us) || last_active_inj_pulse_us < 500.0f ||
-      last_active_inj_pulse_us > 10000.0f)
+      last_active_inj_pulse_us > 10000.0f || isnan(cl_inj_us_per_psi) ||
+      cl_inj_us_per_psi < CL_INJ_US_PER_PSI_MIN ||
+      cl_inj_us_per_psi > CL_INJ_US_PER_PSI_MAX)
   {
     loadTripDataFromNVS(); // Reads double keys (migrates legacy float keys) and sanitizes values
     rtc_trip_magic = RTC_TRIP_MAGIC_KEY;
   }
+  live_inj_us_per_psi = cl_inj_us_per_psi;
 
   pinMode(buzzer_pin, OUTPUT);
   pinMode(coolant_level_pin, INPUT);
@@ -466,22 +469,39 @@ void loop()
     vac_drawn = true;
   }
 
-  // Red "ECO" warning with hysteresis to eliminate flickering near threshold.
-  // Zone entry is time-qualified: text after ECO_SHOW_DELAY_MS, buzzer after ECO_BEEP_DELAY_MS,
-  // so brief tip-ins (merging, launches, rev-matching) stay quiet. Clearing is instant.
+  // Flashing red "ECO" warning when the ECU leaves Closed-Loop (lambda = 1.0):
+  // Monitors the live Injector-Opening-to-MAP ratio (us net pulse per PSI of absolute manifold pressure)
+  // against the self-learned closed-loop baseline (`cl_inj_us_per_psi`), plus a hard WOT vacuum floor.
+  // Zone entry is time-qualified: flashing text after ECO_SHOW_DELAY_MS, buzzer after ECO_BEEP_DELAY_MS.
   static bool eco_warning_latched = false;
   static unsigned long eco_zone_since_ms = 0;
+  static unsigned long eco_flash_timer_ms = 0;
+  static bool eco_flash_state = false;
+
   float eff_eco_thresh = getEcoWarningVacPsi();
   float eff_eco_clear = getEcoClearVacPsi();
+  float live_map_psi = baro_psi - vacuum_psi;
+  float cl_base = cl_inj_us_per_psi;
+  float enrich_ratio = (cl_base >= CL_INJ_US_PER_PSI_MIN)
+                           ? (live_inj_us_per_psi / cl_base)
+                           : 1.0f;
+  bool enrich_load_active = (live_map_psi >= getEcoEnrichMinMapPsi());
 
-  if (MAP_SENSOR_ENABLED && vac_valid && (currentState == STATE_RUNNING || rpm >= ENGINE_STARTED_RPM))
+  if (MAP_SENSOR_ENABLED && vac_valid &&
+      (currentState == STATE_RUNNING || rpm >= ENGINE_STARTED_RPM) &&
+      th_switch_state == 0 && injector_state == 0)
   {
-    if (!eco_warning_latched && vacuum_psi < eff_eco_thresh)
+    bool ratio_triggered = enrich_load_active && (enrich_ratio >= ECO_ENRICH_RATIO_WARN);
+    bool vac_triggered = (vacuum_psi < eff_eco_thresh);
+    bool ratio_cleared = !enrich_load_active || (enrich_ratio <= ECO_ENRICH_RATIO_CLEAR);
+    bool vac_cleared = (vacuum_psi >= eff_eco_clear);
+
+    if (!eco_warning_latched && (ratio_triggered || vac_triggered))
     {
       eco_warning_latched = true;
       eco_zone_since_ms = now;
     }
-    else if (eco_warning_latched && vacuum_psi >= eff_eco_clear)
+    else if (eco_warning_latched && ratio_cleared && vac_cleared)
     {
       eco_warning_latched = false;
     }
@@ -490,12 +510,33 @@ void loop()
   {
     eco_warning_latched = false;
   }
+
   unsigned long eco_zone_ms = eco_warning_latched ? (now - eco_zone_since_ms) : 0;
-  eco_warning_active = eco_warning_latched && (eco_zone_ms >= ECO_SHOW_DELAY_MS);
-  eco_beep_active = eco_warning_latched && (eco_zone_ms >= ECO_BEEP_DELAY_MS);
-  if (eco_warning_active != eco_warning_drawn)
+  bool next_eco_active = eco_warning_latched && (eco_zone_ms >= ECO_SHOW_DELAY_MS);
+  if (next_eco_active)
   {
-    if (eco_warning_active)
+    if (!eco_warning_active)
+    {
+      eco_flash_state = true; // Show immediately on activation edge
+      eco_flash_timer_ms = now;
+    }
+    else if (now - eco_flash_timer_ms >= ECO_FLASH_INTERVAL_MS)
+    {
+      eco_flash_state = !eco_flash_state;
+      eco_flash_timer_ms = now;
+    }
+  }
+  else
+  {
+    eco_flash_state = false;
+  }
+  eco_warning_active = next_eco_active;
+  eco_beep_active = eco_warning_latched && (eco_zone_ms >= ECO_BEEP_DELAY_MS);
+
+  bool eco_should_draw = eco_warning_active && eco_flash_state;
+  if (eco_should_draw != eco_warning_drawn)
+  {
+    if (eco_should_draw)
     {
       tv.setCursor(ECO_INDICATOR_X, ECO_INDICATOR_Y);
       tv.setTextColor(0xE0, 0x00); // Red

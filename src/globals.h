@@ -53,6 +53,8 @@ extern RTC_DATA_ATTR float last_known_avg_l_100km;
 extern RTC_DATA_ATTR float measured_idle_l_per_hr;
 extern RTC_DATA_ATTR volatile float last_active_inj_pulse_us;
 extern RTC_DATA_ATTR volatile float last_active_dfco_map_psi;
+extern RTC_DATA_ATTR volatile float cl_inj_us_per_psi; // Learned closed-loop (lambda=1.0) net inj us per PSI MAP
+extern volatile float live_inj_us_per_psi;             // Live filtered net inj us per PSI MAP
 
 extern int16_t spd;
 extern volatile uint16_t spd_t;

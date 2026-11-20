@@ -49,6 +49,8 @@ RTC_DATA_ATTR float last_known_avg_l_100km = 9.0f;
 RTC_DATA_ATTR float measured_idle_l_per_hr = BASELINE_IDLE_FUEL_L_PER_HR;
 RTC_DATA_ATTR volatile float last_active_inj_pulse_us = 1500.0f;
 RTC_DATA_ATTR volatile float last_active_dfco_map_psi = 0.0f;
+RTC_DATA_ATTR volatile float cl_inj_us_per_psi = BASELINE_CL_INJ_US_PER_PSI;
+volatile float live_inj_us_per_psi = BASELINE_CL_INJ_US_PER_PSI;
 
 int16_t spd = 0;
 volatile uint16_t spd_t = 0;
