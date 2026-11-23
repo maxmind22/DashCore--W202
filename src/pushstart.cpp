@@ -849,6 +849,7 @@ void processPushStart(unsigned long now)
                                (temp_out >= AUTO_STOP_MIN_TEMP_C) &&
                                (temp_out <= AUTO_STOP_MAX_TEMP_C) &&
                                (voltage_filtered >= AUTO_STOP_MIN_VOLTAGE) &&
+                               (ac_switch_state == 0) &&
                                isCanPacketFresh(now, lastFastPacketTime, FRONT_MCU_CAN_TIMEOUT_MS) &&
                                isCanPacketFresh(now, lastEnvPacketTime, FRONT_MCU_TIMEOUT_MS);
 
@@ -963,14 +964,18 @@ void processPushStart(unsigned long now)
     // - Battery drops below restart threshold (11.6V)
     // - Engine coolant temp creeping high (> 98°C)
     // - Front MCU communication loss
-    // - Maximum stop duration exceeded (90s)
+    // - A/C requested / enabled (A/C compressor requires engine running)
+    // - Stop duration timeout (if configured > 0)
     bool batteryLow = (voltage_filtered < AUTO_STOP_RESTART_VOLTAGE);
     bool tempCreep = (temp_out > AUTO_STOP_MAX_TEMP_C);
     bool canLoss = !isCanPacketFresh(now, lastFastPacketTime, FRONT_MCU_TIMEOUT_MS) ||
                    !isCanPacketFresh(now, lastEnvPacketTime, FRONT_MCU_TIMEOUT_MS);
-    bool maxDurationReached = (autoStopStartTime != 0 && (now - autoStopStartTime >= AUTO_STOP_MAX_DURATION_MS));
+    bool acRequested = (ac_switch_state != 0);
+    bool maxDurationReached = (AUTO_STOP_MAX_DURATION_MS > 0 &&
+                               autoStopStartTime != 0 &&
+                               (now - autoStopStartTime >= AUTO_STOP_MAX_DURATION_MS));
 
-    if (brakeReleased || batteryLow || tempCreep || canLoss || maxDurationReached)
+    if (brakeReleased || batteryLow || tempCreep || canLoss || acRequested || maxDurationReached)
     {
       // Restore injectors immediately over CAN
       ecoInjCutActive = false;

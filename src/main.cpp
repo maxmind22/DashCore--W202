@@ -171,6 +171,7 @@ void setup()
   lastFastPacketTime = 0; // 0 = no 0x02 fast engine/speed frame received yet
   lastVacPacketTime = 0;  // 0 = no 0x05 manifold vacuum/baro frame received yet
   lastEnvPacketTime = 0;  // 0 = no 0x06 thermal/aux frame received yet
+  lastInjPacketTime = 0;  // 0 = no 0x04 injector delta received yet
   startCanRxTask();       // Install TWAI & drain CAN RX on Core 0 (zero video V-Sync lag)
 
   // Configure FreeRTOS task for regulator loop instead of hardware timer
@@ -430,9 +431,9 @@ void loop()
     lastMetricsUpdateTime = now;
   }
 
-  // --- Fast Vacuum (PSI) Display & Instant ECO Warning Indicator ---
+  // --- Fast Vacuum (PSI) Display & Open-Loop Fuel-Waste ECO Warning ---
   // Vacuum is constantly visible and NEVER disappears.
-  // Red "ECO" warning comes and goes instantly when vacuum drops below threshold without delays.
+  // Flashing red "ECO" warns only when the ECU is genuinely enriching beyond closed-loop (lambda = 1.0).
   static bool eco_warning_drawn = false;
   static bool vac_drawn = false;
   static char last_bufVac[16] = "";
@@ -444,17 +445,33 @@ void loop()
     last_bufVac[0] = '\0';
   }
 
+  portENTER_CRITICAL(&dataMux);
+  float local_vac = vacuum_psi;
+  float local_baro = baro_psi;
+  bool local_map_fault = map_sensor_fault;
   unsigned long local_last_vac = lastVacPacketTime;
+  unsigned long local_last_env = lastEnvPacketTime;
+  unsigned long local_last_inj = lastInjPacketTime;
+  int16_t local_temp = temp_out;
+  uint16_t local_rpm = rpm;
+  uint8_t local_th = th_switch_state;
+  uint8_t local_inj = injector_state;
+  float local_live_ratio = live_inj_us_per_psi;
+  float local_cl_base = cl_inj_us_per_psi;
+  bool local_cl_learned = cl_baseline_learned;
+  portEXIT_CRITICAL(&dataMux);
+
+  bool local_baro_valid = (local_baro >= 8.0f && local_baro <= 16.5f);
   bool vac_valid = isCanActiveState(currentState) &&
                    (local_last_vac != 0) &&
                    isCanPacketFresh(now, local_last_vac, FRONT_MCU_TIMEOUT_MS) &&
-                   !map_sensor_fault && isBaroValid();
+                   !local_map_fault && local_baro_valid;
 
   // Vacuum PSI readout: constantly visible, shows "VAC: --- " if disconnected or invalid
   char bufVac[16];
   if (vac_valid)
   {
-    snprintf(bufVac, sizeof(bufVac), "VAC:%4.1fpsi", vacuum_psi);
+    snprintf(bufVac, sizeof(bufVac), "VAC:%4.1fpsi", local_vac);
   }
   else
   {
@@ -469,9 +486,9 @@ void loop()
     vac_drawn = true;
   }
 
-  // Flashing red "ECO" warning when the ECU leaves Closed-Loop (lambda = 1.0):
-  // Monitors the live Injector-Opening-to-MAP ratio (us net pulse per PSI of absolute manifold pressure)
-  // against the self-learned closed-loop baseline (`cl_inj_us_per_psi`), plus a hard WOT vacuum floor.
+  // Flashing red "ECO" warning when the warm ECU leaves Closed-Loop (lambda = 1.0):
+  // Monitors the residual- & VE-normalized Injector-Opening-to-MAP ratio against the self-learned
+  // closed-loop baseline (`cl_inj_us_per_psi`), falling back to WOT vacuum only while unlearned or if 0x04 is missing.
   // Zone entry is time-qualified: flashing text after ECO_SHOW_DELAY_MS, buzzer after ECO_BEEP_DELAY_MS.
   static bool eco_warning_latched = false;
   static unsigned long eco_zone_since_ms = 0;
@@ -480,28 +497,45 @@ void loop()
 
   float eff_eco_thresh = getEcoWarningVacPsi();
   float eff_eco_clear = getEcoClearVacPsi();
-  float live_map_psi = baro_psi - vacuum_psi;
-  float cl_base = cl_inj_us_per_psi;
-  float enrich_ratio = (cl_base >= CL_INJ_US_PER_PSI_MIN)
-                           ? (live_inj_us_per_psi / cl_base)
+  float enrich_min_map_psi = getEcoEnrichMinMapPsi();
+  float enrich_clear_map_psi = getEcoEnrichClearMapPsi();
+  float live_map_psi = local_baro - local_vac;
+  float enrich_ratio = (local_cl_base >= CL_INJ_US_PER_PSI_MIN)
+                           ? (local_live_ratio / local_cl_base)
                            : 1.0f;
-  bool enrich_load_active = (live_map_psi >= getEcoEnrichMinMapPsi());
+  bool env_valid = isCanActiveState(currentState) &&
+                   isCanPacketFresh(now, local_last_env, FRONT_MCU_TIMEOUT_MS);
+  bool engine_warm_cl = env_valid &&
+                        (local_temp >= CL_LEARN_MIN_TEMP_C) &&
+                        (lastEngineStartTime == 0 ||
+                         ((int32_t)(now - lastEngineStartTime) >= (int32_t)ECO_POST_START_GRACE_MS));
+  bool inj_ratio_valid = local_cl_learned &&
+                         (local_cl_base >= CL_INJ_US_PER_PSI_MIN) &&
+                         isCanPacketFresh(now, local_last_inj, FRONT_MCU_CAN_TIMEOUT_MS);
 
-  if (MAP_SENSOR_ENABLED && vac_valid &&
-      (currentState == STATE_RUNNING || rpm >= ENGINE_STARTED_RPM) &&
-      th_switch_state == 0 && injector_state == 0)
+  if (MAP_SENSOR_ENABLED && vac_valid && engine_warm_cl &&
+      (currentState == STATE_RUNNING || local_rpm >= ENGINE_STARTED_RPM) &&
+      local_rpm >= ECO_MIN_RPM && local_th == 0 && local_inj == 0)
   {
-    bool ratio_triggered = enrich_load_active && (enrich_ratio >= ECO_ENRICH_RATIO_WARN);
-    bool vac_triggered = (vacuum_psi < eff_eco_thresh);
-    bool ratio_cleared = !enrich_load_active || (enrich_ratio <= ECO_ENRICH_RATIO_CLEAR);
-    bool vac_cleared = (vacuum_psi >= eff_eco_clear);
+    bool triggered = false;
+    bool cleared = false;
+    if (inj_ratio_valid)
+    {
+      triggered = (live_map_psi >= enrich_min_map_psi) && (enrich_ratio >= ECO_ENRICH_RATIO_WARN);
+      cleared = (live_map_psi < enrich_clear_map_psi) || (enrich_ratio <= ECO_ENRICH_RATIO_CLEAR);
+    }
+    else
+    {
+      triggered = (local_vac < eff_eco_thresh);
+      cleared = (local_vac >= eff_eco_clear);
+    }
 
-    if (!eco_warning_latched && (ratio_triggered || vac_triggered))
+    if (!eco_warning_latched && triggered)
     {
       eco_warning_latched = true;
       eco_zone_since_ms = now;
     }
-    else if (eco_warning_latched && ratio_cleared && vac_cleared)
+    else if (eco_warning_latched && cleared)
     {
       eco_warning_latched = false;
     }

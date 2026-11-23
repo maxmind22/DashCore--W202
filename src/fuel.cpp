@@ -81,7 +81,10 @@ void loadTripDataFromNVS() {
   measured_idle_l_per_hr = prefs.getFloat("idle_lh", BASELINE_IDLE_FUEL_L_PER_HR);
   float saved_dfco_us = prefs.getFloat("dfco_us", 1500.0f);
   float saved_dfco_map = prefs.getFloat("dfco_map", 0.0f);
-  float saved_cl_us_psi = prefs.getFloat("cl_us_psi", BASELINE_CL_INJ_US_PER_PSI);
+  bool has_cl_norm = prefs.isKey("cl_norm_psi");
+  float saved_cl_us_psi = has_cl_norm
+                              ? prefs.getFloat("cl_norm_psi", BASELINE_CL_INJ_US_PER_PSI)
+                              : BASELINE_CL_INJ_US_PER_PSI;
   prefs.end();
 
   total_fuel_liters = sanitizeTripValue(total_fuel_liters);
@@ -104,9 +107,11 @@ void loadTripDataFromNVS() {
       saved_dfco_map < 1.0f || saved_dfco_map > 16.5f) {
     saved_dfco_map = 0.0f;
   }
-  if (isnan(saved_cl_us_psi) || isinf(saved_cl_us_psi) ||
-      saved_cl_us_psi < CL_INJ_US_PER_PSI_MIN ||
-      saved_cl_us_psi > CL_INJ_US_PER_PSI_MAX) {
+  bool saved_cl_learned =
+      has_cl_norm && !isnan(saved_cl_us_psi) && !isinf(saved_cl_us_psi) &&
+      saved_cl_us_psi >= CL_INJ_US_PER_PSI_MIN &&
+      saved_cl_us_psi <= CL_INJ_US_PER_PSI_MAX;
+  if (!saved_cl_learned) {
     saved_cl_us_psi = BASELINE_CL_INJ_US_PER_PSI;
   }
   portENTER_CRITICAL(&dataMux);
@@ -114,6 +119,7 @@ void loadTripDataFromNVS() {
   last_active_dfco_map_psi = saved_dfco_map;
   cl_inj_us_per_psi = saved_cl_us_psi;
   live_inj_us_per_psi = saved_cl_us_psi;
+  cl_baseline_learned = saved_cl_learned;
   portEXIT_CRITICAL(&dataMux);
 }
 
@@ -122,6 +128,7 @@ void saveTripDataToNVS() {
   float dfco_us = last_active_inj_pulse_us;
   float dfco_map = last_active_dfco_map_psi;
   float cl_us_psi = cl_inj_us_per_psi;
+  bool cl_learned = cl_baseline_learned;
   portEXIT_CRITICAL(&dataMux);
 
   Preferences prefs;
@@ -134,7 +141,9 @@ void saveTripDataToNVS() {
   prefs.putFloat("idle_lh", measured_idle_l_per_hr);
   prefs.putFloat("dfco_us", dfco_us);
   prefs.putFloat("dfco_map", dfco_map);
-  prefs.putFloat("cl_us_psi", cl_us_psi);
+  if (cl_learned) {
+    prefs.putFloat("cl_norm_psi", cl_us_psi);
+  }
   prefs.end();
 }
 

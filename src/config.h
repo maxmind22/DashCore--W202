@@ -96,8 +96,11 @@ constexpr unsigned long ENGINE_STALL_DEBOUNCE_MS = 1500;   // Require 1.5s persi
 inline bool isCanPacketFresh(unsigned long now, unsigned long packetTime, uint32_t timeoutMs) {
   return (packetTime != 0) && ((int32_t)(now - packetTime) <= (int32_t)timeoutMs);
 }
-#define CHARGE_MALFUNCTION_DELAY_MS 20000
-#define BATTERY_LOW_DELAY_MS 10000
+#define CHARGE_OVERVOLTAGE_DELAY_MS 2000   // Continuous >= 14.0V before asserting malfunction (ignores brief load dumps)
+#define CHARGE_UNDERCHARGE_PERSIST_MS 4000 // Accumulated saturated-field undercharging before asserting malfunction
+#define CHARGE_RECOVERY_CONFIRM_MS 1000    // Continuous confirmed charging to clear latched undercharging fault
+#define CHARGE_SEVERE_HOLD_MS 1500         // Hold severe fault warning briefly past relay cooldown (catches cyclic trips)
+#define BATTERY_LOW_DELAY_MS 10000         // Continuous < 12.2V while running before asserting battery low warning
 #define CAN_HEALTH_SEND_INTERVAL_MS 200
 #define REGULATOR_HEARTBEAT_TIMEOUT_MS 500
 #define DISPLAY_METRICS_UPDATE_MS 250
@@ -131,28 +134,38 @@ inline bool isCanPacketFresh(unsigned long now, unsigned long packetTime, uint32
 #define ECO_INDICATOR_Y 18
 #define VACUUM_DISPLAY_X 182
 #define VACUUM_DISPLAY_Y 38
-// Closed-Loop (lambda = 1.0) Injector-Opening-to-MAP Ratio Model:
-// With a vacuum-referenced 3.8 bar FPR, net injector pulse per PSI of absolute manifold pressure
-// (MAP = baro_psi - vacuum_psi) is constant (~800 us/PSI on M111 2.0L @ 228 cc/min) in closed loop.
-// When the Bosch HFM ECU leaves closed loop for full-load or tip-in enrichment (lambda ~ 0.85),
-// actual injector opening per PSI of MAP jumps >= 12% above the self-learned closed-loop baseline.
-#define BASELINE_CL_INJ_US_PER_PSI 800.0f   // Default M111 2.0L closed-loop ratio (us net pulse per PSI MAP)
-#define CL_INJ_US_PER_PSI_MIN      500.0f   // Plausibility lower bound for learned closed-loop ratio
-#define CL_INJ_US_PER_PSI_MAX      1100.0f  // Plausibility upper bound for learned closed-loop ratio
-#define CL_LEARN_MIN_TEMP_C        70       // Engine fully warm (post warm-up enrichment) before learning baseline
-#define CL_LEARN_MIN_LOAD_RATIO    0.45f    // 45% load (~8.1 psi vac): lower bound of steady closed-loop learning window
-#define CL_LEARN_MAX_LOAD_RATIO    0.78f    // 78% load (~3.2 psi vac): upper bound (well below open-loop threshold)
-#define CL_LEARN_MAX_MAP_STEP_PSI  0.25f    // Max MAP change per 50ms frame to qualify as steady-state closed-loop
-#define ECO_ENRICH_MIN_LOAD_RATIO  0.72f    // Minimum load (72%, ~4.1 psi vac) to evaluate open-loop enrichment ratio
-#define ECO_ENRICH_RATIO_WARN      1.12f    // >= +12% injector opening over closed-loop MAP ratio (lambda <= 0.89): flash ECO
-#define ECO_ENRICH_RATIO_CLEAR     1.07f    // <= +7% injector opening over closed-loop MAP ratio: clear enrichment state
-#define LOAD_RATIO_ECO_WARNING     0.92f    // 92% engine load (~1.18 psi vac at sea level): hard WOT airflow saturation fallback
-#define LOAD_RATIO_ECO_CLEAR       0.85f    // 85% engine load (~2.2 psi vac at sea level): leave zone (hysteresis)
-#define ECO_SHOW_DELAY_MS          200      // Enrichment zone must persist this long before red ECO text flashes (ms)
-#define ECO_FLASH_INTERVAL_MS      200      // Flashing red ECO text ON/OFF cadence while active (ms)
-#define ECO_BEEP_DELAY_MS          750      // Enrichment zone must persist this long before buzzer pulses (ignores brief tip-ins)
-#define ECO_BEEP_ON_MS             200      // Pulsing beep ON duration while ECO buzzer is active (ms)
-#define ECO_BEEP_OFF_MS            200      // Pulsing beep OFF duration while ECO buzzer is active (ms)
+// Closed-Loop (lambda = 1.0) Injector-Opening-to-Effective-MAP Ratio Model:
+// With a vacuum-referenced 3.8 bar FPR, net injector pulse per PSI of effective manifold pressure
+// ((MAP - CL_RESIDUAL_PRESSURE_RATIO * baro) * ve_rel(rpm)) is constant (~900 us/PSI on M111 2.0L)
+// in closed loop. When the Bosch HFM ECU leaves closed loop for open-loop enrichment (lambda <= 0.86),
+// actual normalized injector opening jumps >= 16% above the self-learned closed-loop baseline.
+#define BASELINE_CL_INJ_US_PER_PSI   900.0f   // Default M111 2.0L residual- & VE-normalized closed-loop ratio (us/PSI)
+#define CL_INJ_US_PER_PSI_MIN        550.0f   // Plausibility lower bound for learned closed-loop ratio
+#define CL_INJ_US_PER_PSI_MAX        1350.0f  // Plausibility upper bound for learned closed-loop ratio
+#define CL_RESIDUAL_PRESSURE_RATIO   0.08f    // Exhaust-residual pressure offset fraction of baro
+#define CL_LEARN_MIN_TEMP_C          70       // Engine fully warm (post warm-up enrichment) before learning baseline
+#define CL_LEARN_POST_START_MS       10000UL  // Post-start enrichment grace window before learning baseline
+#define CL_LEARN_MIN_RPM             1400     // Lower RPM bound of steady closed-loop learning window
+#define CL_LEARN_MAX_RPM             3800     // Upper RPM bound of steady closed-loop learning window
+#define CL_LEARN_MIN_LOAD_RATIO      0.50f    // 50% load: lower bound of steady closed-loop learning window
+#define CL_LEARN_MAX_LOAD_RATIO      0.80f    // 80% load: upper bound (well below open-loop threshold)
+#define CL_LEARN_MAX_MAP_RATE_PSI_S  3.0f     // Steady manifold pressure ceiling (PSI/s) for learning
+#define CL_LEARN_MIN_SAMPLES         40       // ~2.0s of steady warm closed-loop samples to mark baseline learned
+#define CL_SESSION_FAST_SAMPLES      30       // ~1.5s faster EMA per drive to adapt to ambient IAT/weather shifts
+#define ECO_TRANSIENT_MAP_RATE_PSI_S 4.0f     // Bidirectional tip-in & tip-out transient guard (PSI/s)
+#define ECO_MIN_RPM                  1200     // Avoid clutch-launch / anti-stall enrichment below 1200 RPM
+#define ECO_POST_START_GRACE_MS      5000UL   // Skip brief warm after-start enrichment
+#define ECO_ENRICH_MIN_LOAD_RATIO    0.82f    // Minimum load (82%, above 3.0 PSI alternator cutoff & BSFC sweet spot)
+#define ECO_ENRICH_CLEAR_LOAD_RATIO  0.78f    // Load hysteresis exit for enrichment ratio evaluation
+#define ECO_ENRICH_RATIO_WARN        1.16f    // >= +16% normalized inj opening over closed-loop baseline (lambda <= 0.86)
+#define ECO_ENRICH_RATIO_CLEAR       1.10f    // <= +10% normalized inj opening over closed-loop baseline (lambda >= 0.91)
+#define LOAD_RATIO_ECO_WARNING       0.95f    // 95% engine load: fallback-only WOT threshold when ratio unavailable/unlearned
+#define LOAD_RATIO_ECO_CLEAR         0.92f    // 92% engine load: fallback hysteresis exit
+#define ECO_SHOW_DELAY_MS            500      // Enrichment zone must persist this long before red ECO text flashes (ms)
+#define ECO_FLASH_INTERVAL_MS        200      // Flashing red ECO text ON/OFF cadence while active (ms)
+#define ECO_BEEP_DELAY_MS            1500     // Enrichment zone must persist this long before buzzer pulses (1.0s visual lead)
+#define ECO_BEEP_ON_MS               120      // Pulsing beep ON duration while ECO buzzer is active (ms)
+#define ECO_BEEP_OFF_MS              480      // Pulsing beep OFF duration while ECO buzzer is active (ms)
 
 inline float getEcoWarningVacPsi() {
   return baro_psi * (1.0f - LOAD_RATIO_ECO_WARNING);
@@ -162,6 +175,9 @@ inline float getEcoClearVacPsi() {
 }
 inline float getEcoEnrichMinMapPsi() {
   return baro_psi * ECO_ENRICH_MIN_LOAD_RATIO;
+}
+inline float getEcoEnrichClearMapPsi() {
+  return baro_psi * ECO_ENRICH_CLEAR_LOAD_RATIO;
 }
 
 // --- Vacuum Leak Warning Configuration ---
@@ -235,7 +251,7 @@ constexpr int16_t AUTO_STOP_MIN_TEMP_C = 75;                   // Coolant temp >
 constexpr int16_t AUTO_STOP_MAX_TEMP_C = 98;                   // Coolant temp <= 98°C
 constexpr float AUTO_STOP_MIN_VOLTAGE = 12.00f;                // Min battery voltage to allow stop
 constexpr float AUTO_STOP_RESTART_VOLTAGE = 11.60f;            // Battery floor triggering auto-restart
-constexpr unsigned long AUTO_STOP_MAX_DURATION_MS = 90000;     // 90s max stop duration before restart
+constexpr unsigned long AUTO_STOP_MAX_DURATION_MS = 0;         // 0 = disabled (no timeout restart; vehicle remains stopped until brake release)
 constexpr unsigned long COLD_CRANK_PRIME_MS = 500;             // ECU cold boot & trigger sync delay (ms)
 constexpr unsigned long ECO_CRANK_PRIME_MS = 30;               // Fast warm restart prime delay (ms)
 constexpr float BASELINE_IDLE_FUEL_L_PER_HR = 0.90f;           // Idle fuel consumption baseline (L/h)

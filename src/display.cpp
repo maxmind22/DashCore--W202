@@ -89,6 +89,12 @@ void warnings(unsigned long now)
   {
     if (speed_on)
     {
+      if (chg || chg2)
+      {
+        tv.fillRect(WARNING_X + 10, WARNING_Y + 10, 140, 8, 0x00);
+        chg = false;
+        chg2 = false;
+      }
       tv.setCursor(WARNING_X + 30, WARNING_Y + 10);
       tv.setTextColor(0xFF);
       tv.print("OVER SPEED !");
@@ -202,42 +208,43 @@ void warnings(unsigned long now)
   }
   portENTER_CRITICAL(&dataMux);
   uint8_t local_charge_state = charge_state;
-  uint32_t local_last_charge = last_charge;
   portEXIT_CRITICAL(&dataMux);
 
-  if (local_charge_state == 1 && lowBlinkState &&
-      now - local_last_charge > CHARGE_MALFUNCTION_DELAY_MS && priority == 0)
+  if (priority == 0)
   {
-    if (!chg)
+    uint8_t want_charge_warn = (lowBlinkState && (local_charge_state == 1 || local_charge_state == 2))
+                                   ? local_charge_state
+                                   : 0;
+    uint8_t cur_charge_warn = chg ? 1 : (chg2 ? 2 : 0);
+
+    if (want_charge_warn != cur_charge_warn)
     {
-      tv.setCursor(WARNING_X + 10, WARNING_Y + 10);
-      tv.setTextColor(0xFF);
-      tv.print("CHARGING SYSTEM FAIL !");
-      chg = true;
+      if (cur_charge_warn != 0)
+      {
+        tv.fillRect(WARNING_X + 10, WARNING_Y + 10, 140, 8, 0x00);
+        chg = false;
+        chg2 = false;
+      }
+      if (want_charge_warn == 1)
+      {
+        tv.setCursor(WARNING_X + 10, WARNING_Y + 10);
+        tv.setTextColor(0xFF);
+        tv.print("CHARGING SYSTEM FAIL !");
+        chg = true;
+      }
+      else if (want_charge_warn == 2)
+      {
+        tv.setCursor(WARNING_X + 40, WARNING_Y + 10);
+        tv.setTextColor(0xFF);
+        tv.print("BATTERY LOW !");
+        chg2 = true;
+      }
     }
-    buzzer_state = true;
-  }
-  else if ((!lowBlinkState || local_charge_state != 1) && chg)
-  {
-    tv.fillRect(WARNING_X + 10, WARNING_Y + 10, 140, 8, 0x00);
-    chg = false;
-  }
-  if (local_charge_state == 2 && lowBlinkState &&
-      now - local_last_charge > BATTERY_LOW_DELAY_MS && priority == 0 && rpm > ENGINE_ACTIVE_RPM_THRESHOLD)
-  {
-    if (!chg2)
+
+    if (want_charge_warn != 0)
     {
-      tv.setCursor(WARNING_X + 40, WARNING_Y + 10);
-      tv.setTextColor(0xFF);
-      tv.print("BATTERY LOW !");
-      chg2 = true;
+      buzzer_state = true;
     }
-    buzzer_state = true;
-  }
-  else if ((!lowBlinkState || local_charge_state != 2) && chg2)
-  {
-    tv.fillRect(WARNING_X + 40, WARNING_Y + 10, 84, 8, 0x00);
-    chg2 = false;
   }
 
   // -------- Phone Key Detection Warning --------//
@@ -586,7 +593,7 @@ void warnings(unsigned long now)
     ecoStopDrawn = false;
   }
 
-  // -------- ECO Low-Vacuum Pulsing Warning Beep --------//
+  // -------- ECO Open-Loop Enrichment Pulsing Warning Beep --------//
   static unsigned long eco_beep_timer = 0;
   static bool eco_beep_state = false;
   if (eco_beep_active)

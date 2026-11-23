@@ -94,11 +94,19 @@ void regulatorTask(void *pvParameters) {
   static float active_pwm = 0.0f;
   static unsigned long last_regulator_time = 0;
   static uint32_t last_fuel_time = 0;
-  static unsigned long undercharging_start_time = 0;
   static unsigned long relay_trip_time = 0;
 
   unsigned long runningStartTime = 0;
   const unsigned long CHARGE_DELAY_MS = 2000; // 2 seconds delay before charging starts
+  unsigned long last_severe_time = 0;
+  bool severe_hold_active = false;
+  unsigned long overvoltage_start_time = 0;
+  bool overvoltage_latched = false;
+  uint32_t undercharging_accum_ms = 0;
+  uint32_t charging_ok_ms = 0;
+  bool unresponsiveness_fault = false;
+  unsigned long battery_low_start_time = 0;
+  unsigned long last_diag_time = 0;
 
   for (;;) {
     if (!regulatorTaskRunning) {
@@ -325,14 +333,40 @@ void regulatorTask(void *pvParameters) {
     ledcWrite(0, field_pwm);
 
     // --- 9. Diagnostics & Malfunction Detection ---
-    bool overvoltage_fault = (new_v >= REGULATOR_V_TARGET + 0.40f);
+    unsigned long diag_now = millis();
+    uint32_t diag_dt_ms = (last_diag_time == 0) ? 25UL : (uint32_t)(diag_now - last_diag_time);
+    if (diag_dt_ms > 250UL) {
+      diag_dt_ms = 250UL;
+    }
+    last_diag_time = diag_now;
 
-    // Broken belt / open circuit detection:
-    // Only evaluate if Front MCU is online, engine is running, start delay passed,
-    // high-load reduction is inactive (in A/C 0A mode, regulating around 0A leaves LiFePO4
-    // resting voltage <= 13.20V even under heavy excitation; genuine belt failure drops
-    // below REGULATOR_V_CUTOFF_FLOOR and exits accel_load_active), field is near 100%
-    // duty (saturated), engine RPM >= 1200, and voltage/current remain unresponsive.
+    // 9a. Severe hardware/sensor fault (emergency relay latched due to >=14.2V, >40A, or I2C/ADC failure)
+    // Hold briefly past the 5s relay cooldown so cyclic faults (e.g. shorted field MOSFET) don't drop the warning.
+    if (severe_failure) {
+      last_severe_time = diag_now;
+      severe_hold_active = true;
+    } else if (severe_hold_active && (diag_now - last_severe_time >= CHARGE_SEVERE_HOLD_MS)) {
+      severe_hold_active = false;
+    }
+    bool severe_warning = severe_failure || severe_hold_active;
+
+    // 9b. Sustained overvoltage fault (>= 14.0V for 2s; clears with hysteresis below 13.85V)
+    if (new_v >= REGULATOR_V_TARGET + 0.40f) {
+      if (overvoltage_start_time == 0) {
+        overvoltage_start_time = (diag_now != 0) ? diag_now : 1;
+      } else if (diag_now - overvoltage_start_time >= CHARGE_OVERVOLTAGE_DELAY_MS) {
+        overvoltage_latched = true;
+      }
+    } else {
+      overvoltage_start_time = 0;
+      if (new_v < REGULATOR_V_TARGET + 0.25f) {
+        overvoltage_latched = false;
+      }
+    }
+
+    // 9c. Broken belt / dead alternator / open field circuit detection:
+    // Sticky accumulator pauses during gear shifts, idle stops, accel cutoffs, and auto-stop
+    // so transient pauses don't erase fault progress; clears only on confirmed healthy charging or engine stop.
     bool undercharging_detected = false;
     if (frontMcuConnected && in_state == STATE_RUNNING && !delay_active && !accel_load_active) {
       if (field_pwm >= 900 && in_rpm >= 1200 &&
@@ -341,24 +375,58 @@ void regulatorTask(void *pvParameters) {
       }
     }
 
-    if (undercharging_detected) {
-      if (undercharging_start_time == 0) undercharging_start_time = millis();
+    bool charging_confirmed = (in_state == STATE_RUNNING && !delay_active && !accel_load_active &&
+                               !sensor_error && !relay_latched &&
+                               (new_v >= (REGULATOR_V_TARGET - 0.20f) || new_c >= 2.0f));
+
+    if (in_state != STATE_RUNNING && in_state != STATE_AUTO_STOP) {
+      undercharging_accum_ms = 0;
+      charging_ok_ms = 0;
+      unresponsiveness_fault = false;
+    } else if (undercharging_detected) {
+      charging_ok_ms = 0;
+      if (undercharging_accum_ms < CHARGE_UNDERCHARGE_PERSIST_MS) {
+        undercharging_accum_ms += diag_dt_ms;
+        if (undercharging_accum_ms >= CHARGE_UNDERCHARGE_PERSIST_MS) {
+          undercharging_accum_ms = CHARGE_UNDERCHARGE_PERSIST_MS;
+          unresponsiveness_fault = true;
+        }
+      } else {
+        unresponsiveness_fault = true;
+      }
+    } else if (charging_confirmed) {
+      uint32_t decay = diag_dt_ms * 2UL;
+      undercharging_accum_ms = (undercharging_accum_ms > decay) ? (undercharging_accum_ms - decay) : 0;
+      if (unresponsiveness_fault) {
+        charging_ok_ms += diag_dt_ms;
+        if (charging_ok_ms >= CHARGE_RECOVERY_CONFIRM_MS) {
+          unresponsiveness_fault = false;
+          undercharging_accum_ms = 0;
+          charging_ok_ms = 0;
+        }
+      }
     } else {
-      undercharging_start_time = 0;
+      charging_ok_ms = 0;
     }
 
-    // Persist for 3 continuous seconds before asserting malfunction
-    bool unresponsiveness_fault = (undercharging_start_time != 0 &&
-                                   (millis() - undercharging_start_time >= 3000));
-
-    bool logical_failure = overvoltage_fault || unresponsiveness_fault;
+    // 9d. Battery low while running (< 12.2V continuously for BATTERY_LOW_DELAY_MS)
+    bool battery_low_fault = false;
+    if (in_state == STATE_RUNNING && !delay_active && !sensor_error &&
+        new_v < (REGULATOR_V_TARGET - 1.40f)) {
+      if (battery_low_start_time == 0) {
+        battery_low_start_time = (diag_now != 0) ? diag_now : 1;
+      } else if (diag_now - battery_low_start_time >= BATTERY_LOW_DELAY_MS) {
+        battery_low_fault = true;
+      }
+    } else {
+      battery_low_start_time = 0;
+    }
 
     uint8_t next_charge_state = 0;
-    if (severe_failure || logical_failure) {
-      next_charge_state = 1; // Charging system malfunction warning
-    } else if (in_state == STATE_RUNNING && !delay_active &&
-               new_v < (REGULATOR_V_TARGET - 1.40f)) {
-      next_charge_state = 2; // Battery low warning (< 12.2V while running)
+    if (severe_warning || overvoltage_latched || unresponsiveness_fault) {
+      next_charge_state = 1; // Confirmed charging system malfunction warning
+    } else if (battery_low_fault) {
+      next_charge_state = 2; // Confirmed battery low warning (< 12.2V while running)
     } else {
       next_charge_state = 0; // Normal
     }
@@ -380,9 +448,6 @@ void regulatorTask(void *pvParameters) {
     voltage_filtered = new_v;
     current_A_filtered = new_c;
     charge_state = next_charge_state;
-    if (charge_state == 0) {
-      last_charge = millis();
-    }
     if (new_fuel_val >= 0) {
       ads_fuel = new_fuel_val;
     }

@@ -55,12 +55,14 @@ extern RTC_DATA_ATTR volatile float last_active_inj_pulse_us;
 extern RTC_DATA_ATTR volatile float last_active_dfco_map_psi;
 extern RTC_DATA_ATTR volatile float cl_inj_us_per_psi; // Learned closed-loop (lambda=1.0) net inj us per PSI MAP
 extern volatile float live_inj_us_per_psi;             // Live filtered net inj us per PSI MAP
+extern RTC_DATA_ATTR volatile bool cl_baseline_learned;
 
 extern int16_t spd;
 extern volatile uint16_t spd_t;
 extern volatile unsigned long lastPacketTime;
 extern volatile unsigned long lastFastPacketTime;
 extern volatile unsigned long lastEnvPacketTime;
+extern volatile unsigned long lastInjPacketTime;
 extern volatile float vacuum_psi;
 extern RTC_DATA_ATTR float baro_psi;
 extern volatile bool map_sensor_fault;
@@ -86,6 +88,5 @@ extern volatile float current_A_filtered;
 extern TaskHandle_t regulatorTaskHandle;
 extern volatile int16_t ads_fuel;
 extern volatile uint8_t charge_state;
-extern volatile uint32_t last_charge;
 extern volatile uint32_t last_regulator_heartbeat;
 extern volatile uint16_t rpm;
