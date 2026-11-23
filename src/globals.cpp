@@ -86,3 +86,21 @@ volatile int16_t ads_fuel = 0;
 volatile uint8_t charge_state = 0;
 volatile uint32_t last_regulator_heartbeat = 0;
 volatile uint16_t rpm = 0;
+
+volatile bool starterRelayActive = false;
+volatile unsigned long starterRelayOnMs = 0;
+volatile unsigned long starterRelayOffMs = 0;
+volatile uint8_t lastCrankOutcome = CRANK_OUTCOME_NONE;
+StarterCrankResult lastStarterResult = {};
+
+RTC_DATA_ATTR float starter_base_r_mohm = 0.0f;
+RTC_DATA_ATTR float starter_base_lat_ms = 40.0f;
+RTC_DATA_ATTR uint16_t starter_base_samples = 0;
+RTC_DATA_ATTR uint32_t starter_total_cranks = 0;
+RTC_DATA_ATTR uint8_t starter_degrade_strikes = 0;
+RTC_DATA_ATTR uint8_t starter_healthy_streak = 0;
+RTC_DATA_ATTR uint8_t starter_fault_code = STARTER_OK;
+
+uint8_t activeStarterAlert = STARTER_OK;
+unsigned long starterAlertStartMs = 0;
+unsigned long starterAlertUntilMs = 0;

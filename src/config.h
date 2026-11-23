@@ -222,6 +222,74 @@ inline float getIdleConfirmVacPsi() {
 #define FUEL_STARV_MIN_PULSE_US 6000.0f // > 6000us (6ms): lean trim (weak fuel pump, clogged filter, low rail pressure, clogged injector)
 #define FPR_LEAK_DETECT_PERSIST_MS 8000UL // 8 seconds continuous abnormal idle to confirm steady-state condition
 
+// --- Starter Motor Degradation Diagnostic Configuration ---
+#define STARTER_ENGAGE_CURRENT_A      40.0f   // Starter current threshold indicating solenoid main contacts closed (A)
+#define STARTER_INRUSH_SKIP_MS        100UL   // Skip initial locked-rotor inrush spike before steady R_eff window (ms)
+#define STARTER_STEADY_END_MS         450UL   // End of steady loaded cranking window post-engage (ms)
+#define STARTER_STEADY_MIN_CURRENT_A  25.0f   // Minimum starter current to include in loaded steady window (A)
+#define STARTER_MIN_STEADY_SAMPLES    10      // Minimum raw V/I samples (~70ms @ 860SPS) for valid R_eff
+#define STARTER_DROPOUT_ARM_MS        120UL   // Ignore dips during initial engagement/inrush (ms)
+#define STARTER_DROPOUT_LOW_A         25.0f   // Current dip floor indicating brush bounce / contact chatter (A)
+#define STARTER_DROPOUT_RECOVER_A     50.0f   // Recovery threshold confirming transient dropout (not engine catch) (A)
+#define STARTER_DROPOUT_WARN_COUNT    2       // Dropouts in one crank flagging contact/brush chatter
+#define STARTER_WARM_TEMP_C           65      // Minimum coolant temp (°C) for warm baseline learning & R_eff drift checks
+#define STARTER_MIN_VALID_V           9.50f   // Minimum crank voltage floor (isolates weak/discharged battery)
+#define STARTER_MAX_BAT_R_INT_MOHM    30.0f   // Suppress starter R_eff drift if battery R_int exceeds this (mOhm)
+#define STARTER_R_MIN_VALID_MOHM      20.0f   // Plausibility lower bound for effective starter impedance (mOhm)
+#define STARTER_R_MAX_VALID_MOHM      250.0f  // Plausibility upper bound for effective starter impedance (mOhm)
+#define STARTER_LEARN_R_MIN_MOHM      30.0f   // Healthy initial baseline learning lower bound (mOhm)
+#define STARTER_LEARN_R_MAX_MOHM      140.0f  // Healthy initial baseline learning upper bound (mOhm)
+#define STARTER_LEARN_MIN_STARTS      8       // Warm starts required to establish baseline
+#define STARTER_HIGH_RES_RATIO        1.30f   // >= +30% R_eff: worn brushes, pitted solenoid contacts, bad cable/ground
+#define STARTER_HIGH_DRAG_RATIO       0.72f   // <= -28% R_eff (+39% amps): pole drag, bushings, planetary gear, shorted winding
+#define STARTER_LATENCY_WARN_MS       150     // Learned solenoid engagement latency warning floor (ms)
+#define STARTER_LATENCY_DELTA_MS      80.0f   // Engagement latency rise above learned baseline (ms)
+#define STARTER_LATENCY_UNLEARNED_MS  180     // Solenoid engagement latency warning before baseline is learned (ms)
+#define STARTER_SLIP_MAX_PEAK_A       95.0f   // Max peak starter current on timeout to classify Bendix free-spin slip (A)
+#define STARTER_SLIP_MAX_STEADY_A     80.0f   // Max steady starter current on timeout to classify Bendix free-spin slip (A)
+#define STARTER_FAULT_STRIKES         3       // Consecutive abnormal starts before asserting chronic degradation warning
+#define STARTER_RECOVERY_STARTS       2       // Consecutive healthy warm starts to auto-clear latched chronic warning
+#define STARTER_ALERT_HOLD_MS         20000UL // Duration to blink starter warning on HUD (ms)
+
+enum CrankOutcome : uint8_t
+{
+  CRANK_OUTCOME_NONE = 0,
+  CRANK_OUTCOME_SUCCESS = 1,
+  CRANK_OUTCOME_TIMEOUT = 2,
+  CRANK_OUTCOME_ABORT = 3
+};
+
+enum StarterFaultCode : uint8_t
+{
+  STARTER_OK = 0,
+  STARTER_FAULT_HIGH_RES = 1,  // Rising R_eff: worn brushes, pitted solenoid contacts, corroded cable/ground
+  STARTER_FAULT_HIGH_DRAG = 2, // Falling R_eff: worn bushings/pole drag, planetary gear wear, shorted winding
+  STARTER_FAULT_SOLENOID = 3,  // Slow solenoid engagement or contact/brush dropouts
+  STARTER_FAULT_NO_CRANK = 4,  // Acute: crank timeout with current never crossing engage threshold
+  STARTER_FAULT_SLIP = 5       // Acute: crank timeout with unloaded motor free-spin current (Bendix slip)
+};
+
+struct StarterCrankResult
+{
+  float peak_total_a;
+  float peak_starter_a;
+  float steady_i_a;
+  float steady_v;
+  float r_eff_mohm;
+  float min_crank_v;
+  uint16_t engage_latency_ms;
+  uint16_t crank_duration_ms;
+  uint8_t dropout_count;
+  uint8_t steady_samples;
+  bool engaged;
+  bool valid_r_eff;
+  bool sensor_err;
+  uint8_t outcome;
+  int16_t coolant_temp_c;
+  bool env_fresh;
+  uint32_t seq;
+};
+
 // Fuel/Trip Constants
 constexpr float PULSES_PER_KM_F = 24714.33f;
 constexpr uint8_t LOW_FUEL_LEVEL = 10;

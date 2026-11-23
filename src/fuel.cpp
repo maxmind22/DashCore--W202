@@ -85,6 +85,12 @@ void loadTripDataFromNVS() {
   float saved_cl_us_psi = has_cl_norm
                               ? prefs.getFloat("cl_norm_psi", BASELINE_CL_INJ_US_PER_PSI)
                               : BASELINE_CL_INJ_US_PER_PSI;
+  starter_base_r_mohm = prefs.getFloat("str_r_m", 0.0f);
+  starter_base_lat_ms = prefs.getFloat("str_lat", 40.0f);
+  starter_base_samples = prefs.getUShort("str_cnt", 0);
+  starter_total_cranks = prefs.getUInt("str_tot", 0);
+  starter_degrade_strikes = prefs.getUChar("str_strk", 0);
+  uint8_t saved_str_flt = prefs.getUChar("str_flt", STARTER_OK);
   prefs.end();
 
   total_fuel_liters = sanitizeTripValue(total_fuel_liters);
@@ -92,6 +98,18 @@ void loadTripDataFromNVS() {
   total_fuel_saved_liters = sanitizeTripValue(total_fuel_saved_liters);
   if (isnan(compounded_r_int) || compounded_r_int < 0.0f)
     compounded_r_int = 0.0f;
+  if (isnan(starter_base_r_mohm) || isinf(starter_base_r_mohm) ||
+      starter_base_r_mohm < STARTER_R_MIN_VALID_MOHM ||
+      starter_base_r_mohm > STARTER_R_MAX_VALID_MOHM) {
+    starter_base_r_mohm = 0.0f;
+    starter_base_samples = 0;
+  }
+  if (isnan(starter_base_lat_ms) || isinf(starter_base_lat_ms) ||
+      starter_base_lat_ms <= 0.0f || starter_base_lat_ms > 500.0f) {
+    starter_base_lat_ms = 40.0f;
+  }
+  starter_fault_code = (saved_str_flt <= STARTER_FAULT_SOLENOID) ? saved_str_flt : STARTER_OK;
+  starter_healthy_streak = 0;
   if (isnan(last_known_avg_l_100km) || last_known_avg_l_100km < 3.0f ||
       last_known_avg_l_100km > 30.0f)
     last_known_avg_l_100km = DEFAULT_CONSUMPTION_L_100KM;
@@ -144,6 +162,12 @@ void saveTripDataToNVS() {
   if (cl_learned) {
     prefs.putFloat("cl_norm_psi", cl_us_psi);
   }
+  prefs.putFloat("str_r_m", starter_base_r_mohm);
+  prefs.putFloat("str_lat", starter_base_lat_ms);
+  prefs.putUShort("str_cnt", starter_base_samples);
+  prefs.putUInt("str_tot", starter_total_cranks);
+  prefs.putUChar("str_strk", starter_degrade_strikes);
+  prefs.putUChar("str_flt", (starter_fault_code <= STARTER_FAULT_SOLENOID) ? starter_fault_code : STARTER_OK);
   prefs.end();
 }
 

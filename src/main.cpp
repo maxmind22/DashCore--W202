@@ -6,6 +6,7 @@
 #include "can_comm.h"
 #include "fuel.h"
 #include "security.h"
+#include "starter_diag.h"
 #include <Adafruit_ADS1X15.h>
 #include <ESP_8_BIT_GFX.h>
 #include <Fonts/FreeSansBold24pt7b.h>
@@ -135,7 +136,7 @@ void setup()
   {
     adc.setGain(GAIN_ONE); // 1x gain for ±4.096V range, adjust if your input
                            // exceeds this
-    adc.setDataRate(RATE_ADS1115_250SPS);
+    adc.setDataRate(RATE_ADS1115_860SPS);
   }
   setupBLESecurity(); // Initialize BLE scanner to detect phone (auto-shuts down upon detection)
   tv.begin();
@@ -192,7 +193,6 @@ void setup()
 // ===================== main loop ======================//
 void loop()
 {
-  // uint32_t start = micros();
   unsigned long now = millis();
 
   //============= send health signal to front MCU (only when POS2/IGN is active) ==================
@@ -676,6 +676,30 @@ void loop()
     }
   }
 
+  static uint32_t lastProcessedStarterSeq = 0;
+  static StarterCrankResult latestStarterForDisplay = {};
+  static bool hasStarterForDisplay = false;
+  static bool was_starter_metrics_drawn = false;
+
+  StarterCrankResult starterSnap;
+  portENTER_CRITICAL(&dataMux);
+  starterSnap = lastStarterResult;
+  portEXIT_CRITICAL(&dataMux);
+
+  if (currentState == STATE_CRANKING)
+  {
+    activeStarterAlert = STARTER_OK;
+    hasStarterForDisplay = false;
+  }
+
+  if (starterSnap.seq != lastProcessedStarterSeq)
+  {
+    lastProcessedStarterSeq = starterSnap.seq;
+    evaluateStarterHealth(starterSnap, now);
+    latestStarterForDisplay = starterSnap;
+    hasStarterForDisplay = (starterSnap.outcome == CRANK_OUTCOME_SUCCESS);
+  }
+
   bool show_crank_amps =
       (currentState == STATE_RUNNING && startedRunningTime != 0 &&
        (now - startedRunningTime < 5000));
@@ -707,6 +731,56 @@ void loop()
     tv.setTextColor(0xFF, 0x00);
     tv.print("                   "); // Erase with spaces
     was_cranking_amps_drawn = false;
+  }
+
+  if (show_crank_amps && hasStarterForDisplay)
+  {
+    if (!was_starter_metrics_drawn)
+    {
+      char bufStr[24];
+      uint8_t str_color = 0xFF; // White while learning
+      bool base_ready = (starter_base_samples >= STARTER_LEARN_MIN_STARTS);
+      if (starter_fault_code != STARTER_OK)
+      {
+        str_color = 0xE0; // Red on fault
+      }
+      else if (base_ready)
+      {
+        str_color = 0x1C; // Green when learned & healthy
+      }
+
+      if (latestStarterForDisplay.valid_r_eff)
+      {
+        if (!base_ready)
+        {
+          snprintf(bufStr, sizeof(bufStr), "STR %3.0fm L%u/%u",
+                   latestStarterForDisplay.r_eff_mohm,
+                   (unsigned)starter_base_samples,
+                   (unsigned)STARTER_LEARN_MIN_STARTS);
+        }
+        else
+        {
+          snprintf(bufStr, sizeof(bufStr), "STR %3.0fm %3ums",
+                   latestStarterForDisplay.r_eff_mohm,
+                   (unsigned)latestStarterForDisplay.engage_latency_ms);
+        }
+      }
+      else
+      {
+        snprintf(bufStr, sizeof(bufStr), "STR %3ums",
+                 (unsigned)latestStarterForDisplay.engage_latency_ms);
+      }
+
+      tv.setCursor(5, 80);
+      tv.setTextColor(str_color, 0x00);
+      tv.print(bufStr);
+      was_starter_metrics_drawn = true;
+    }
+  }
+  else if (was_starter_metrics_drawn)
+  {
+    tv.fillRect(5, 80, 102, 8, 0x00);
+    was_starter_metrics_drawn = false;
   }
 
   lastStateDisplay = currentState;
@@ -1025,8 +1099,6 @@ void loop()
     rtc_run_marker = 0;
     rtc_run_marker_inv = 0;
   }
-  // debug
-  // Serial.print("current: ");
-  // Serial.println(current_A_filtered);
+
   esp_task_wdt_reset();
 }

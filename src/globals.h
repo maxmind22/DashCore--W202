@@ -90,3 +90,21 @@ extern volatile int16_t ads_fuel;
 extern volatile uint8_t charge_state;
 extern volatile uint32_t last_regulator_heartbeat;
 extern volatile uint16_t rpm;
+
+extern volatile bool starterRelayActive;
+extern volatile unsigned long starterRelayOnMs;
+extern volatile unsigned long starterRelayOffMs;
+extern volatile uint8_t lastCrankOutcome;
+extern StarterCrankResult lastStarterResult;
+
+extern RTC_DATA_ATTR float starter_base_r_mohm;
+extern RTC_DATA_ATTR float starter_base_lat_ms;
+extern RTC_DATA_ATTR uint16_t starter_base_samples;
+extern RTC_DATA_ATTR uint32_t starter_total_cranks;
+extern RTC_DATA_ATTR uint8_t starter_degrade_strikes;
+extern RTC_DATA_ATTR uint8_t starter_healthy_streak;
+extern RTC_DATA_ATTR uint8_t starter_fault_code;
+
+extern uint8_t activeStarterAlert;
+extern unsigned long starterAlertStartMs;
+extern unsigned long starterAlertUntilMs;

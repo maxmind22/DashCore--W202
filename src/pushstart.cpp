@@ -202,7 +202,7 @@ static bool isEngineRunning(unsigned long now = 0)
   return false;
 }
 
-static void setRelays(bool acc, bool ign, bool start)
+static void setRelays(bool acc, bool ign, bool start, uint8_t crankOutcome = CRANK_OUTCOME_NONE)
 {
   // HARDWARE SAFETY INTERLOCK:
   // Strictly prevent starter engagement if system state is not actively in STATE_CRANKING
@@ -219,6 +219,27 @@ static void setRelays(bool acc, bool ign, bool start)
   digitalWrite(PIN_RELAY_ACC, acc ? HIGH : LOW);
   digitalWrite(PIN_RELAY_IGN, ign ? HIGH : LOW);
   digitalWrite(PIN_RELAY_START, start ? HIGH : LOW);
+
+  static bool lastStartRelay = false;
+  if (start && !lastStartRelay)
+  {
+    unsigned long relayNow = millis();
+    portENTER_CRITICAL(&dataMux);
+    starterRelayActive = true;
+    starterRelayOnMs = relayNow;
+    lastCrankOutcome = CRANK_OUTCOME_NONE;
+    portEXIT_CRITICAL(&dataMux);
+  }
+  else if (!start && lastStartRelay)
+  {
+    unsigned long relayNow = millis();
+    portENTER_CRITICAL(&dataMux);
+    starterRelayActive = false;
+    starterRelayOffMs = relayNow;
+    lastCrankOutcome = crankOutcome;
+    portEXIT_CRITICAL(&dataMux);
+  }
+  lastStartRelay = start;
 }
 
 static void stopTVDisplay()
@@ -727,7 +748,7 @@ void processPushStart(unsigned long now)
     if (!isPhoneAuthorized())
     {
       // Serial.println("[DEBUG] Cranking aborted: Engine start not authorized");
-      setRelays(true, false, false); // Abort cranking immediately
+      setRelays(true, false, false, CRANK_OUTCOME_ABORT); // Abort cranking immediately
       currentState = STATE_ACC;
       playAuthWarningTone();
       crankStage = CRANK_PRIME;
@@ -801,7 +822,7 @@ void processPushStart(unsigned long now)
       {
         // Engine started successfully
         currentState = STATE_RUNNING;
-        setRelays(true, true, false); // Disengage starter, keep ACC/IGN on
+        setRelays(true, true, false, CRANK_OUTCOME_SUCCESS); // Disengage starter, keep ACC/IGN on
         lastEngineStartTime = now;    // Record start time for cooldown tracking
         standstillStartTime = 0;
         isEcoRestart = false;
@@ -813,7 +834,7 @@ void processPushStart(unsigned long now)
       {
         // Cranking failed or timed out (5s safety cutoff)
         Serial.println("[DEBUG] Cranking aborted: Timed out (exceeded MAX_CRANK_TIME_MS)");
-        setRelays(true, false, false); // Disengage starter to ACC for another try (w202 prevent double starting)
+        setRelays(true, false, false, CRANK_OUTCOME_TIMEOUT); // Disengage starter to ACC for another try (w202 prevent double starting)
         currentState = STATE_ACC;
         standbyStartTime = now; // Reset 2-min timeout
         isEcoRestart = false;

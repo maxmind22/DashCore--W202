@@ -575,6 +575,64 @@ void warnings(unsigned long now)
     fuel_diag_drawn = false;
   }
 
+  // -------- Starter Motor Degradation Warning --------//
+  static bool starter_alert_drawn = false;
+  if (activeStarterAlert != STARTER_OK && (int32_t)(now - starterAlertUntilMs) >= 0)
+  {
+    activeStarterAlert = STARTER_OK;
+  }
+  bool starter_alert_active = (activeStarterAlert != STARTER_OK) &&
+                              ((int32_t)(now - starterAlertStartMs) >= 0) &&
+                              ((int32_t)(now - starterAlertUntilMs) < 0);
+
+  if (starter_alert_active && !vac_leak_active && !air_filter_active &&
+      !idle_sw_fault_active && fuel_diag_fault == 0 && priority == 0)
+  {
+    if (lowBlinkState)
+    {
+      if (!starter_alert_drawn)
+      {
+        tv.setTextColor(0xE0); // Red in 8-bit palette
+        switch (activeStarterAlert)
+        {
+        case STARTER_FAULT_HIGH_RES:
+          tv.setCursor(WARNING_X + 20, WARNING_Y + 50);
+          tv.print("STARTER CONTACTS");
+          break;
+        case STARTER_FAULT_HIGH_DRAG:
+          tv.setCursor(WARNING_X + 15, WARNING_Y + 50);
+          tv.print("STARTER HIGH DRAG");
+          break;
+        case STARTER_FAULT_SOLENOID:
+          tv.setCursor(WARNING_X + 26, WARNING_Y + 50);
+          tv.print("SOLENOID DELAY");
+          break;
+        case STARTER_FAULT_NO_CRANK:
+          tv.setCursor(WARNING_X + 20, WARNING_Y + 50);
+          tv.print("STARTER NO CRANK");
+          break;
+        case STARTER_FAULT_SLIP:
+          tv.setCursor(WARNING_X + 20, WARNING_Y + 50);
+          tv.print("STARTER SLIPPING");
+          break;
+        default:
+          break;
+        }
+        starter_alert_drawn = true;
+      }
+    }
+    else if (starter_alert_drawn)
+    {
+      tv.fillRect(WARNING_X + 15, WARNING_Y + 50, 108, 8, 0x00);
+      starter_alert_drawn = false;
+    }
+  }
+  else if (starter_alert_drawn)
+  {
+    tv.fillRect(WARNING_X + 15, WARNING_Y + 50, 108, 8, 0x00);
+    starter_alert_drawn = false;
+  }
+
   // -------- Auto Start-Stop Active Indicator --------//
   static bool ecoStopDrawn = false;
   if (currentState == STATE_AUTO_STOP)

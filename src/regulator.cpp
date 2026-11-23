@@ -108,6 +108,26 @@ void regulatorTask(void *pvParameters) {
   unsigned long battery_low_start_time = 0;
   unsigned long last_diag_time = 0;
 
+  float pre_crank_discharge_a = 0.0f;
+  bool pre_crank_i_init = false;
+  bool crank_cap_active = false;
+  unsigned long cap_relay_on_ms = 0;
+  unsigned long cap_engage_ms = 0;
+  float cap_base_discharge_a = 0.0f;
+  float cap_peak_total_a = 0.0f;
+  float cap_peak_starter_a = 0.0f;
+  float cap_min_v = 99.0f;
+  float cap_steady_v_sum = 0.0f;
+  float cap_steady_i_sum = 0.0f;
+  uint16_t cap_steady_samples = 0;
+  uint16_t cap_engage_latency_ms = 0;
+  bool cap_engaged = false;
+  bool cap_steady_closed = false;
+  bool cap_in_dropout = false;
+  bool cap_had_sensor_err = false;
+  uint8_t cap_dropout_count = 0;
+  uint32_t cap_seq = 0;
+
   for (;;) {
     if (!regulatorTaskRunning) {
       esp_task_wdt_delete(NULL);
@@ -126,6 +146,9 @@ void regulatorTask(void *pvParameters) {
 
     float new_v = voltage_filtered;
     float new_c = current_A_filtered;
+    float raw_v = new_v;
+    float raw_c = new_c;
+    bool raw_sample_valid = false;
 
     if (voltage_raw > 0 && current_raw_t > 0) {
       consecutive_failures = 0;
@@ -140,6 +163,9 @@ void regulatorTask(void *pvParameters) {
           (current_mv - current_sensor_offset_mv) / current_sensor_mV_per_A;
       new_c = current_alpha * current_raw +
               (1.0f - current_alpha) * current_A_filtered;
+      raw_v = voltage;
+      raw_c = current_raw;
+      raw_sample_valid = true;
     } else {
       consecutive_failures++;
       if (consecutive_failures > 50) {
@@ -152,7 +178,7 @@ void regulatorTask(void *pvParameters) {
         Wire.setTimeOut(20); // Ensure I2C transaction timeout is set in recovery
         adc.begin();
         adc.setGain(GAIN_ONE);
-        adc.setDataRate(RATE_ADS1115_250SPS);
+        adc.setDataRate(RATE_ADS1115_860SPS);
         consecutive_failures = 0;
       }
     }
@@ -197,16 +223,150 @@ void regulatorTask(void *pvParameters) {
     bool in_map_fault = map_sensor_fault;
     int in_temp = temp_out;
     uint8_t in_ac = ac_switch_state;
+    bool in_relay_active = starterRelayActive;
+    unsigned long in_relay_on_ms = starterRelayOnMs;
+    unsigned long in_relay_off_ms = starterRelayOffMs;
+    uint8_t in_crank_outcome = lastCrankOutcome;
     portEXIT_CRITICAL(&dataMux);
 
     unsigned long reg_now = millis();
     bool frontMcuConnected = isCanPacketFresh(reg_now, in_last_packet, FRONT_MCU_CAN_TIMEOUT_MS);
 
+    // --- 3b. High-Speed Starter Waveform Capture (860 SPS unfiltered during crank) ---
+    bool crank_fast_mode = (in_state == STATE_CRANKING || in_relay_active);
+
+    if (!in_relay_active && in_state != STATE_RUNNING && raw_sample_valid) {
+      float disch_a = -raw_c;
+      if (disch_a < 0.0f) disch_a = 0.0f;
+      if (disch_a > 40.0f) disch_a = 40.0f;
+      if (!pre_crank_i_init) {
+        pre_crank_discharge_a = disch_a;
+        pre_crank_i_init = true;
+      } else {
+        pre_crank_discharge_a = 0.30f * disch_a + 0.70f * pre_crank_discharge_a;
+      }
+    }
+
+    if (in_relay_active && !crank_cap_active) {
+      crank_cap_active = true;
+      cap_relay_on_ms = in_relay_on_ms;
+      cap_engage_ms = 0;
+      cap_base_discharge_a = pre_crank_i_init ? pre_crank_discharge_a : 0.0f;
+      cap_peak_total_a = 0.0f;
+      cap_peak_starter_a = 0.0f;
+      cap_min_v = 99.0f;
+      cap_steady_v_sum = 0.0f;
+      cap_steady_i_sum = 0.0f;
+      cap_steady_samples = 0;
+      cap_engage_latency_ms = 0;
+      cap_engaged = false;
+      cap_steady_closed = false;
+      cap_in_dropout = false;
+      cap_had_sensor_err = false;
+      cap_dropout_count = 0;
+    }
+
+    if (crank_cap_active && in_relay_active) {
+      if (sensor_error) {
+        cap_had_sensor_err = true;
+      }
+      if (raw_sample_valid) {
+        float total_disch_a = (raw_c < 0.0f) ? -raw_c : 0.0f;
+        float starter_a = total_disch_a - cap_base_discharge_a;
+        if (starter_a < 0.0f) starter_a = 0.0f;
+
+        if (total_disch_a > cap_peak_total_a) cap_peak_total_a = total_disch_a;
+        if (starter_a > cap_peak_starter_a) cap_peak_starter_a = starter_a;
+        if (raw_v < cap_min_v) cap_min_v = raw_v;
+
+        uint32_t since_relay_on = ((int32_t)(reg_now - cap_relay_on_ms) > 0)
+                                      ? (uint32_t)(reg_now - cap_relay_on_ms)
+                                      : 0UL;
+        if (!cap_engaged && starter_a >= STARTER_ENGAGE_CURRENT_A) {
+          cap_engaged = true;
+          cap_engage_ms = reg_now;
+          cap_engage_latency_ms = (since_relay_on <= 65535UL) ? (uint16_t)since_relay_on : 65535U;
+        }
+
+        if (cap_engaged) {
+          uint32_t since_engage = ((int32_t)(reg_now - cap_engage_ms) > 0)
+                                      ? (uint32_t)(reg_now - cap_engage_ms)
+                                      : 0UL;
+          if (!cap_steady_closed &&
+              since_engage >= STARTER_INRUSH_SKIP_MS &&
+              since_engage <= STARTER_STEADY_END_MS) {
+            if (cap_steady_samples >= 12) {
+              float running_mean_i = cap_steady_i_sum / (float)cap_steady_samples;
+              if (starter_a < 0.50f * running_mean_i) {
+                cap_steady_closed = true;
+              }
+            }
+            if (!cap_steady_closed && starter_a >= STARTER_STEADY_MIN_CURRENT_A) {
+              cap_steady_v_sum += raw_v;
+              cap_steady_i_sum += starter_a;
+              cap_steady_samples++;
+            }
+          } else if (since_engage > STARTER_STEADY_END_MS) {
+            cap_steady_closed = true;
+          }
+
+          if (since_engage >= STARTER_DROPOUT_ARM_MS) {
+            if (!cap_in_dropout) {
+              if (starter_a < STARTER_DROPOUT_LOW_A) {
+                cap_in_dropout = true;
+              }
+            } else if (starter_a >= STARTER_DROPOUT_RECOVER_A) {
+              cap_in_dropout = false;
+              if (cap_dropout_count < 255) {
+                cap_dropout_count++;
+              }
+            }
+          }
+        }
+      }
+    } else if (crank_cap_active && !in_relay_active) {
+      crank_cap_active = false;
+      StarterCrankResult res = {};
+      res.peak_total_a = cap_peak_total_a;
+      res.peak_starter_a = cap_peak_starter_a;
+      res.min_crank_v = (cap_min_v < 90.0f) ? cap_min_v : raw_v;
+      res.engage_latency_ms = cap_engage_latency_ms;
+      int32_t dur_ms = (int32_t)(in_relay_off_ms - cap_relay_on_ms);
+      res.crank_duration_ms = (dur_ms > 0)
+                                  ? ((dur_ms <= 65535L) ? (uint16_t)dur_ms : 65535U)
+                                  : 0U;
+      res.dropout_count = cap_dropout_count;
+      res.steady_samples = (cap_steady_samples <= 255) ? (uint8_t)cap_steady_samples : 255U;
+      res.engaged = cap_engaged;
+      res.sensor_err = cap_had_sensor_err || sensor_error;
+      res.outcome = in_crank_outcome;
+      res.coolant_temp_c = (int16_t)in_temp;
+      res.env_fresh = isCanPacketFresh(reg_now, in_last_env, FRONT_MCU_TIMEOUT_MS);
+
+      if (cap_steady_samples >= STARTER_MIN_STEADY_SAMPLES && cap_steady_i_sum > 1.0f) {
+        res.steady_v = cap_steady_v_sum / (float)cap_steady_samples;
+        res.steady_i_a = cap_steady_i_sum / (float)cap_steady_samples;
+        res.r_eff_mohm = (res.steady_v / res.steady_i_a) * 1000.0f;
+        res.valid_r_eff = (res.r_eff_mohm >= STARTER_R_MIN_VALID_MOHM &&
+                           res.r_eff_mohm <= STARTER_R_MAX_VALID_MOHM);
+      } else {
+        res.steady_v = 0.0f;
+        res.steady_i_a = 0.0f;
+        res.r_eff_mohm = 0.0f;
+        res.valid_r_eff = false;
+      }
+
+      res.seq = ++cap_seq;
+      portENTER_CRITICAL(&dataMux);
+      lastStarterResult = res;
+      portEXIT_CRITICAL(&dataMux);
+    }
+
     // --- 4. Loop Timing dt Calculation ---
     uint32_t current_micros = micros();
     float dt = (current_micros - last_regulator_time) / 1000000.0f;
     if (last_regulator_time == 0 || dt > 0.1f || dt <= 0.0f) {
-      dt = 0.025f; // Default nominal loop time
+      dt = 0.010f; // Default nominal loop time
     }
     last_regulator_time = current_micros;
 
@@ -334,7 +494,7 @@ void regulatorTask(void *pvParameters) {
 
     // --- 9. Diagnostics & Malfunction Detection ---
     unsigned long diag_now = millis();
-    uint32_t diag_dt_ms = (last_diag_time == 0) ? 25UL : (uint32_t)(diag_now - last_diag_time);
+    uint32_t diag_dt_ms = (last_diag_time == 0) ? 10UL : (uint32_t)(diag_now - last_diag_time);
     if (diag_dt_ms > 250UL) {
       diag_dt_ms = 250UL;
     }
@@ -431,10 +591,10 @@ void regulatorTask(void *pvParameters) {
       next_charge_state = 0; // Normal
     }
 
-    // --- 10. Sample Auxiliary Fuel ADC (every 2s, immediately on first pass) ---
+    // --- 10. Sample Auxiliary Fuel ADC (every 2s, immediately on first pass; skipped during fast crank capture) ---
     static bool fuel_first_read_pending = true;
     int16_t new_fuel_val = -1;
-    if (fuel_first_read_pending || current_micros - last_fuel_time >= FUEL_ADC_INTERVAL_US) {
+    if (!crank_fast_mode && (fuel_first_read_pending || current_micros - last_fuel_time >= FUEL_ADC_INTERVAL_US)) {
       int16_t read_f = readADC_Timeout(2, 25);
       if (read_f >= 0) {
         new_fuel_val = read_f;
@@ -453,7 +613,7 @@ void regulatorTask(void *pvParameters) {
     }
     portEXIT_CRITICAL(&dataMux);
 
-    vTaskDelay(pdMS_TO_TICKS(20)); // Yield CPU to Core 0 scheduler
+    vTaskDelay(pdMS_TO_TICKS(crank_fast_mode ? 1 : 5)); // Yield CPU to Core 0 scheduler
     last_regulator_heartbeat = millis(); // Signal Core 1 that regulator is alive
     esp_task_wdt_reset();
   }
